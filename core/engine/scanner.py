@@ -65,6 +65,12 @@ class Scanner:
         except Exception:
             return None
 
+    def get_signatures_info(self) -> dict:
+        return self.intel.get_db_info()
+
+    def update_signatures(self):
+        self.intel.touch_updates()
+
     def scan_file(self, target_fd: Optional[int] = None, file_path: Optional[str] = None) -> ScanResult:
         path = f"/proc/self/fd/{target_fd}" if (target_fd is not None and target_fd >= 0) else file_path
         if not path or not os.path.exists(path):

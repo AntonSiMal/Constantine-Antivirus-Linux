@@ -159,6 +159,11 @@ class QuarantineVault:
             manifest.append(entry)
             self._save_manifest(manifest)
             logger.info("📦 Proceso de RAM aislado en Baúl con AES-256-GCM: PID %d -> %s", pid, vault_id)
+            try:
+                from core.engine.notifier import DesktopNotifier
+                DesktopNotifier().alert_threat_blocked(threat_name, orig_path, pid, proc_name)
+            except Exception:
+                pass
             return vault_id
         except Exception as e:
             logger.error("Error aislando proceso en cuarentena: %s", e)
@@ -211,6 +216,11 @@ class QuarantineVault:
             self._save_manifest(manifest)
 
             logger.critical("[BAÚL] Amenaza aislada: %s -> ID: %s (%s)", file_path, vault_id, now_str)
+            try:
+                from core.engine.notifier import DesktopNotifier
+                DesktopNotifier().alert_threat_blocked(threat_name, file_path, os.getpid(), detected_by)
+            except Exception:
+                pass
             return vault_id
         except Exception as e:
             logger.error("Error al aislar en baúl: %s", e)

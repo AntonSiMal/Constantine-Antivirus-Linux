@@ -9,12 +9,31 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Preguntar confirmación al usuario
-echo "Este asistente eliminará Constantine Antivirus de tu sistema."
-read -p "¿Estás seguro de que deseas desinstalar Constantine? (s/N): " confirm
-if [[ ! "$confirm" =~ ^[sS]$ ]]; then
-  echo "Desinstalación cancelada por el usuario."
-  exit 0
+NON_INTERACTIVE=false
+PURGE_VAULT=false
+
+for arg in "$@"; do
+  case $arg in
+    -y|--yes)
+      NON_INTERACTIVE=true
+      ;;
+    --purge-vault)
+      PURGE_VAULT=true
+      ;;
+    --keep-vault)
+      PURGE_VAULT=false
+      ;;
+  esac
+done
+
+if [ "$NON_INTERACTIVE" = false ]; then
+  # Preguntar confirmación interactiva al usuario
+  echo "Este asistente eliminará Constantine Antivirus de tu sistema."
+  read -p "¿Estás seguro de que deseas desinstalar Constantine? (s/N): " confirm
+  if [[ ! "$confirm" =~ ^[sS]$ ]]; then
+    echo "Desinstalación cancelada por el usuario."
+    exit 0
+  fi
 fi
 
 echo ""
@@ -22,7 +41,7 @@ echo "1. Deteniendo y deshabilitando el servicio del sistema (constantine.servic
 systemctl stop constantine.service 2>/dev/null || true
 systemctl disable constantine.service 2>/dev/null || true
 rm -f /etc/systemd/system/constantine.service
-systemctl daemon-reload
+systemctl daemon-reload 2>/dev/null || true
 
 echo "2. Restaurando configuración de red y cortafuegos (limpieza de nftables)..."
 nft delete table inet constantine 2>/dev/null || true
@@ -56,19 +75,25 @@ echo "7. Eliminando binarios y archivos del programa (/opt/constantine)..."
 rm -rf /opt/constantine
 rm -f /usr/local/bin/constantine-gui /usr/bin/constantine-gui /usr/local/bin/constantine /usr/bin/constantine
 
-# Preguntar qué hacer con el Baúl de Cuarentena
+# Gestión del Baúl de Cuarentena
 echo ""
 echo "--------------------------------------------------------"
 echo "📦 GESTIÓN DE AMENAZAS EN EL BAÚL DE CUARENTENA"
-echo "Actualmente los archivos maliciosos aislados están en: /var/lib/constantine/vault/"
-read -p "¿Deseas eliminar definitivamente todas las muestras del Baúl de Cuarentena? (s/N): " purge_vault
 
-if [[ "$purge_vault" =~ ^[sS]$ ]]; then
+if [ "$NON_INTERACTIVE" = false ]; then
+  echo "Actualmente los archivos maliciosos aislados están en: /var/lib/constantine/vault/"
+  read -p "¿Deseas eliminar definitivamente todas las muestras del Baúl de Cuarentena? (s/N): " ask_purge
+  if [[ "$ask_purge" =~ ^[sS]$ ]]; then
+    PURGE_VAULT=true
+  fi
+fi
+
+if [ "$PURGE_VAULT" = true ]; then
   echo "Destruyendo de forma segura todos los archivos del baúl..."
-  rm -rf /var/lib/constantine /etc/constantine
-  echo "Baúl de cuarentena eliminado por completo."
+  rm -rf /var/lib/constantine /etc/constantine /var/log/constantine
+  echo "Baúl de cuarentena y registros eliminados por completo."
 else
-  echo "Los archivos del baúl se conservarán de forma segura en /var/lib/constantine/vault/ (cifrados y con permisos 000)."
+  echo "Los archivos del baúl se conservarán de forma segura en /var/lib/constantine/vault/ (cifrados con AES-256-GCM y permisos 000)."
 fi
 
 echo ""
