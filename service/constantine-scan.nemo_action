@@ -1,9 +1,0 @@
-[Nemo Action]
-Name=🛡️ Analizar con Constantine Antivirus
-Comment=Escanear archivo o carpeta seleccionada en busca de malware
-Exec=python3 /opt/constantine/gui/app.py --scan "%F"
-Icon-Name=constantine
-Selection=Any
-Extensions=any;
-Quote=double
-Dependencies=python3;
