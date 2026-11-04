@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple, Any
 logger = logging.getLogger("constantine.dns")
 
 DEFAULT_STATE_FILE = "/var/lib/constantine/dns_state.json"
-FALLBACK_STATE_FILE = "/tmp/constantine_dns_state.json"
+FALLBACK_STATE_FILE = f"/tmp/constantine_dns_state_{os.getuid()}.json"
 RESOLV_BACKUP_PATH = "/tmp/constantine_resolv.conf.bak"
 
 MULLVAD_DNS_PROFILES = {
@@ -130,9 +130,12 @@ class DNSManager:
         self._ensure_storage()
 
     def _ensure_storage(self):
-        d = os.path.dirname(self.state_file)
-        if d:
-            os.makedirs(d, exist_ok=True)
+        try:
+            d = os.path.dirname(self.state_file)
+            if d:
+                os.makedirs(d, exist_ok=True)
+        except (PermissionError, OSError):
+            self.state_file = f"/tmp/constantine_dns_state_{os.getuid()}.json"
 
     def get_profiles(self) -> Dict[str, Dict]:
         return MULLVAD_DNS_PROFILES

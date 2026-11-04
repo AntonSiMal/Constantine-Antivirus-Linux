@@ -12,6 +12,11 @@ import signal
 import argparse
 import logging
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+from core.engine.ipc_protocol import SecureIPCDaemonServer
 from core.engine.scanner import Scanner
 from core.engine.vault import QuarantineVault
 from core.engine.phishing import PhishingShield
@@ -261,6 +266,9 @@ def main():
         logger.warning("💡 Comando para activar eBPF: %s", ebpf_diag["recommendation"])
         audit_logger.record_incident("System.eBPF.Degraded", "Kernel", "WARNING", ebpf_diag["error_message"])
 
+    # Conectar el monitor eBPF con el interceptor fanotify para correlación atómica de openat y prevención de evasiones
+    interceptor.set_ebpf_monitor(ebpf)
+
     # 9. Verificación de Integridad de Subsistemas antes de Declarar Operatividad
     is_healthy = verify_and_report_subsystems(
         interceptor=interceptor,
@@ -279,6 +287,58 @@ def main():
         logger.critical("❌ Fallo en la verificación previa de subsistemas críticos. Abortando inicio.")
         sys.exit(1)
 
+# 10. Despachador IPC del Daemon con Control de Acceso RBAC y Validación del Servidor
+    def dispatch_ipc_command(cmd: str, params: Dict[str, Any], client_uid: int, is_admin: bool = False) -> Tuple[str, Dict[str, Any], str]:
+        c = cmd.upper().strip()
+        if c == "GET_STATUS":
+            diag = verify_and_report_subsystems(
+                interceptor=interceptor, vault=vault, scanner=scanner, ransomware=ransomware,
+                ebpf=ebpf, firewall=firewall, persist_guard=persist_guard, usb_scanner=usb_scanner,
+                download_sentinel=download_sentinel, hardware_guard=hardware_guard, phishing=phishing
+            )
+            return "OK", {
+                "daemon": "RUNNING",
+                "version": "4.1.9",
+                "fail_policy": args.fail_policy,
+                "mode": args.mode,
+                "subsystems": diag,
+                "ebpf_status": ebpf.get_status_info()["status"]
+            }, ""
+        elif c == "GET_THREATS":
+            return "OK", {"threats": vault.list_items()}, ""
+        elif c == "GET_AUDIT_LOGS":
+            return "OK", {"logs": audit_logger.get_incidents()[:50]}, ""
+        elif c == "REQUEST_SCAN":
+            p = params.get("path")
+            if not p or not os.path.exists(p):
+                return "ERROR", {}, "Ruta no encontrada"
+            res = scanner.scan_file(file_path=p)
+            return "OK", {"path": p, "is_malicious": res.is_malicious, "threat_name": res.threat_name}, ""
+        elif c == "ADD_WHITELIST":
+            path = params.get("path")
+            if not path:
+                return "ERROR", {}, "Ruta requerida"
+            interceptor.whitelist.add_path(path)
+            return "OK", {"whitelisted": path}, ""
+        elif c == "REMOVE_WHITELIST":
+            path = params.get("path")
+            if not path:
+                return "ERROR", {}, "Ruta requerida"
+            interceptor.whitelist.remove_path(path)
+            return "OK", {"removed": path}, ""
+        elif c == "RESTORE_QUARANTINE":
+            vid = params.get("vault_id")
+            dest = params.get("destination")
+            ok = vault.restore_file(vid, destination_path=dest)
+            return "OK" if ok else "ERROR", {"restored": ok}, ""
+        elif c == "PURGE_QUARANTINE":
+            count = vault.purge_all()
+            return "OK", {"purged_count": count}, ""
+        return "ERROR", {}, f"Comando no reconocido: {cmd}"
+
+    ipc_server = SecureIPCDaemonServer(command_handler=dispatch_ipc_command, auth_manager=auth)
+    ipc_server.start()
+
     def shutdown(sig, frame):
         logger.info("Señal de terminación recibida. Deteniendo servicios de Constantine...")
         interceptor.stop()
@@ -287,6 +347,7 @@ def main():
         download_sentinel.stop()
         hardware_guard.stop()
         ebpf.stop()
+        ipc_server.stop()
         if firewall:
             firewall.cleanup()
         logger.info("Todos los servicios detenidos limpiamente.")

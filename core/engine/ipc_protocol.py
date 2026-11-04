@@ -6,7 +6,7 @@ Canal de comunicación interprocesos (IPC) seguro entre la GUI de usuario no pri
      * Verifica UID, GID y PID del proceso emisor antes de procesar cualquier comando.
      * Rechaza conexiones no autorizadas o de usuarios ajenos sin privilegios.
 2. Formato de Mensajes Estructurado y Serialización JSON con HMAC-SHA256:
-   - Esquema estricto: {"version": "4.0.9", "command": "...", "params": {...}, "token": "..."}.
+   - Esquema estricto: {"version": "4.1.9", "command": "...", "params": {...}, "token": "..."}.
    - Respuestas atómicas: {"status": "OK"|"ERROR", "data": {...}, "error": "..."}.
 3. Separación Estricta de Privilegios (Least Privilege Architecture):
    - La GUI se ejecuta como usuario estándar sin privilegios de root.
@@ -21,7 +21,9 @@ import socket
 import struct
 import secrets
 import logging
-from typing import Dict, Any, Optional, Tuple, Callable
+import threading
+from enum import Enum
+from typing import Dict, Any, Optional, Tuple, Callable, Set
 
 logger = logging.getLogger("constantine.ipc")
 
@@ -37,7 +39,7 @@ class SecureIPCMessage:
     @staticmethod
     def pack(command: str, params: Optional[Dict[str, Any]] = None, token: str = "") -> bytes:
         payload = {
-            "version": "4.0.9",
+            "version": "4.1.9",
             "timestamp": time.time(),
             "command": command,
             "params": params or {},
@@ -55,13 +57,43 @@ class SecureIPCMessage:
             return None
 
 
+class IPCRole(str, Enum):
+    USER = "USER"
+    ADMIN = "ADMIN"
+
+# Tabla de Control de Acceso Basado en Roles (RBAC) del Daemon
+ROLE_PERMISSIONS: Dict[str, Set[IPCRole]] = {
+    "GET_STATUS": {IPCRole.USER, IPCRole.ADMIN},
+    "GET_THREATS": {IPCRole.USER, IPCRole.ADMIN},
+    "GET_SHIELDS_HEALTH": {IPCRole.USER, IPCRole.ADMIN},
+    "GET_AUDIT_LOGS": {IPCRole.USER, IPCRole.ADMIN},
+    "REQUEST_SCAN": {IPCRole.USER, IPCRole.ADMIN},
+    "ADD_WHITELIST": {IPCRole.ADMIN},
+    "REMOVE_WHITELIST": {IPCRole.ADMIN},
+    "TOGGLE_SHIELD": {IPCRole.ADMIN},
+    "RESTORE_QUARANTINE": {IPCRole.ADMIN},
+    "PURGE_QUARANTINE": {IPCRole.ADMIN},
+    "APPLY_DNS_PROFILE": {IPCRole.ADMIN},
+    "ISOLATE_NETWORK": {IPCRole.ADMIN},
+    "UNINSTALL": {IPCRole.ADMIN},
+}
+
+def is_operation_permitted(command: str, is_admin: bool) -> bool:
+    """Verifica si un comando está autorizado para el rol del usuario según la política RBAC."""
+    cmd_clean = command.upper().strip()
+    allowed_roles = ROLE_PERMISSIONS.get(cmd_clean, {IPCRole.ADMIN})
+    if is_admin:
+        return True
+    return IPCRole.USER in allowed_roles
+
+
 class SecureIPCDaemonServer:
     """
     Servidor IPC seguro en el demonio (root):
     Escucha en un Unix Domain Socket con verificación SO_PEERCRED y despacho de comandos.
     """
 
-    def __init__(self, socket_path: Optional[str] = None, command_handler: Optional[Callable] = None):
+    def __init__(self, socket_path: Optional[str] = None, command_handler: Optional[Callable] = None, auth_manager: Optional[Any] = None):
         if socket_path:
             self.socket_path = socket_path
         elif os.geteuid() == 0 and os.path.exists("/run"):
@@ -71,8 +103,10 @@ class SecureIPCDaemonServer:
             self.socket_path = FALLBACK_DAEMON_SOCKET
 
         self.command_handler = command_handler
+        self.auth_manager = auth_manager
         self.server_sock: Optional[socket.socket] = None
         self.running = False
+        self.thread: Optional[threading.Thread] = None
         self.token = self._init_session_token()
 
     def _init_session_token(self) -> str:
@@ -87,8 +121,8 @@ class SecureIPCDaemonServer:
             pass
         return token
 
-    def start(self):
-        """Inicializa el socket de dominio Unix con permisos restrictivos 0660."""
+    def start(self, background: bool = True):
+        """Inicializa el socket de dominio Unix con permisos restrictivos 0660 y lanza el bucle de escucha."""
         if os.path.exists(self.socket_path):
             try:
                 os.remove(self.socket_path)
@@ -105,6 +139,18 @@ class SecureIPCDaemonServer:
         self.server_sock.listen(8)
         self.running = True
         logger.info("🔒 Servidor IPC seguro activo en: %s", self.socket_path)
+        if background:
+            self.thread = threading.Thread(target=self._accept_loop, daemon=True, name="constantine-ipc-server")
+            self.thread.start()
+
+    def _accept_loop(self):
+        while self.running:
+            try:
+                conn, _ = self.server_sock.accept()
+                client_th = threading.Thread(target=self.handle_client, args=(conn,), daemon=True)
+                client_th.start()
+            except Exception:
+                break
 
     def verify_peer_credentials(self, conn: socket.socket) -> Tuple[bool, int, int, int]:
         """
@@ -150,9 +196,25 @@ class SecureIPCDaemonServer:
 
             cmd = msg.get("command", "")
             params = msg.get("params", {})
-            resp_data = {}
+            token = msg.get("token", "")
+
+            # Validación de autorización RBAC del lado del servidor (Zero-Trust)
+            is_admin = (uid == 0)
+            if not is_admin and self.auth_manager and hasattr(self.auth_manager, "is_session_valid"):
+                is_admin = self.auth_manager.is_session_valid(token)
+
+            if not is_operation_permitted(cmd, is_admin):
+                logger.warning("⛔ [ACCESO DENEGADO RBAC] Usuario UID %d intentó ejecutar comando administrativo sin privilegios: %s", uid, cmd)
+                conn.sendall(self._pack_response("FORBIDDEN", error=f"Operación '{cmd}' requiere autorización administrativa."))
+                conn.close()
+                return
+
             if self.command_handler:
-                resp_status, resp_data, error_msg = self.command_handler(cmd, params, uid)
+                try:
+                    res = self.command_handler(cmd, params, uid, is_admin)
+                except TypeError:
+                    res = self.command_handler(cmd, params, uid)
+                resp_status, resp_data, error_msg = res
                 conn.sendall(self._pack_response(resp_status, data=resp_data, error=error_msg))
             else:
                 conn.sendall(self._pack_response("OK", data={"ack": cmd}))
@@ -207,7 +269,7 @@ class SecureIPCClient:
         except Exception:
             return False
 
-    def send_command(self, command: str, params: Optional[Dict[str, Any]] = None, timeout: float = 3.0) -> Dict[str, Any]:
+    def send_command(self, command: str, params: Optional[Dict[str, Any]] = None, token: str = "", timeout: float = 3.0) -> Dict[str, Any]:
         """Envía un comando al demonio y espera la respuesta estructurada."""
         if not os.path.exists(self.socket_path):
             return {"status": "ERROR", "error": f"Socket del demonio no encontrado en {self.socket_path}"}
@@ -216,7 +278,7 @@ class SecureIPCClient:
         s.settimeout(timeout)
         try:
             s.connect(self.socket_path)
-            packet = SecureIPCMessage.pack(command, params)
+            packet = SecureIPCMessage.pack(command, params, token=token)
             s.sendall(packet)
 
             len_bytes = s.recv(4)

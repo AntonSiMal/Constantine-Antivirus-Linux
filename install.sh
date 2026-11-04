@@ -44,7 +44,7 @@ if [ "$EUID" -ne 0 ]; then
     die "El instalador de Constantine Antivirus debe ejecutarse como root:\n   sudo ./install.sh"
 fi
 
-echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v4.0.9)${NC}"
+echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v4.1.9)${NC}"
 echo "======================================================================"
 
 # --- 2. Verificación y Actualización de Repositorios APT ---
@@ -242,6 +242,9 @@ for user_home in /home/*; do
             chown -R "$user_name:$user_name" "$nautilus_scripts" 2>/dev/null || true
             chmod +x "$nautilus_scripts/Analizar con Constantine"
         fi
+        # Asegurar propiedad y permisos de usuario para ejecución no root
+        mkdir -p "$user_home/.config/constantine" "$user_home/.local/share/constantine" 2>/dev/null || true
+        chown -R "$user_name:$user_name" "$user_home/.config/constantine" "$user_home/.local/share/constantine" 2>/dev/null || true
         log_info "Configuración aplicada al usuario: $user_name"
     fi
 done
@@ -263,10 +266,14 @@ chmod 644 /etc/xdg/autostart/constantine-tray.desktop
 log_success "Autoinicio registrado en /etc/xdg/autostart/constantine-tray.desktop"
 
 # --- 10. Enlaces y Comandos Globales en Terminal ---
+# Limpiar archivos temporales y sockets huérfanos de ejecuciones previas como root
+rm -f /tmp/constantine_*.sock /tmp/constantine_audit_log*.json /tmp/constantine_dns_state*.json 2>/dev/null || true
+
 step "11. Creando comandos globales en terminal (/usr/local/bin/constantine-gui)..."
 mkdir -p /usr/local/bin
 cat << 'BIN_WRAPPER' > /usr/local/bin/constantine-gui
 #!/bin/bash
+export PYTHONPATH="/opt/constantine:${PYTHONPATH}"
 pkill -f "/opt/constantine/gui/app.py" 2>/dev/null || true
 exec python3 /opt/constantine/gui/app.py "$@"
 BIN_WRAPPER
@@ -330,7 +337,7 @@ fi
 
 echo ""
 echo -e "${BOLD}${GREEN}======================================================================"
-echo -e "🎉 ¡INSTALACIÓN COMPLETADA Y VERIFICADA CON ÉXITO (v4.0.9)!"
+echo -e "🎉 ¡INSTALACIÓN COMPLETADA Y VERIFICADA CON ÉXITO (v4.1.9)!"
 echo -e "======================================================================${NC}"
 echo -e "• ${BOLD}Protección en Kernel:${NC} Demonio del sistema configurado y en ejecución."
 echo -e "• ${BOLD}Seguridad Zero-Breach:${NC} Autenticación nativa delegada a PAM/sudo."

@@ -1,4 +1,3 @@
-from core.engine.audit_logger import AuditLogger
 #!/usr/bin/env python3
 """
 Constantine Antivirus - Native GTK 3 Security Center (gui/app.py)
@@ -33,6 +32,7 @@ from core.engine.system_whitelist import SystemWhitelist
 from core.engine.dns_manager import DNSManager, MULLVAD_DNS_PROFILES
 from core.engine.firewall import NetworkQuarantine
 from core.engine.vpn_manager import VPNManager
+from core.engine.audit_logger import AuditLogger
 from core.engine.ransomware_shield import RansomwareShield
 from core.engine.usb_monitor import USBAutoScanner
 from core.engine.update_guard import SystemUpdateGuard
@@ -959,7 +959,11 @@ class ConstantineGUI:
         wbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         wbox.set_margin_start(15); wbox.set_margin_end(15); wbox.set_margin_top(10); wbox.set_margin_bottom(10)
 
-        apps_txt = ", ".join(sorted(list(self.hardware_guard.authorized_apps)))
+        apps_list = getattr(self.hardware_guard, "authorized_apps", None)
+        if apps_list is None:
+            from core.engine.hardware_guard import DEFAULT_AUTHORIZED_PACKAGES
+            apps_list = DEFAULT_AUTHORIZED_PACKAGES
+        apps_txt = ", ".join(sorted(list(apps_list)))
         lbl_apps = Gtk.Label(label=f"Las siguientes aplicaciones de confianza tienen acceso permitido sin alertar:\n{apps_txt}")
         lbl_apps.set_line_wrap(True); lbl_apps.set_xalign(0)
         wbox.pack_start(lbl_apps, False, False, 0)
@@ -1059,7 +1063,7 @@ class ConstantineGUI:
 
         # Columna 3: Anti-Phishing & Reputación Web
         p_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        lbl_p_title = Gtk.Label(); lbl_p_title.set_markup("<b>🎣 Base Anti-Phishing & URLs</b>"); lbl_p_title.set_xalign(0)
+        lbl_p_title = Gtk.Label(); lbl_p_title.set_markup("<b>🎣 Base Anti-Phishing &amp; URLs</b>"); lbl_p_title.set_xalign(0)
         self.lbl_p_ver = Gtk.Label(label=f"Versión: {sig_info['phish_version']}"); self.lbl_p_ver.set_xalign(0)
         self.lbl_p_ver.get_style_context().add_class("subtitle-text")
         self.lbl_p_date = Gtk.Label(label=f"Auditoría: {sig_info['phish_date']}"); self.lbl_p_date.set_xalign(0)
@@ -1142,7 +1146,7 @@ class ConstantineGUI:
         )
 
         self.shield_switches = {}
-        is_es = (self.loc.current_lang == "es")
+        is_es = (self.loc.lang == "es")
 
         for i, shield in enumerate(evaluated_shields):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
@@ -1156,13 +1160,13 @@ class ConstantineGUI:
             # Encabezado con badge de estado operativo verificable
             header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
             t_lbl = Gtk.Label()
-            t_lbl.set_markup(f"<span font='10.5' weight='bold'>{title}</span>")
+            t_lbl.set_markup(f"<span font='10.5' weight='bold'>{self._esc(title)}</span>")
             t_lbl.set_xalign(0)
             header_box.pack_start(t_lbl, False, False, 0)
 
             # Badge con color contextual exacto según el estado real
             badge_lbl = Gtk.Label()
-            badge_lbl.set_markup(f"<span font='8.5' weight='bold' background='{shield.badge_color}' foreground='#ffffff'>  {shield.badge_label}  </span>")
+            badge_lbl.set_markup(f"<span font='8.5' weight='bold' background='{shield.badge_color}' foreground='#ffffff'>  {self._esc(shield.badge_label)}  </span>")
             header_box.pack_start(badge_lbl, False, False, 0)
             ibox.pack_start(header_box, False, False, 0)
 
@@ -1230,11 +1234,11 @@ class ConstantineGUI:
 
         ebpf_diag = self.ebpf_monitor.get_status_info() if hasattr(self, "ebpf_monitor") else {}
         if ebpf_diag.get("is_active"):
-            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia nativa en kernel activa (fanotify, eBPF multiprueba & inotify)</span>")
+            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia nativa en kernel activa (fanotify, eBPF multiprueba &amp; inotify)</span>")
         elif ebpf_diag.get("is_degraded") or ebpf_diag.get("is_operational"):
             self.lbl_live_scan_current.set_markup("<span font='8.5' color='#ff9500'>⚠️ Vigilancia en modo degradado (eBPF inactivo: operando con sondeo /proc y fanotify)</span>")
         else:
-            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia activa en kernel (fanotify E/S & inotify)</span>")
+            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia activa en kernel (fanotify E/S &amp; inotify)</span>")
 
         # 1. Leer incidentes reales del registro forense
         incidents = self.audit_logger.get_incidents()

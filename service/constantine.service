@@ -31,7 +31,10 @@ ProtectSystem=strict
 # - /var/log/constantine (Bitácoras forenses de defensa)
 # - /run/constantine     (Socket IPC de comunicación con la GUI)
 # - /etc/constantine     (Almacén de clave segura .vault_key)
-ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine
+# Directorios de escritura explícitamente delimitados requeridos para operación del antivirus y cuarentena:
+# - Infraestructura interna: /var/lib/constantine (Baúl y señuelos), /var/log/constantine (Logs), /run/constantine (IPC), /etc/constantine (Claves)
+# - Vectores de ataque supervisados para desinfección y traslado seguro de muestras a cuarentena: /home, /tmp, /var/tmp, /dev/shm, /media, /mnt
+ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine /home /tmp /var/tmp /dev/shm -/media -/mnt
 
 # Directorios del programa protegidos en modo solo lectura
 ReadOnlyPaths=/opt/constantine

@@ -5,7 +5,7 @@
 [![CLA: Protected](https://img.shields.io/badge/CLA-Protected-purple.svg)](CONTRIBUTING.md)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu%20%7C%20Linux%20Mint-orange.svg)](https://www.debian.org)
 [![Kernel: fanotify & eBPF](https://img.shields.io/badge/Kernel-fanotify%20%26%20eBPF-red.svg)](https://ebpf.io)
-[![Version: v4.0.9](https://img.shields.io/badge/Version-v4.0.9-blue.svg)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
+[![Version: v4.1.9](https://img.shields.io/badge/Version-v4.1.9-blue.svg)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
 [![GitHub Repository](https://img.shields.io/badge/GitHub-AntonSiMal%2FConstantine--Antivirus--Linux-blue?logo=github)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
 
 **Constantine Antivirus** es una suite de seguridad activa, preventiva y no intrusiva (*Zero-Nag*) para distribuciones Linux basadas en Debian (Ubuntu, Linux Mint, Debian) compatible con entornos gráficos **X11** y **Wayland**.
@@ -52,7 +52,7 @@ A diferencia de las herramientas antivirus tradicionales en Linux limitadas a es
 * **Autenticación Nativa Linux con `sudo` / PAM (Zero-Breach):** Cero contraseñas propietarias o inseguras. Los usuarios administradores autorizan acciones críticas utilizando su propia contraseña personal de Linux.
 * **Despliegue Multi-Usuario Global:** Disponible para todos los usuarios actuales y futuros gracias a la configuración de `/etc/skel/`, `/usr/share/applications/` y `/etc/xdg/autostart/`.
 * **Soporte Multilingüe (i18n):** Selector en la cabecera para alternar instantáneamente entre **Español (ES)** e **Inglés (EN)**.
-* **Baúl de Cuarentena Cifrado con AES-256-GCM:** Aislamiento criptográfico militar con vector de inicialización único (Nonce 96-bit), Auth Tag de integridad y permisos `000` en `/var/lib/constantine/vault/`. Muestra por defecto las **últimas 10 amenazas** para mantener una interfaz limpia y fluida, con botón para alternar a vista completa.
+* **Baúl de Cuarentena Cifrado con AES-256-GCM (Formato Streaming V3):** Aislamiento criptográfico con nonces independientes de 96 bits por bloque generados por CSPRNG (`secrets.token_bytes`), control de volumen por clave (límite de 100.000 operaciones bajo NIST SP 800-38D), rotación de claves (`rotate_key`) con llavero histórico persistente (`vault_keyring.json`), permisos `000` y retrocompatibilidad total con formatos V2 y V1. Muestra por defecto las **últimas 10 amenazas** para mantener una interfaz limpia y fluida, con botón para alternar a vista completa.
 * **Lista Blanca con Selección Múltiple:** Exclusiones personalizadas con eliminación por lotes (`Gtk.SelectionMode.MULTIPLE`) y botones para seleccionar o desmarcar todos los elementos.
 * **Desinstalación Integrada en Configuración:** Botón de desinstalación segura accesible desde la pestaña de configuración (`⚙️`), con validación de administrador (`pkexec`) y opciones para conservar o purgar el baúl de cuarentena.
 * **Auditoría Forense:** Registro cronológico de incidentes con exportación de reportes en formato JSON.
@@ -125,7 +125,7 @@ Constantine-Antivirus-Linux/
 ├── install.sh                    # Instalador desatendido del sistema
 ├── uninstall.sh                  # Desinstalador seguro con soporte de argumentos (-y)
 ├── requirements.txt              # Dependencias de Python
-├── VERSION                       # Versión actual del sistema (4.0.9)
+├── VERSION                       # Versión actual del sistema (4.1.9)
 ├── CONTRIBUTING.md               # Guía de contribución y acuerdo CLA
 ├── LICENSE-COMMERCIAL.md         # Términos de licenciamiento comercial y corporativo
 ├── LICENSE                       # Licencia GNU General Public License v3.0

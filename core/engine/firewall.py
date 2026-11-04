@@ -50,6 +50,8 @@ class NetworkQuarantine:
 
     def _init_cgroup_environment(self):
         """Inicializa los subgrupos de control para aislamiento de red si hay soporte en el sistema."""
+        if os.geteuid() != 0:
+            return
         try:
             # 1. Probar soporte cgroup v2 unificado
             if os.path.exists(os.path.join(CGROUP_V2_BASE, "cgroup.controllers")) or os.path.exists(os.path.join(CGROUP_V2_BASE, "cgroup.procs")):
@@ -81,6 +83,11 @@ class NetworkQuarantine:
     def _init_tables(self):
         """Inicializa la infraestructura de filtrado nftables de forma verificada si está disponible."""
         if not self.use_nftables or not shutil.which("nft"):
+            self.use_nftables = False
+            return
+
+        if os.geteuid() != 0:
+            logger.debug("NetworkQuarantine opera en modo cliente unprivileged (no root). Omitiendo creación de tablas nftables.")
             self.use_nftables = False
             return
 

@@ -107,6 +107,7 @@ class ProcessHardwareContext:
 
 
 class HardwareGuard:
+    DEFAULT_AUTHORIZED_PACKAGES = DEFAULT_AUTHORIZED_PACKAGES
     """
     Centinela de acceso a hardware (cámara web y micrófono) con verificación
     criptográfica de procedencia, anti-spoofing y bloqueo activo de intrusiones.
@@ -125,6 +126,9 @@ class HardwareGuard:
         # Seguimiento de PIDs y accesos activos
         self.known_camera_contexts: Dict[int, ProcessHardwareContext] = {}
         self.known_mic_contexts: Dict[int, ProcessHardwareContext] = {}
+
+        # Lista de aplicaciones autorizadas para acceso multimedia
+        self.authorized_apps: Set[str] = set(DEFAULT_AUTHORIZED_PACKAGES)
 
     def find_processes_using_device_nodes(self, dev_pattern: str, dev_type: str) -> List[ProcessHardwareContext]:
         """
@@ -195,7 +199,7 @@ class HardwareGuard:
                 return
 
         # Comprobar paquetes reconocidos por nombre oficial de paquete
-        if any(app in exe_base.lower() for app in DEFAULT_AUTHORIZED_PACKAGES):
+        if any(app in exe_base.lower() for app in self.authorized_apps):
             if ctx.exe_path.startswith(("/usr/bin/", "/usr/lib/", "/snap/", "/opt/")):
                 ctx.is_authorized = True
                 return
@@ -204,6 +208,20 @@ class HardwareGuard:
         ctx.is_authorized = False
         if not ctx.reasons:
             ctx.reasons.append("Binario no reconocido en lista blanca ni paquete autorizado del sistema")
+
+    def authorize_app(self, app_name: str):
+        """Autoriza una aplicación para uso legítimo de cámara y micrófono."""
+        if app_name:
+            self.authorized_apps.add(app_name.lower().strip())
+
+    def revoke_app(self, app_name: str):
+        """Revoca la autorización de una aplicación multimedia."""
+        if app_name:
+            self.authorized_apps.discard(app_name.lower().strip())
+
+    def is_app_authorized(self, app_name: str) -> bool:
+        """Comprueba si una aplicación está en la lista de permitidas."""
+        return app_name.lower().strip() in self.authorized_apps
 
     def block_unauthorized_access(self, ctx: ProcessHardwareContext) -> bool:
         """

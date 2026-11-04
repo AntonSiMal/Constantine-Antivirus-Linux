@@ -261,9 +261,18 @@ class SystemWhitelist:
         self._load_whitelist()
 
     def _ensure_dir(self):
-        d = os.path.dirname(self.storage_file)
-        if d:
-            os.makedirs(d, exist_ok=True)
+        try:
+            d = os.path.dirname(self.storage_file)
+            if d:
+                os.makedirs(d, exist_ok=True)
+        except (PermissionError, OSError):
+            self.storage_file = f"/tmp/constantine_whitelist_{os.getuid()}.json"
+            try:
+                d = os.path.dirname(self.storage_file)
+                if d:
+                    os.makedirs(d, exist_ok=True)
+            except Exception:
+                pass
 
     def _load_whitelist(self):
         self._ensure_dir()

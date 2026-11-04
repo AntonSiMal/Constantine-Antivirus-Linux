@@ -49,6 +49,7 @@ class RansomwareDecision:
 
 
 class RansomwareShield:
+    RANSOMWARE_EXTENSIONS = RANSOMWARE_EXTENSIONS
     """
     Escudo anti-ransomware de alta fidelidad:
     Monitorea señuelos honeypots, extensiones hostiles y ráfagas de escritura sin falsos positivos en lecturas.
@@ -70,7 +71,14 @@ class RansomwareShield:
 
     def _deploy_canaries(self):
         """Despliega archivos señuelo con tokens de integridad cuya modificación delata un ataque."""
-        os.makedirs(self.canary_dir, exist_ok=True)
+        try:
+            os.makedirs(self.canary_dir, exist_ok=True)
+        except (PermissionError, OSError):
+            self.canary_dir = f"/tmp/constantine_canaries_{os.getuid()}"
+            try:
+                os.makedirs(self.canary_dir, exist_ok=True)
+            except Exception:
+                pass
         canaries = [
             ("important_document.docx", b"CONSTANTINE_CANARY_DOCX_TOKEN_INTEGRITY_2026"),
             ("family_photos_backup.zip", b"CONSTANTINE_CANARY_ZIP_TOKEN_INTEGRITY_2026"),
@@ -99,6 +107,12 @@ class RansomwareShield:
                 p = count / length
                 entropy -= p * math.log2(p)
         return round(entropy, 2)
+
+    def is_canary_file(self, file_path: str) -> bool:
+        """Comprueba si una ruta corresponde a un archivo señuelo trampa activo."""
+        if not file_path:
+            return False
+        return os.path.abspath(file_path) in self.canary_files
 
     def evaluate_operation(self, file_path: str, pid: int,
                            is_write: bool = True,

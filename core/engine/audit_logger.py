@@ -12,19 +12,36 @@ from typing import List, Dict, Optional
 logger = logging.getLogger("constantine.audit")
 
 DEFAULT_LOG_PATH = "/var/lib/constantine/audit_log.json"
-FALLBACK_LOG_PATH = "/tmp/constantine_audit_log.json"
+USER_LOG_PATH = os.path.expanduser("~/.local/share/constantine/audit_log.json")
+FALLBACK_LOG_PATH = f"/tmp/constantine_audit_log_{os.getuid()}.json"
 
 class AuditLogger:
     def __init__(self, log_path: Optional[str] = None):
-        self.log_path = log_path or (DEFAULT_LOG_PATH if os.geteuid() == 0 else FALLBACK_LOG_PATH)
+        if log_path:
+            self.log_path = log_path
+        elif os.geteuid() == 0 and os.path.exists("/var/lib"):
+            self.log_path = DEFAULT_LOG_PATH
+        else:
+            self.log_path = USER_LOG_PATH
         self._init_storage()
 
     def _init_storage(self):
-        d = os.path.dirname(self.log_path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        if not os.path.exists(self.log_path):
-            self._save_logs([])
+        try:
+            d = os.path.dirname(self.log_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            if not os.path.exists(self.log_path):
+                self._save_logs([])
+        except (PermissionError, OSError):
+            self.log_path = f"/tmp/constantine_audit_log_{os.getuid()}.json"
+            try:
+                d = os.path.dirname(self.log_path)
+                if d:
+                    os.makedirs(d, exist_ok=True)
+                if not os.path.exists(self.log_path):
+                    self._save_logs([])
+            except Exception:
+                pass
 
     def _load_logs(self) -> List[Dict]:
         try:

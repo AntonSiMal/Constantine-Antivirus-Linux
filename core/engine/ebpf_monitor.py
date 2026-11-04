@@ -45,6 +45,19 @@ class EBPFEventState(str, Enum):
 
 
 @dataclass
+class FileOperationIntent:
+    pid: int
+    filename: str
+    flags: int = 0
+    mode: int = 0
+    is_write: bool = False
+    is_read: bool = False
+    is_delete: bool = False
+    is_rename: bool = False
+    timestamp: float = field(default_factory=time.time)
+    comm: str = ""
+
+@dataclass
 class EBPFIncident:
     pid: int
     comm: str
@@ -172,6 +185,68 @@ TRACEPOINT_PROBE(syscalls, sys_enter_memfd_create) {
     memfd_events.perf_submit(args, &event, sizeof(event));
     return 0;
 }
+
+struct open_event_t {
+    u32 pid;
+    u32 uid;
+    u32 flags;
+    u32 mode;
+    char comm[TASK_COMM_LEN];
+    char filename[256];
+};
+
+struct file_mod_event_t {
+    u32 pid;
+    u32 uid;
+    u32 op_type; // 1: unlinkat, 2: renameat
+    u32 flags;
+    char comm[TASK_COMM_LEN];
+    char path1[256];
+    char path2[256];
+};
+
+BPF_PERF_OUTPUT(open_events);
+BPF_PERF_OUTPUT(file_mod_events);
+
+// 5. Sonda de apertura de archivos (captura precisa de banderas O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC)
+TRACEPOINT_PROBE(syscalls, sys_enter_openat) {
+    struct open_event_t event = {};
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.uid = bpf_get_current_uid_gid();
+    event.flags = args->flags;
+    event.mode = args->mode;
+    bpf_get_current_comm(&event.comm, sizeof(event.comm));
+    bpf_probe_read_user_str(&event.filename, sizeof(event.filename), args->filename);
+    open_events.perf_submit(args, &event, sizeof(event));
+    return 0;
+}
+
+// 6. Sonda de eliminación de archivos (unlinkat)
+TRACEPOINT_PROBE(syscalls, sys_enter_unlinkat) {
+    struct file_mod_event_t event = {};
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.uid = bpf_get_current_uid_gid();
+    event.op_type = 1;
+    event.flags = args->flag;
+    bpf_get_current_comm(&event.comm, sizeof(event.comm));
+    bpf_probe_read_user_str(&event.path1, sizeof(event.path1), args->pathname);
+    file_mod_events.perf_submit(args, &event, sizeof(event));
+    return 0;
+}
+
+// 7. Sonda de renombrado de archivos (renameat)
+TRACEPOINT_PROBE(syscalls, sys_enter_renameat) {
+    struct file_mod_event_t event = {};
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.uid = bpf_get_current_uid_gid();
+    event.op_type = 2;
+    bpf_get_current_comm(&event.comm, sizeof(event.comm));
+    bpf_probe_read_user_str(&event.path1, sizeof(event.path1), args->oldname);
+    bpf_probe_read_user_str(&event.path2, sizeof(event.path2), args->newname);
+    file_mod_events.perf_submit(args, &event, sizeof(event));
+    return 0;
+}
+
 """
 
 
@@ -190,6 +265,8 @@ class EBPFMonitor:
         self.running = False
         self.thread = None
         self.fallback_thread = None
+        self.file_intents: Dict[Tuple[int, str], FileOperationIntent] = {}
+        self._intents_lock = threading.Lock()
 
         # Estado operativo y diagnóstico transparente
         self.status = "UNINITIALIZED"
@@ -255,7 +332,7 @@ class EBPFMonitor:
             "is_degraded": self.is_degraded(),
             "is_operational": self.is_operational(),
             "has_bcc": HAS_BCC,
-            "monitored_vectors": ["sys_enter_execve", "sys_enter_ptrace", "sys_enter_mprotect", "sys_enter_memfd_create"] if self.is_active() else ["/proc cmdline poll"],
+            "monitored_vectors": ["sys_enter_execve", "sys_enter_ptrace", "sys_enter_mprotect", "sys_enter_memfd_create", "sys_enter_openat", "sys_enter_unlinkat", "sys_enter_renameat"] if self.is_active() else ["/proc cmdline poll"],
             "error_message": self.error_message,
             "kernel_version": kernel_release,
             "recommendation": self._get_troubleshooting_recommendation(),
@@ -321,6 +398,10 @@ class EBPFMonitor:
                 self.bpf["mprotect_events"].open_perf_buffer(self._on_mprotect)
             if "memfd_events" in self.bpf:
                 self.bpf["memfd_events"].open_perf_buffer(self._on_memfd)
+            if "open_events" in self.bpf:
+                self.bpf["open_events"].open_perf_buffer(self._on_open)
+            if "file_mod_events" in self.bpf:
+                self.bpf["file_mod_events"].open_perf_buffer(self._on_file_mod)
 
             self.running = True
             self.status = "ACTIVE"
@@ -597,6 +678,115 @@ class EBPFMonitor:
                 self.alert_callback(threat_name, target, event.pid, comm, EBPFEventState.SUSPICIOUS_ACTIVITY.value)
         except Exception as err:
             logger.error("Error procesando evento memfd en eBPF: %s", err)
+
+
+    def _on_open(self, cpu, data, size):
+        try:
+            event = self.bpf["open_events"].event(data)
+            pid = event.pid
+            flags = event.flags
+            mode = event.mode
+            comm = event.comm.decode("utf-8", "replace").strip()
+            filename = event.filename.decode("utf-8", "replace").strip()
+
+            acc = flags & os.O_ACCMODE
+            is_write = (acc in (os.O_WRONLY, os.O_RDWR)) or bool(flags & (os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+            is_read = (acc in (os.O_RDONLY, os.O_RDWR))
+
+            self.record_file_intent(
+                pid=pid,
+                target_path=filename,
+                flags=flags,
+                mode=mode,
+                is_write=is_write,
+                is_read=is_read,
+                is_delete=False,
+                is_rename=False,
+                comm=comm
+            )
+        except Exception as err:
+            logger.error("Error procesando evento openat en eBPF: %s", err)
+
+    def _on_file_mod(self, cpu, data, size):
+        try:
+            event = self.bpf["file_mod_events"].event(data)
+            pid = event.pid
+            op_type = event.op_type
+            flags = event.flags
+            comm = event.comm.decode("utf-8", "replace").strip()
+            path1 = event.path1.decode("utf-8", "replace").strip()
+            path2 = event.path2.decode("utf-8", "replace").strip() if op_type == 2 else ""
+
+            is_delete = (op_type == 1)
+            is_rename = (op_type == 2)
+
+            self.record_file_intent(
+                pid=pid,
+                target_path=path1,
+                flags=flags,
+                is_write=True,
+                is_read=False,
+                is_delete=is_delete,
+                is_rename=is_rename,
+                comm=comm
+            )
+            if is_rename and path2:
+                self.record_file_intent(
+                    pid=pid,
+                    target_path=path2,
+                    flags=flags,
+                    is_write=True,
+                    is_read=False,
+                    is_delete=False,
+                    is_rename=True,
+                    comm=comm
+                )
+        except Exception as err:
+            logger.error("Error procesando evento file_mod en eBPF: %s", err)
+
+    def record_file_intent(self, pid: int, target_path: str, flags: int = 0, mode: int = 0,
+                           is_write: bool = True, is_read: bool = False,
+                           is_delete: bool = False, is_rename: bool = False, comm: str = ""):
+        """Registra la intención de operación sobre un archivo observada en kernel."""
+        if not target_path:
+            return
+        now = time.time()
+        base_name = os.path.basename(target_path)
+        intent = FileOperationIntent(
+            pid=pid,
+            filename=target_path,
+            flags=flags,
+            mode=mode,
+            is_write=is_write,
+            is_read=is_read,
+            is_delete=is_delete,
+            is_rename=is_rename,
+            timestamp=now,
+            comm=comm
+        )
+        with self._intents_lock:
+            # Limpiar entradas con más de 10 segundos si el mapa supera 5000 entradas
+            if len(self.file_intents) > 5000:
+                self.file_intents = {k: v for k, v in self.file_intents.items() if now - v.timestamp < 10.0}
+
+            self.file_intents[(pid, target_path)] = intent
+            self.file_intents[(pid, base_name)] = intent
+
+    def get_process_file_intent(self, pid: int, target_path: str, max_age: float = 3.0) -> Optional[FileOperationIntent]:
+        """
+        Retorna la intención de operación de archivo capturada atómicamente por eBPF para un PID y ruta.
+        Si la intención fue registrada hace menos de max_age segundos, se devuelve para correlación exacta.
+        """
+        if not target_path:
+            return None
+        now = time.time()
+        base_name = os.path.basename(target_path)
+        with self._intents_lock:
+            for key in [(pid, target_path), (pid, base_name)]:
+                intent = self.file_intents.get(key)
+                if intent and (now - intent.timestamp <= max_age):
+                    return intent
+        return None
 
     def stop(self):
         self.running = False

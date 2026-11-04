@@ -18,7 +18,7 @@ from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("constantine.updater")
 
-CURRENT_VERSION = "4.0.9"
+CURRENT_VERSION = "4.1.9"
 GITHUB_REPO = "AntonSiMal/Constantine-Antivirus-Linux"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"

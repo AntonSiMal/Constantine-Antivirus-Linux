@@ -17,6 +17,7 @@ import shutil
 import signal
 import tempfile
 import hashlib
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,7 @@ if ROOT_DIR not in sys.path:
 
 from core.auth.auth_manager import AuthManager
 from core.engine.vault import QuarantineVault
+from core.engine.quarantine_operator import PrivilegedQuarantineOperator
 from core.engine.scanner import Scanner, ScanResult
 from core.engine.firewall import NetworkQuarantine
 from core.engine.subsystem_health import SubsystemHealthRegistry, ShieldOperationalState
@@ -311,6 +313,141 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertEqual(len(alerts), 0)
         self.assertEqual(len(shield.process_write_counts.get(44444, [])), 0)
 
+    def test_ebpf_openat_and_intent_correlation(self):
+        """Verifica que EBPFMonitor capture y correlacione las intenciones de openat (O_RDONLY vs O_WRONLY/O_RDWR)."""
+        monitor = EBPFMonitor()
+        pid = 12345
+        sample_path = "/tmp/test_file.docx"
+
+        # 1. Simular sys_enter_openat con O_WRONLY | O_CREAT
+        flags_write = os.O_WRONLY | os.O_CREAT
+        acc_write = flags_write & os.O_ACCMODE
+        is_write = (acc_write in (os.O_WRONLY, os.O_RDWR)) or bool(flags_write & (os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+        is_read = (acc_write in (os.O_RDONLY, os.O_RDWR))
+
+        monitor.record_file_intent(
+            pid=pid,
+            target_path=sample_path,
+            flags=flags_write,
+            is_write=is_write,
+            is_read=is_read,
+            comm="ransomware_sim"
+        )
+
+        intent = monitor.get_process_file_intent(pid, sample_path)
+        self.assertIsNotNone(intent)
+        self.assertTrue(intent.is_write)
+        self.assertFalse(intent.is_read)
+        self.assertFalse(intent.is_delete)
+
+        # 2. Simular sys_enter_openat con O_RDONLY
+        pid_reader = 54321
+        flags_read = os.O_RDONLY
+        acc_read = flags_read & os.O_ACCMODE
+        is_w = (acc_read in (os.O_WRONLY, os.O_RDWR)) or bool(flags_read & (os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+        is_r = (acc_read in (os.O_RDONLY, os.O_RDWR))
+
+        monitor.record_file_intent(
+            pid=pid_reader,
+            target_path=sample_path,
+            flags=flags_read,
+            is_write=is_w,
+            is_read=is_r,
+            comm="grep"
+        )
+        intent_read = monitor.get_process_file_intent(pid_reader, sample_path)
+        self.assertIsNotNone(intent_read)
+        self.assertFalse(intent_read.is_write)
+        self.assertTrue(intent_read.is_read)
+
+        # 3. Simular eliminación (unlinkat)
+        monitor.record_file_intent(
+            pid=pid,
+            target_path=sample_path,
+            is_write=True,
+            is_read=False,
+            is_delete=True,
+            comm="rm"
+        )
+        intent_del = monitor.get_process_file_intent(pid, sample_path)
+        self.assertIsNotNone(intent_del)
+        self.assertTrue(intent_del.is_delete)
+        self.assertTrue(intent_del.is_write)
+
+    def test_interceptor_no_fcntl_fgetfl_bypass(self):
+        """
+        Verifica que FanotifyInterceptor no confíe en fcntl(F_GETFL) sobre event_fd y que:
+        1. Si eBPF informa write intent sobre un canary, active CanaryTrapTriggered y FAN_DENY.
+        2. Si eBPF no está disponible (modo degradado), aplique política fail-secure impidiendo
+           que un proceso no confiable eluda la trampa alegando lectura benigna.
+        """
+        mock_notifier = MagicMock()
+        mock_firewall = MagicMock()
+        mock_ebpf = MagicMock()
+
+        canary_dir = os.path.join(self.tmp, "canaries_interceptor_test")
+        ransomware = RansomwareShield(canary_dir=canary_dir)
+        victim_canary = list(ransomware.canary_files.keys())[0]
+
+        interceptor = FanotifyInterceptor(
+            scanner=self.scanner,
+            vault=self.vault,
+            notifier=mock_notifier,
+            firewall=mock_firewall,
+            ransomware=ransomware,
+            fail_policy="secure",
+            ebpf_monitor=mock_ebpf
+        )
+
+        # 1. Caso con eBPF: el agresor abre canary con O_WRONLY
+        fake_pid = 77712
+        from core.engine.ebpf_monitor import FileOperationIntent
+        mock_ebpf.get_process_file_intent.return_value = FileOperationIntent(
+            pid=fake_pid,
+            filename=victim_canary,
+            flags=os.O_WRONLY,
+            is_write=True,
+            is_read=False,
+            comm="evil_encryptor"
+        )
+
+        ebpf_intent = interceptor.ebpf_monitor.get_process_file_intent(fake_pid, victim_canary)
+        dec = ransomware.evaluate_operation(
+            file_path=victim_canary,
+            pid=fake_pid,
+            is_write=ebpf_intent.is_write,
+            is_read=ebpf_intent.is_read,
+            is_delete_or_rename=ebpf_intent.is_delete or ebpf_intent.is_rename
+        )
+        self.assertTrue(dec.is_blocked)
+        self.assertTrue(dec.terminate_process)
+        self.assertEqual(dec.threat_reason, "CanaryTrapTriggered")
+
+        # 2. Caso sin eBPF (Fallback Fail-Secure): proceso no confiable accede al canary
+        interceptor_fallback = FanotifyInterceptor(
+            scanner=self.scanner,
+            vault=self.vault,
+            notifier=mock_notifier,
+            firewall=mock_firewall,
+            ransomware=ransomware,
+            fail_policy="secure",
+            ebpf_monitor=None
+        )
+        is_canary = ransomware.is_canary_file(victim_canary)
+        self.assertTrue(is_canary)
+        is_whitelisted = interceptor_fallback.whitelist.is_trusted_system_binary("/tmp/attacker")
+        self.assertFalse(is_whitelisted)
+
+        # Sin eBPF, un proceso no confiable sobre un canary recibe presunción de manipulación (Fail-Secure)
+        dec_fallback = ransomware.evaluate_operation(
+            file_path=victim_canary,
+            pid=99888,
+            is_write=True,
+            is_read=False
+        )
+        self.assertTrue(dec_fallback.is_blocked)
+        self.assertTrue(dec_fallback.terminate_process)
+
     # =========================================================================
     # 4. PRUEBAS DE LISTA BLANCA Y RESISTENCIA A EVASIONES
     # =========================================================================
@@ -453,9 +590,9 @@ class TestConstantineSecurity(unittest.TestCase):
         quar_file = os.path.join(self.vault.payloads_dir, f"{vid}.quar")
         os.chmod(quar_file, 0o600)
         with open(quar_file, "rb") as f:
-            header = f.read(16)
+            header = f.read(17)
         os.chmod(quar_file, 0o000)
-        self.assertEqual(header, b"CST_AES256GCM_S:")
+        self.assertIn(header, (b"CST_AES256GCM_V3:", b"CST_AES256GCM_S:"))
 
         # Restauración en streaming y validación de coincidencia exacta byte a byte
         restored = self.vault.restore_file(vid, destination_path=large_fpath)
@@ -477,6 +614,234 @@ class TestConstantineSecurity(unittest.TestCase):
         # Debe lanzar excepción y rehusar inicializarse con datos corruptos
         with self.assertRaises(ValueError):
             QuarantineVault(storage_dir=self.tmp, key_file=corrupt_key_file)
+
+    def test_export_key_recovery_package_security_o02(self):
+        """
+        Verifica los controles de seguridad criptográfica y del sistema de archivos en O-02:
+        1. Permisos restrictivos (0400) desde la creación en el inodo (sin ventana TOCTOU).
+        2. Creación exclusiva (O_CREAT | O_EXCL) y rechazo si el archivo ya existe sin overwrite=True.
+        3. Protección estricta contra enlaces simbólicos (rechazo de symlinks en destino y en directorio).
+        4. Verificación de manipulación por usuarios no privilegiados (rechazo de directorios world-writable sin sticky bit).
+        5. Importación validada del paquete de recuperación y protección contra enlaces en importación.
+        """
+        recovery_pkg = os.path.join(self.tmp, "o02_recovery_test.json")
+
+        # 1. Creación exitosa y verificación de permisos 0400 desde su creación
+        success = self.vault.export_key_recovery_package(recovery_pkg)
+        self.assertTrue(success)
+        self.assertTrue(os.path.exists(recovery_pkg))
+        st = os.stat(recovery_pkg)
+        self.assertEqual(st.st_mode & 0o777, 0o400, "El paquete exportado debe crearse con permisos estrictos 0400")
+
+        # Verificar contenido JSON
+        with open(recovery_pkg, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data.get("format"), "Constantine-Vault-KeyRecovery-v2")
+        self.assertEqual(data.get("cipher"), "AES-256-GCM-Chunked-AEAD")
+        self.assertTrue(bool(data.get("key_hex")))
+        self.assertTrue(bool(data.get("key_sha256")))
+
+        # 2. Creación exclusiva: Si ya existe y overwrite=False, debe fallar (O_EXCL)
+        self.assertFalse(self.vault.export_key_recovery_package(recovery_pkg, overwrite=False))
+
+        # Con overwrite=True debe sobreescribir de forma segura
+        self.assertTrue(self.vault.export_key_recovery_package(recovery_pkg, overwrite=True))
+        self.assertEqual(os.stat(recovery_pkg).st_mode & 0o777, 0o400)
+
+        # 3. Protección contra enlaces simbólicos: Rechazo si el destino es un symlink
+        symlink_target = os.path.join(self.tmp, "symlink_attack.json")
+        decoy_file = os.path.join(self.tmp, "decoy.txt")
+        with open(decoy_file, "w") as df:
+            df.write("DECOY_UNTOUCHED")
+        os.symlink(decoy_file, symlink_target)
+
+        # Debe ser rechazado categóricamente
+        self.assertFalse(self.vault.export_key_recovery_package(symlink_target, overwrite=False))
+        self.assertFalse(self.vault.export_key_recovery_package(symlink_target, overwrite=True))
+
+        # Verificar que el señuelo no fue sobreescrito ni tocado
+        with open(decoy_file, "r") as df:
+            self.assertEqual(df.read(), "DECOY_UNTOUCHED")
+
+        # 4. Protección contra enlaces simbólicos en el directorio padre
+        sym_dir = os.path.join(self.tmp, "sym_dir")
+        real_dir = os.path.join(self.tmp, "real_dir")
+        os.makedirs(real_dir, exist_ok=True)
+        os.symlink(real_dir, sym_dir)
+        self.assertFalse(self.vault.export_key_recovery_package(os.path.join(sym_dir, "export.json")))
+
+        # 5. Protección contra directorios modificables por usuarios no privilegiados sin sticky bit
+        insecure_dir = os.path.join(self.tmp, "insecure_world_writable_dir")
+        os.makedirs(insecure_dir, exist_ok=True)
+        os.chmod(insecure_dir, 0o777)
+        self.assertFalse(self.vault.export_key_recovery_package(os.path.join(insecure_dir, "key.json")))
+
+        # Con sticky bit (0o1777, ej: /tmp), debe ser admitido
+        os.chmod(insecure_dir, 0o1777)
+        self.assertTrue(self.vault.export_key_recovery_package(os.path.join(insecure_dir, "key.json")))
+
+        # 6. Importación validada
+        imported = self.vault.import_key_recovery_package(recovery_pkg)
+        self.assertTrue(imported)
+
+        # Importación de enlace simbólico debe ser rechazada
+        self.assertFalse(self.vault.import_key_recovery_package(symlink_target))
+
+    def test_privileged_quarantine_operator_descriptor_pinning_and_toctou_rejection(self):
+        """Verifica que PrivilegedQuarantineOperator fije descriptores, detecte enlaces simbólicos y rechace TOCTOU."""
+        op = PrivilegedQuarantineOperator()
+        sample_path = os.path.join(self.tmp, "test_operator_sample.bin")
+        with open(sample_path, "wb") as f:
+            f.write(b"datos_de_prueba_operador_cuarentena_12345")
+
+        # 1. Fijación de descriptor y validación estándar
+        handle = op.pin_and_validate(sample_path)
+        self.assertIsNotNone(handle)
+        self.assertGreaterEqual(handle.fd, 0)
+        self.assertEqual(handle.size_bytes, len(b"datos_de_prueba_operador_cuarentena_12345"))
+        self.assertTrue(len(handle.sha256) == 64)
+        handle.close()
+
+        # 2. Rechazo estricto de ataques con enlaces simbólicos (Anti-Symlink TOCTOU)
+        symlink_path = os.path.join(self.tmp, "symlink_malicioso.bin")
+        if os.path.exists(symlink_path):
+            os.remove(symlink_path)
+        os.symlink(sample_path, symlink_path)
+        with self.assertRaises(PermissionError):
+            op.pin_and_validate(symlink_path)
+        os.remove(symlink_path)
+
+        # 3. Rechazo de rutas de kernel protegidas (/proc, /sys, /dev)
+        with self.assertRaises(PermissionError):
+            op.pin_and_validate("/proc/version")
+
+        # 4. Reutilización segura de descriptor existente (target_fd)
+        fd = os.open(sample_path, os.O_RDONLY | os.O_CLOEXEC)
+        handle2 = op.pin_and_validate(sample_path, target_fd=fd)
+        os.close(fd)
+        self.assertEqual(handle2.sha256, handle.sha256)
+        self.assertTrue(handle2.is_cloned_fd)
+        handle2.close()
+
+    def test_quarantine_with_descriptor_and_read_only_fs_resilience(self):
+        """Verifica que quarantine_file acepte target_fd y soporte medios de solo lectura (EROFS) sin perder la muestra."""
+        fpath = os.path.join(self.tmp, "quar_ro_test.bin")
+        with open(fpath, "wb") as f:
+            f.write(b"payload_hostil_para_aislar_en_medio_ro")
+
+        fd = os.open(fpath, os.O_RDONLY | os.O_CLOEXEC)
+        # 1. Cuarentena con target_fd explícito
+        vid = self.vault.quarantine_file(fpath, "Trojan.ROTest", detected_by="TestDescriptor", target_fd=fd)
+        os.close(fd)
+        self.assertIsNotNone(vid)
+        self.assertFalse(os.path.exists(fpath))
+
+        # 2. Simulación de sistema de archivos de solo lectura (EROFS)
+        fpath_ro = os.path.join(self.tmp, "quar_ro_mount_test.bin")
+        with open(fpath_ro, "wb") as f:
+            f.write(b"payload_en_filesystem_de_solo_lectura")
+
+        with patch.object(self.vault.operator, "secure_unlink", return_value=(False, True, "Sistema de archivos de solo lectura (EROFS)")):
+            vid_ro = self.vault.quarantine_file(fpath_ro, "Rootkit.ReadOnlyFS", detected_by="TestRO")
+            self.assertIsNotNone(vid_ro)
+            # El archivo original se mantiene por ser de solo lectura, pero la muestra queda aislada en el baúl
+            items = self.vault.list_items()
+            ro_item = next((it for it in items if it["vault_id"] == vid_ro), None)
+            self.assertIsNotNone(ro_item)
+            self.assertEqual(ro_item.get("quarantine_mode"), "isolated_in_vault_ro_fs")
+            self.assertFalse(ro_item.get("original_removed"))
+
+    def test_vault_v3_96bit_nonces_and_collision_freedom(self):
+        """Verifica que generate_unique_nonce_96 genere nonces de 12 bytes (96 bits) libres de colisiones bajo concurrencia."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        vault = QuarantineVault(storage_dir=os.path.join(self.tmp, "vault_concurrent"))
+        num_nonces = 2000
+
+        def get_nonce(_):
+            return vault.generate_unique_nonce_96()
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            nonces = list(executor.map(get_nonce, range(num_nonces)))
+
+        self.assertEqual(len(nonces), num_nonces)
+        # Verificar unicidad absoluta (cero colisiones)
+        self.assertEqual(len(set(nonces)), num_nonces)
+        # Verificar longitud exacta de 96 bits (12 bytes)
+        for n in nonces:
+            self.assertEqual(len(n), 12)
+
+    def test_vault_key_volume_control_and_rotation(self):
+        """Verifica control de límites de uso por clave, rotación automática y keyring histórico."""
+        vault = QuarantineVault(storage_dir=os.path.join(self.tmp, "vault_rotation"))
+        vault.max_key_usage_limit = 10  # Límite bajo para prueba
+
+        initial_key_id = vault.key_id
+        initial_key = vault._aes_key
+
+        # Generar nonces hasta superar el límite
+        for _ in range(15):
+            vault.generate_unique_nonce_96()
+
+        # Debe haberse ejecutado la rotación de clave
+        self.assertNotEqual(vault.key_id, initial_key_id)
+        self.assertNotEqual(vault._aes_key, initial_key)
+        self.assertIn(initial_key_id, vault.keyring)
+        self.assertEqual(vault.keyring[initial_key_id], initial_key)
+
+    def test_vault_format_v3_v2_v1_cross_version_decryption(self):
+        """Verifica descifrado transparente entre versiones V3 (96-bit), V2 (64-bit base) y V1 (monolítico)."""
+        vault = QuarantineVault(storage_dir=os.path.join(self.tmp, "vault_versions"))
+        sample_data = b"Contenido confidencial de prueba multiversion para baul Constantine"
+
+        # 1. Cifrado nativo V3 (actual)
+        src_v3 = os.path.join(self.tmp, "sample_v3.bin")
+        enc_v3 = os.path.join(self.tmp, "sample_v3.quar")
+        dec_v3 = os.path.join(self.tmp, "sample_v3_dec.bin")
+        with open(src_v3, "wb") as f:
+            f.write(sample_data)
+
+        self.assertTrue(vault.encrypt_file_streaming(src_v3, enc_v3))
+        self.assertTrue(vault.decrypt_file_streaming(enc_v3, dec_v3))
+        with open(dec_v3, "rb") as f:
+            self.assertEqual(f.read(), sample_data)
+
+        # 2. Simular archivo en formato V2 (CST_AES256GCM_S:)
+        enc_v2 = os.path.join(self.tmp, "sample_v2.quar")
+        dec_v2 = os.path.join(self.tmp, "sample_v2_dec.bin")
+        import secrets
+        import struct
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        aesgcm = AESGCM(vault._aes_key)
+        base_nonce_v2 = secrets.token_bytes(8)
+        block_nonce_v2 = base_nonce_v2 + struct.pack(">I", 0)
+        block_aad_v2 = b"CST_CHUNK:" + struct.pack(">IB", 0, 1)
+        ciphertext_v2 = aesgcm.encrypt(block_nonce_v2, sample_data, block_aad_v2)
+
+        with open(enc_v2, "wb") as f:
+            f.write(b"CST_AES256GCM_S:")
+            f.write(base_nonce_v2)
+            f.write(struct.pack(">Q", len(sample_data)))
+            f.write(struct.pack(">IB", len(ciphertext_v2), 1))
+            f.write(ciphertext_v2)
+
+        self.assertTrue(vault.decrypt_file_streaming(enc_v2, dec_v2))
+        with open(dec_v2, "rb") as f:
+            self.assertEqual(f.read(), sample_data)
+
+        # 3. Simular archivo en formato V1 (CST_AES256GCM:)
+        enc_v1 = os.path.join(self.tmp, "sample_v1.quar")
+        dec_v1 = os.path.join(self.tmp, "sample_v1_dec.bin")
+        nonce_v1 = secrets.token_bytes(12)
+        ciphertext_v1 = aesgcm.encrypt(nonce_v1, sample_data, None)
+        with open(enc_v1, "wb") as f:
+            f.write(b"CST_AES256GCM:")
+            f.write(nonce_v1)
+            f.write(ciphertext_v1)
+
+        self.assertTrue(vault.decrypt_file_streaming(enc_v1, dec_v1))
+        with open(dec_v1, "rb") as f:
+            self.assertEqual(f.read(), sample_data)
 
     def test_scanner_update_signatures_syncs_feeds_real(self):
         """Verifica que update_signatures invoque sync_feeds y refleje resultados reales."""
@@ -577,6 +942,67 @@ class TestConstantineSecurity(unittest.TestCase):
         self.auth.revoke_session(token)
         self.assertFalse(self.auth.is_session_valid(token))
 
+    def test_ipc_rbac_policy_matrix(self):
+        """Verifica la matriz de permisos RBAC: operaciones de usuario vs administrativas."""
+        from core.engine.ipc_protocol import is_operation_permitted
+
+        # Operaciones permitidas a usuario normal
+        self.assertTrue(is_operation_permitted("GET_STATUS", is_admin=False))
+        self.assertTrue(is_operation_permitted("GET_THREATS", is_admin=False))
+        self.assertTrue(is_operation_permitted("GET_SHIELDS_HEALTH", is_admin=False))
+        self.assertTrue(is_operation_permitted("GET_AUDIT_LOGS", is_admin=False))
+        self.assertTrue(is_operation_permitted("REQUEST_SCAN", is_admin=False))
+
+        # Operaciones administrativas restringidas a usuario normal
+        self.assertFalse(is_operation_permitted("ADD_WHITELIST", is_admin=False))
+        self.assertFalse(is_operation_permitted("REMOVE_WHITELIST", is_admin=False))
+        self.assertFalse(is_operation_permitted("TOGGLE_SHIELD", is_admin=False))
+        self.assertFalse(is_operation_permitted("PURGE_QUARANTINE", is_admin=False))
+        self.assertFalse(is_operation_permitted("APPLY_DNS_PROFILE", is_admin=False))
+
+        # El administrador puede ejecutar todas las operaciones
+        self.assertTrue(is_operation_permitted("ADD_WHITELIST", is_admin=True))
+        self.assertTrue(is_operation_permitted("TOGGLE_SHIELD", is_admin=True))
+        self.assertTrue(is_operation_permitted("PURGE_QUARANTINE", is_admin=True))
+
+    def test_ipc_server_side_authorization_enforcement(self):
+        """Verifica que el servidor IPC aplique validación estricta en el servidor y rechace comandos no autorizados."""
+        from core.engine.ipc_protocol import SecureIPCDaemonServer, SecureIPCClient
+        from core.auth.auth_manager import AuthManager
+
+        sock_path = os.path.join(self.tmp, "rbac_test.sock")
+        auth = AuthManager()
+        admin_token = "valid_admin_token_test_123"
+        auth.active_sessions[admin_token] = time.time() + 900
+
+        def dummy_handler(cmd, params, uid, is_admin):
+            return "OK", {"echo": cmd, "is_admin": is_admin}, ""
+
+        # Servidor con validación en background
+        server = SecureIPCDaemonServer(socket_path=sock_path, command_handler=dummy_handler, auth_manager=auth)
+        server.start(background=True)
+        time.sleep(0.05)
+
+        client = SecureIPCClient(socket_path=sock_path)
+
+        # 1. Comando de consulta sin token (permitido a usuario normal)
+        resp1 = client.send_command("GET_STATUS")
+        self.assertEqual(resp1.get("status"), "OK")
+
+        # 2. Comando administrativo sin token de administrador (debe ser rechazado por el servidor)
+        with patch.object(server, "verify_peer_credentials", return_value=(True, 1234, 1000, 1000)):
+            resp2 = client.send_command("ADD_WHITELIST", params={"path": "/tmp/test"})
+            self.assertEqual(resp2.get("status"), "FORBIDDEN")
+            self.assertIn("requiere autorización administrativa", resp2.get("error", ""))
+
+        # 3. Comando administrativo con token de sesión de administrador válido (debe ser aceptado)
+        with patch.object(server, "verify_peer_credentials", return_value=(True, 1234, 1000, 1000)):
+            resp3 = client.send_command("ADD_WHITELIST", params={"path": "/tmp/test"}, token=admin_token)
+            self.assertEqual(resp3.get("status"), "OK")
+            self.assertTrue(resp3.get("data", {}).get("is_admin"))
+
+        server.stop()
+
     def test_phishing(self):
         self.assertFalse(self.phishing.analyze_url("https://google.com").is_phishing)
         self.assertTrue(self.phishing.analyze_url("http://g00gle-verify.xyz/account").is_phishing)
@@ -619,10 +1045,10 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("current_kernel", info)
 
     def test_auto_updater(self):
-        cu = ConstantineUpdater(current_version="4.0.9")
-        self.assertEqual(cu._parse_version("4.0.9"), (4, 0, 9))
-        self.assertEqual(cu._parse_version("v4.1.1"), (4, 1, 1))
-        self.assertTrue(cu._parse_version("4.1.1") > cu._parse_version("4.0.9"))
+        cu = ConstantineUpdater(current_version="4.1.9")
+        self.assertEqual(cu._parse_version("4.1.9"), (4, 1, 9))
+        self.assertEqual(cu._parse_version("v4.1.9"), (4, 1, 9))
+        self.assertTrue(cu._parse_version("4.2.0") > cu._parse_version("4.1.9"))
 
     def test_usb_sentinel_containment_and_scan(self):
         """Verifica que el monitor USB aplique contención fanotify y aísle autoruns hostiles."""
@@ -994,6 +1420,11 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("CapabilityBoundingSet=", content)
         self.assertIn("CAP_SYS_ADMIN", content)
         self.assertIn("ReadWritePaths=", content)
+        # Verificar que ReadWritePaths incluya las rutas de cuarentena para evitar conflictos con ProtectSystem=strict
+        self.assertIn("/home", content)
+        self.assertIn("/tmp", content)
+        self.assertIn("/var/tmp", content)
+        self.assertIn("/var/lib/constantine", content)
 
 
 if __name__ == "__main__":

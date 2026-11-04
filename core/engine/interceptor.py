@@ -92,13 +92,14 @@ PSEUDO_FILESYSTEMS = {
 }
 
 class FanotifyInterceptor:
-    def __init__(self, scanner, vault=None, notifier=None, firewall=None, ransomware=None, fail_policy: str = "secure"):
+    def __init__(self, scanner, vault=None, notifier=None, firewall=None, ransomware=None, fail_policy: str = "secure", ebpf_monitor=None):
         self.scanner = scanner
         self.vault = vault
         self.notifier = notifier
         self.firewall = firewall
         self.ransomware = ransomware  # Módulo Anti-Ransomware conectado
         self.fail_policy = fail_policy  # 'secure' (Fail-Close estricto por defecto), 'safe' (Fail-Open)
+        self.ebpf_monitor = ebpf_monitor  # Monitor eBPF para correlación de intenciones en kernel
         self.whitelist = SystemWhitelist()
         self.fan_fd = -1
         self.running = False
@@ -107,6 +108,10 @@ class FanotifyInterceptor:
         self.kernel_supports_exec_perm = True
         self.mount_watcher_thread: Optional[threading.Thread] = None
         self.overflow_count = 0
+
+    def set_ebpf_monitor(self, ebpf_monitor):
+        """Asigna o actualiza el monitor eBPF para correlación de operaciones en kernel."""
+        self.ebpf_monitor = ebpf_monitor
 
     def initialize(self) -> bool:
         """Inicializa fanotify con cola ilimitada y marcas ilimitadas para prevenir desbordamientos."""
@@ -391,16 +396,68 @@ class FanotifyInterceptor:
 
                             proc_name = self.get_process_name(pid)
 
-                            # Determinar el tipo de operación de archivo mediante banderas del descriptor
-                            is_read_intent = True
+                            # =========================================================================
+                            # DETERMINACIÓN DE INTENCIÓN DE OPERACIÓN (FAIL-SECURE & CORRELACIÓN eBPF)
+                            # NUNCA usar fcntl(F_GETFL) sobre event_fd: fanotify siempre entrega el
+                            # descriptor con event_f_flags (O_RDONLY), enmascarando los permisos reales
+                            # solicitados por el proceso en openat/openat2 (Vulnerabilidad H-01 corregida).
+                            # =========================================================================
                             is_write_intent = False
-                            try:
-                                fl = fcntl.fcntl(event_fd, fcntl.F_GETFL)
-                                acc = fl & os.O_ACCMODE
-                                is_write_intent = (acc in (os.O_WRONLY, os.O_RDWR)) or bool(fl & (os.O_TRUNC | os.O_APPEND))
-                                is_read_intent = (acc in (os.O_RDONLY, os.O_RDWR))
-                            except Exception:
-                                is_write_intent = True
+                            is_read_intent = False
+                            is_delete_or_rename = False
+
+                            # 1. Correlación atómica en kernel mediante eBPF
+                            ebpf_intent = None
+                            if self.ebpf_monitor and hasattr(self.ebpf_monitor, "get_process_file_intent"):
+                                ebpf_intent = self.ebpf_monitor.get_process_file_intent(pid, target_path)
+
+                            if ebpf_intent:
+                                is_write_intent = ebpf_intent.is_write
+                                is_read_intent = ebpf_intent.is_read
+                                is_delete_or_rename = ebpf_intent.is_delete or ebpf_intent.is_rename
+                            else:
+                                # 2. Modo Respaldo / Fail-Secure Heurístico (cuando eBPF opera en espacio de usuario):
+                                proc_exe = ""
+                                try:
+                                    proc_exe = os.path.realpath(f"/proc/{pid}/exe")
+                                except Exception:
+                                    pass
+
+                                is_whitelisted_proc = self.whitelist.is_trusted_system_binary(proc_exe) if proc_exe else False
+
+                                # a) Si es un señuelo trampa (Canary Honeypot):
+                                # Los señuelos carecen de motivo de acceso por aplicaciones de usuario.
+                                # Si un proceso no confiable accede al señuelo, NUNCA asumir lectura benigna:
+                                # tratamos la operación como manipulación hostil (Fail-Secure).
+                                is_canary = False
+                                if self.ransomware and hasattr(self.ransomware, "is_canary_file"):
+                                    is_canary = self.ransomware.is_canary_file(target_path)
+                                elif self.ransomware and hasattr(self.ransomware, "canary_files"):
+                                    norm_t = os.path.abspath(target_path)
+                                    is_canary = norm_t in self.ransomware.canary_files
+
+                                if is_canary:
+                                    if is_whitelisted_proc:
+                                        is_read_intent = True
+                                        is_write_intent = False
+                                    else:
+                                        # Proceso no confiable tocando trampa canary -> Presunción de escritura/manipulación
+                                        is_write_intent = True
+                                        is_read_intent = False
+                                else:
+                                    # b) Archivos con extensión de secuestro (.locked, .crypto, etc.):
+                                    ext = os.path.splitext(target_path)[1].lower()
+                                    is_ransom_ext = False
+                                    if self.ransomware and hasattr(self.ransomware, "RANSOMWARE_EXTENSIONS"):
+                                        is_ransom_ext = ext in self.ransomware.RANSOMWARE_EXTENSIONS
+
+                                    if is_ransom_ext and not is_whitelisted_proc:
+                                        is_write_intent = True
+                                        is_read_intent = False
+                                    else:
+                                        # c) Archivo convencional: asumir lectura segura para no penalizar herramientas como grep/tar
+                                        is_read_intent = True
+                                        is_write_intent = False
 
                             # 2. EVALUACIÓN ANTIRANSOMWARE INTEGRADA (Canary Traps, Extensiones y Ráfagas)
                             if self.ransomware and target_path and not target_path.startswith("<fd:"):
@@ -409,6 +466,7 @@ class FanotifyInterceptor:
                                     pid=pid,
                                     is_write=is_write_intent,
                                     is_read=is_read_intent,
+                                    is_delete_or_rename=is_delete_or_rename,
                                     target_fd=event_fd
                                 )
                                 if rw_decision.is_blocked:
@@ -438,7 +496,7 @@ class FanotifyInterceptor:
                                     decision = FAN_DENY
                                     logger.warning("🚨 [BLOQUEO FAN_DENY] %s (PID: %d) intentó ejecutar/abrir %s (%s)", proc_name, pid, target_path, scan_res.threat_name)
                                     if self.vault and os.path.exists(target_path):
-                                        self.vault.quarantine_file(target_path, scan_res.threat_name or "Malware", detected_by="FanotifyKernel")
+                                        self.vault.quarantine_file(target_path, scan_res.threat_name or "Malware", detected_by="FanotifyKernel", target_fd=event_fd)
                                     if self.notifier:
                                         self.notifier.alert_threat_blocked(scan_res.threat_name or "Malware", target_path, pid, proc_name)
                                     if self.firewall:

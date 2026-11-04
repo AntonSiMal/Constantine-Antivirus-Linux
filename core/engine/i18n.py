@@ -99,10 +99,12 @@ STRINGS = {
 class Localization:
     def __init__(self, default_lang: str = "es"):
         self.lang = default_lang
+        self.current_lang = default_lang
 
     def set_language(self, lang: str):
         if lang in STRINGS:
             self.lang = lang
+            self.current_lang = lang
 
     def get(self, key: str) -> str:
         return STRINGS.get(self.lang, STRINGS["es"]).get(key, key)
