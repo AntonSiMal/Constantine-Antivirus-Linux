@@ -1,0 +1,104 @@
+"""
+Constantine Antivirus - Memory RAM Scanner (core/engine/memory_scanner.py)
+Auditoría e inspección de procesos en ejecución y memoria RAM:
+1. Inspecciona ejecutables de procesos en /proc/<pid>/exe.
+2. Detecta binarios eliminados que siguen corriendo en RAM (técnica típica de malware: binary deleted on disk).
+3. Inspecciona regiones de memoria en /proc/<pid>/maps buscando permisos anómalos RWX (Read-Write-Execute).
+4. Analiza procesos contra firmas YARA y hashes de MalwareBazaar.
+"""
+
+import os
+import logging
+from typing import Dict, List, Optional, Callable
+
+logger = logging.getLogger("constantine.ram")
+
+class MemoryScanner:
+    def __init__(self, scanner=None, vault=None):
+        self.scanner = scanner
+        self.vault = vault
+
+    def get_running_pids(self) -> List[int]:
+        pids = []
+        for entry in os.listdir("/proc"):
+            if entry.isdigit():
+                try:
+                    pids.append(int(entry))
+                except Exception:
+                    pass
+        return sorted(pids)
+
+    def scan_ram(self, progress_callback: Optional[Callable] = None) -> Dict:
+        """
+        Escanea la memoria RAM auditando todos los procesos activos en /proc.
+        Envía eventos de progreso a progress_callback(pid, proc_name, scanned_count, total_count, threats_count).
+        """
+        pids = self.get_running_pids()
+        total = len(pids)
+        threats_found = []
+        scanned_count = 0
+
+        for pid in pids:
+            scanned_count += 1
+            proc_name = "proceso"
+            try:
+                comm_path = f"/proc/{pid}/comm"
+                if os.path.exists(comm_path):
+                    with open(comm_path, "r") as f:
+                        proc_name = f.read().strip()
+            except Exception:
+                pass
+
+            is_malicious = False
+            reason = ""
+
+            # 1. Comprobar si el binario fue eliminado del disco mientras sigue corriendo en RAM
+            exe_link = f"/proc/{pid}/exe"
+            try:
+                if os.path.exists(exe_link):
+                    target = os.readlink(exe_link)
+                    if " (deleted)" in target:
+                        is_malicious = True
+                        reason = f"Ejecutable borrado en disco pero activo en RAM ({target})"
+                    elif self.scanner and os.path.isfile(target):
+                        res = self.scanner.scan_file(file_path=target)
+                        if res.is_malicious:
+                            is_malicious = True
+                            reason = res.threat_name or "Malware en RAM"
+            except Exception:
+                pass
+
+            # 2. Comprobar mapas de memoria buscando segmentos RWX sospechosos
+            if not is_malicious:
+                maps_path = f"/proc/{pid}/maps"
+                try:
+                    if os.path.exists(maps_path):
+                        with open(maps_path, "r") as f:
+                            for line in f:
+                                parts = line.split()
+                                if len(parts) >= 2:
+                                    perms = parts[1]
+                                    # Permiso rwxp en segmento anónimo suele delatar inyección de shellcode
+                                    if perms.startswith("rwx") and len(parts) < 6:
+                                        is_malicious = True
+                                        reason = "Inyección de memoria detectada (Segmento RWX anónimo)"
+                                        break
+                except Exception:
+                    pass
+
+            if is_malicious:
+                threats_found.append({
+                    "pid": pid,
+                    "comm": proc_name,
+                    "reason": reason
+                })
+
+            if progress_callback:
+                progress_callback(pid, proc_name, scanned_count, total, len(threats_found))
+
+        return {
+            "total_pids": total,
+            "scanned": scanned_count,
+            "threats_count": len(threats_found),
+            "threats": threats_found
+        }
