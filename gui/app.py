@@ -149,9 +149,9 @@ class ConstantineGUI:
         self._build_window()
 
     def _on_window_delete(self):
-        # Al pulsar [X], minimizar a la bandeja junto al reloj
-        self.window.hide()
-        return True
+        # Cerrar limpiamente la aplicacion para no dejar procesos huerfanos
+        Gtk.main_quit()
+        return False
 
     def _load_css(self):
         try:
@@ -203,7 +203,7 @@ class ConstantineGUI:
         self.lbl_title = Gtk.Label()
         self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v2.8 </span>")
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.1 </span>")
         title_box.pack_start(self.lbl_title, False, False, 0)
         title_box.pack_start(lbl_badge, False, False, 0)
         self.headerbar.pack_start(title_box)
@@ -628,7 +628,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v2.8)" if is_es else "EDR Security Posture Diagnosis (v2.8)",
+            title="Diagnóstico de Salud de Seguridad EDR (v3.1)" if is_es else "EDR Security Posture Diagnosis (v3.1)",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -772,6 +772,24 @@ class ConstantineGUI:
 
         if resp == Gtk.ResponseType.OK:
             self._trigger_app_update()
+
+    def _restart_app(self):
+        """Reinicia la aplicación Constantine GUI de forma limpia."""
+        logger.info("Reiniciando Constantine GUI...")
+        try:
+            if hasattr(self, 'window'):
+                self.window.hide()
+            python_bin = sys.executable
+            target_script = os.path.abspath(__file__)
+            subprocess.Popen([python_bin, target_script] + sys.argv[1:], start_new_session=True)
+            Gtk.main_quit()
+            sys.exit(0)
+        except Exception as e:
+            logger.error("Fallo al reiniciar proceso: %s", e)
+            try:
+                os.execl(sys.executable, sys.executable, os.path.abspath(__file__), *sys.argv[1:])
+            except Exception:
+                sys.exit(0)
 
     def _trigger_app_update(self):
         if not self._check_auth_required():
@@ -1724,28 +1742,48 @@ class ConstantineGUI:
         btn_check_app_update = Gtk.Button(label="🔄 Buscar Actualizaciones Ahora")
         btn_check_app_update.connect("clicked", lambda b: self._manual_check_app_updates())
         au_box.pack_start(btn_check_app_update, False, False, 0)
+
+        btn_restart_app = Gtk.Button(label="⚡ Reiniciar Aplicación")
+        btn_restart_app.set_tooltip_text("Reinicia la interfaz de Constantine de forma limpia")
+        btn_restart_app.connect("clicked", lambda b: self._restart_app())
+        au_box.pack_start(btn_restart_app, False, False, 0)
         app_up_card.add(au_box)
         box.pack_start(app_up_card, False, False, 5)
         return box
 
     # --- Acciones y Eventos ---
     def _on_master_switch_toggled(self, switch, state):
+        if getattr(self, '_ignoring_switch_signals', False):
+            return False
+
         if not self._check_auth_required():
-            switch.set_active(not state)
+            self._ignoring_switch_signals = True
+            try:
+                switch.set_active(not state)
+            finally:
+                self._ignoring_switch_signals = False
             return True
+
         self.antivirus_enabled = state
         is_es = (self.loc.lang == "es")
         if state:
-            self.lbl_master_state.set_markup(f"<b>{'Antivirus: ON'}</b>")
-            self.lbl_system_status.set_markup(f"<span font='10' weight='bold' foreground='#2e7d32'>{'🛡️ SISTEMA PROTEGIDO' if is_es else '🛡️ SYSTEM PROTECTED'}</span>")
+            self.lbl_master_state.set_markup(f"<b>{'AV: ON'}</b>")
+            self.lbl_system_status.set_markup(f"<span font='8.5' weight='bold' foreground='#30d158'>{'● PROTEGIDO' if is_es else '● PROTECTED'}</span>")
         else:
-            self.lbl_master_state.set_markup(f"<b>{'Antivirus: OFF'}</b>")
-            self.lbl_system_status.set_markup(f"<span font='10' weight='bold' foreground='#d32f2f'>{'⚠️ PROTECCIÓN PAUSADA' if is_es else '⚠️ PROTECTION PAUSED'}</span>")
+            self.lbl_master_state.set_markup(f"<b>{'AV: OFF'}</b>")
+            self.lbl_system_status.set_markup(f"<span font='8.5' weight='bold' foreground='#ff453a'>{'⚠️ PAUSADO' if is_es else '⚠️ PAUSED'}</span>")
         return False
 
     def _on_shield_toggled(self, switch, state, title):
+        if getattr(self, '_ignoring_switch_signals', False):
+            return False
+
         if not self._check_auth_required():
-            switch.set_active(not state)
+            self._ignoring_switch_signals = True
+            try:
+                switch.set_active(not state)
+            finally:
+                self._ignoring_switch_signals = False
             return True
         return False
 
@@ -1806,13 +1844,18 @@ class ConstantineGUI:
         self.vault_store.clear()
         for it in self.vault.list_items():
             t = it.get("quarantine_time_str") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(it.get("quarantine_time", 0)))
+            orig_path = it.get("original_path", "")
+            file_name = os.path.basename(orig_path) if orig_path else "desconocido"
+            threat_name = it.get("threat_name", "Malware")
             h = it.get("sha256", "")
             short_h = h[:16] + "..." if len(h) > 16 else h
+            vid = it.get("vault_id", "")
             self.vault_store.append([
-                it["vault_id"],
-                it.get("threat_name", "Malware"),
-                it.get("original_path", ""),
+                vid,
                 t,
+                threat_name,
+                file_name,
+                orig_path,
                 short_h
             ])
 
@@ -1965,7 +2008,10 @@ class ConstantineGUI:
         sys.exit(0)
 
     def run(self):
+        if hasattr(self, 'headerbar'):
+            self.headerbar.show_all()
         self.window.show_all()
+        self.window.present()
         Gtk.main()
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ pip3 install -r requirements.txt --break-system-packages 2>/dev/null || pip3 ins
 
 echo "3. Desplegando archivos con permisos multi-usuario en /opt/constantine..."
 mkdir -p /opt/constantine /var/lib/constantine/vault/payloads /etc/constantine /var/lib/constantine/canaries
-cp -r core gui service scripts assets daemon.py requirements.txt /opt/constantine/
+cp -r core gui service scripts assets daemon.py requirements.txt VERSION /opt/constantine/
 chmod -R 755 /opt/constantine/
 chmod -R 700 /var/lib/constantine/vault
 
@@ -104,6 +104,8 @@ echo "10. Creando comandos globales en el terminal (/usr/local/bin/constantine-g
 mkdir -p /usr/local/bin
 cat << 'BIN_WRAPPER' > /usr/local/bin/constantine-gui
 #!/bin/bash
+# Garantizar que no haya instancias huérfanas ocultas bloqueando la interfaz
+pkill -f "/opt/constantine/gui/app.py" 2>/dev/null || true
 exec python3 /opt/constantine/gui/app.py ""
 BIN_WRAPPER
 chmod +x /usr/local/bin/constantine-gui

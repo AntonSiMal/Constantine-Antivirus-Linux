@@ -18,7 +18,7 @@ from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("constantine.updater")
 
-CURRENT_VERSION = "2.8.0"
+CURRENT_VERSION = "3.1.0"
 GITHUB_REPO = "AntonSiMal/Constantine-Antivirus-Linux"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -94,6 +94,13 @@ class ConstantineUpdater:
         # Si target_dir no existe o estamos en desarrollo, actualizar sobre el directorio del script
         if not os.path.exists(target_dir):
             target_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        # Proteger de degradaciones accidentales si GitHub contiene una versión inferior
+        info = self.check_for_updates()
+        if info.get("remote_checked"):
+            remote_ver = info.get("latest_version", self.current_version)
+            if self._parse_version(remote_ver) < self._parse_version(self.current_version):
+                return False, f"Tu versión instalada (v{self.current_version}) es más reciente que la del repositorio en GitHub (v{remote_ver}). Se canceló la sincronización para evitar degradar el sistema."
 
         temp_tar = "/tmp/constantine_latest.tar.gz"
         extract_dir = "/tmp/constantine_update_extracted"
