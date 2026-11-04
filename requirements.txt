@@ -1,0 +1,4 @@
+yara-python>=4.3.0
+bcc>=0.28.0
+PyGObject>=3.42.0
+dbus-python>=1.3.2
