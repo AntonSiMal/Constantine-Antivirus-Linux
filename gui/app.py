@@ -25,6 +25,7 @@ from core.auth.auth_manager import AuthManager
 from core.engine.vault import QuarantineVault
 from core.engine.phishing import PhishingShield
 from core.engine.scanner import Scanner
+from core.engine.system_whitelist import SystemWhitelist
 from core.engine.dns_manager import DNSManager, MULLVAD_DNS_PROFILES
 from core.engine.firewall import NetworkQuarantine
 from core.engine.vpn_manager import VPNManager
@@ -32,6 +33,7 @@ from core.engine.ransomware_shield import RansomwareShield
 from core.engine.usb_monitor import USBAutoScanner
 from core.engine.update_guard import SystemUpdateGuard
 from core.engine.memory_scanner import MemoryScanner
+from core.engine.auto_updater import ConstantineUpdater
 from core.engine.i18n import Localization
 from gui.tray import ConstantineTrayIcon
 
@@ -51,6 +53,7 @@ class ConstantineGUI:
         self.loc = Localization(default_lang="es")
         self.auth_mgr = AuthManager()
         self.vault = QuarantineVault()
+        self.whitelist = SystemWhitelist()
         self.phishing = PhishingShield()
         self.scanner = Scanner()
         self.dns_mgr = DNSManager()
@@ -59,6 +62,7 @@ class ConstantineGUI:
         self.ransomware = RansomwareShield()
         self.update_guard = SystemUpdateGuard()
         self.memory_scanner = MemoryScanner(scanner=self.scanner, vault=self.vault)
+        self.updater = ConstantineUpdater()
 
         self.session_token = None
         self.is_unlocked = False
@@ -187,6 +191,9 @@ class ConstantineGUI:
         vbox.pack_start(statusbar, False, False, 0)
 
         self._update_lock_ui()
+        threading.Thread(target=self._check_updates_background, daemon=True).start()
+        # Comprobar actualizaciones de Constantine en segundo plano al iniciar
+        threading.Thread(target=self._check_updates_background, daemon=True).start()
 
     def _change_language(self, lang):
         self.loc.set_language(lang)
@@ -202,7 +209,78 @@ class ConstantineGUI:
 
         self.lbl_master_state.set_markup(f"<b>{'Antivirus: ON' if is_es else 'Antivirus: ON'}</b>")
         self._update_lock_ui()
+        # Comprobar actualizaciones de Constantine en segundo plano al iniciar
+        threading.Thread(target=self._check_updates_background, daemon=True).start()
         logger.info("Idioma cambiado a: %s", lang)
+
+
+    def _check_updates_background(self):
+        try:
+            info = self.updater.check_for_updates()
+            if info.get("update_available"):
+                GLib.idle_add(self._show_update_available_dialog, info)
+        except Exception as e:
+            logger.debug("Error en comprobación de actualización en segundo plano: %s", e)
+
+    def _show_update_available_dialog(self, info):
+        dialog = Gtk.MessageDialog(
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"🎉 Nueva Versión Disponible: v{info['latest_version']}"
+        )
+        dialog.format_secondary_text(
+            f"Tu versión actual es v{info['current_version']}.\n\n"
+            f"Notas de la versión:\n{info['release_notes']}\n\n"
+            f"¿Deseas descargar e instalar la actualización ahora?"
+        )
+        dialog.add_button("Recordar Más Tarde", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Actualizar Ahora", Gtk.ResponseType.OK)
+        
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.OK:
+            self._trigger_app_update()
+
+    def _trigger_app_update(self):
+        if not self._check_auth_required():
+            return
+
+        progress_dialog = Gtk.MessageDialog(
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Descargando e Instalando Actualización..."
+        )
+        progress_dialog.format_secondary_text("Sincronizando los últimos archivos desde GitHub y reiniciando el servicio...")
+        progress_dialog.show_all()
+
+        def do_update():
+            ok, msg = self.updater.execute_update()
+            def done():
+                progress_dialog.destroy()
+                if ok:
+                    self._show_msg("Actualización Exitosa", f"{msg}\nSe recomienda reiniciar la aplicación.", Gtk.MessageType.INFO)
+                else:
+                    self._show_msg("Fallo de Actualización", msg, Gtk.MessageType.ERROR)
+            GLib.idle_add(done)
+
+        threading.Thread(target=do_update, daemon=True).start()
+
+
+    def _manual_check_app_updates(self):
+        info = self.updater.check_for_updates()
+        if info.get("update_available"):
+            self._show_update_available_dialog(info)
+        else:
+            self._show_msg(
+                "Constantine al Día",
+                f"Tienes la última versión de Constantine Antivirus instalada (v{info['current_version']}).",
+                Gtk.MessageType.INFO
+            )
 
     def _create_shields_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -334,6 +412,30 @@ class ConstantineGUI:
         self.scan_panel.add(spbox)
         box.pack_start(self.scan_panel, False, False, 5)
 
+        # Tabla de Amenazas Detectadas durante el Escaneo (Detalle exacto)
+        self.threats_frame = Gtk.Frame(label=" Amenazas Detectadas y Enviadas al Baúl ")
+        tbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        tbox.set_margin_start(10); tbox.set_margin_end(10); tbox.set_margin_top(8); tbox.set_margin_bottom(8)
+
+        self.threats_store = Gtk.ListStore(str, str, str, str) # Amenaza, Ruta, Estado, Hash
+        self.threats_tree = Gtk.TreeView(model=self.threats_store)
+
+        renderer = Gtk.CellRendererText()
+        col_t = Gtk.TreeViewColumn("Amenaza Detectada", renderer, text=0); col_t.set_resizable(True)
+        col_p = Gtk.TreeViewColumn("Ruta del Archivo", renderer, text=1); col_p.set_resizable(True)
+        col_s = Gtk.TreeViewColumn("Acción de Seguridad", renderer, text=2)
+        col_h = Gtk.TreeViewColumn("Hash SHA-256", renderer, text=3)
+
+        self.threats_tree.append_column(col_t)
+        self.threats_tree.append_column(col_p)
+        self.threats_tree.append_column(col_s)
+        self.threats_tree.append_column(col_h)
+
+        scroll_t = Gtk.ScrolledWindow(); scroll_t.set_min_content_height(140); scroll_t.add(self.threats_tree)
+        tbox.pack_start(scroll_t, True, True, 0)
+        self.threats_frame.add(tbox)
+        box.pack_start(self.threats_frame, True, True, 5)
+
         return box
 
     def _on_pick_folder_to_scan(self, button):
@@ -355,6 +457,7 @@ class ConstantineGUI:
             self._show_msg("Escaneo en curso", "Ya hay un análisis activo. Espera a que termine o cancélalo.", Gtk.MessageType.WARNING)
             return
 
+        self.threats_store.clear()
         self.is_scanning = True
         self.abort_scan = False
         self.btn_cancel_scan.set_sensitive(True)
@@ -412,7 +515,10 @@ class ConstantineGUI:
                     res = self.scanner.scan_file(file_path=fpath)
                     if res.is_malicious:
                         threats_count += 1
-                        self.vault.quarantine_file(fpath, res.threat_name or "Malware")
+                        t_name = res.threat_name or "Malware.Generic"
+                        f_hash = res.sha256 or "Calculando..."
+                        self.vault.quarantine_file(fpath, t_name)
+                        GLib.idle_add(self._add_detected_threat_row, t_name, fpath, "Neutralizado y en Baúl", f_hash[:16] + "...")
                 except Exception:
                     pass
 
@@ -422,6 +528,10 @@ class ConstantineGUI:
                     GLib.idle_add(self._update_scan_ui, frac, fpath, scanned_count, threats_count)
 
         GLib.idle_add(self._finish_scan_ui, scanned_count, threats_count, self.abort_scan)
+
+    def _add_detected_threat_row(self, threat, path, status, fhash):
+        self.threats_store.append([threat, path, status, fhash])
+        return False
 
     def _update_scan_ui(self, frac, current_name, count, threats):
         self.scan_progress.set_fraction(min(frac, 1.0))
@@ -457,30 +567,54 @@ class ConstantineGUI:
         box.set_margin_start(20); box.set_margin_end(20); box.set_margin_top(15)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Baúl de Cuarentena (Aislamiento Cifrado)</b>\nLos archivos maliciosos se neutralizan con permisos 000 y clave XOR.")
+        lbl.set_markup("<b>Baúl de Cuarentena (Aislamiento Cifrado)</b>\nNeutralización segura con permisos 000 y clave XOR.")
         lbl.set_xalign(0)
         box.pack_start(lbl, False, False, 0)
 
-        self.vault_store = Gtk.ListStore(str, str, str, str)
+        # Ubicación física en disco
+        storage_path = self.vault.get_storage_location()
+        card_loc = Gtk.Frame(label=" Ubicación Física en Disco ")
+        cbox_loc = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        cbox_loc.set_margin_start(12); cbox_loc.set_margin_end(12); cbox_loc.set_margin_top(6); cbox_loc.set_margin_bottom(6)
+        lbl_p = Gtk.Label()
+        lbl_p.set_markup(f"📁 <span font='10' foreground='#38bdf8' font_family='monospace'>{storage_path}</span> (Permisos 000 • Inmune a ejecución)")
+        lbl_p.set_xalign(0)
+        cbox_loc.pack_start(lbl_p, True, True, 0)
+        card_loc.add(cbox_loc)
+        box.pack_start(card_loc, False, False, 0)
+
+        # Tabla del Baúl con Selección Múltiple y Fecha/Hora Exacta
+        self.vault_store = Gtk.ListStore(str, str, str, str, str) # ID, Amenaza, Ruta Original, Fecha/Hora, Hash
         self.vault_tree = Gtk.TreeView(model=self.vault_store)
+        # Habilitar selección múltiple (Ctrl / Shift o selección arrastrada)
+        self.vault_tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
 
         renderer = Gtk.CellRendererText()
         col_threat = Gtk.TreeViewColumn("Amenaza", renderer, text=1); col_threat.set_resizable(True)
         col_path = Gtk.TreeViewColumn("Ruta Original", renderer, text=2); col_path.set_resizable(True)
-        col_date = Gtk.TreeViewColumn("Fecha", renderer, text=3)
+        col_date = Gtk.TreeViewColumn("Fecha y Hora de Neutralización", renderer, text=3); col_date.set_resizable(True)
+        col_hash = Gtk.TreeViewColumn("Hash SHA-256", renderer, text=4); col_hash.set_resizable(True)
+
         self.vault_tree.append_column(col_threat)
         self.vault_tree.append_column(col_path)
         self.vault_tree.append_column(col_date)
+        self.vault_tree.append_column(col_hash)
 
         scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.vault_tree)
         box.pack_start(scroll, True, True, 0)
 
+        # Botonera con Selección Múltiple y Whitelist
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.btn_restore = Gtk.Button(label="Restaurar Archivo")
+        
+        self.btn_select_all = Gtk.Button(label="Seleccionar Todos")
+        self.btn_select_all.connect("clicked", lambda b: self.vault_tree.get_selection().select_all())
+        btn_box.pack_start(self.btn_select_all, False, False, 0)
+
+        self.btn_restore = Gtk.Button(label="Restaurar Seleccionados (+ Whitelist)")
         self.btn_restore.connect("clicked", self._on_restore_vault_item)
         btn_box.pack_start(self.btn_restore, False, False, 0)
 
-        self.btn_purge = Gtk.Button(label="Eliminar Definitivamente")
+        self.btn_purge = Gtk.Button(label="Eliminar Seleccionados")
         self.btn_purge.connect("clicked", self._on_purge_vault_item)
         btn_box.pack_start(self.btn_purge, False, False, 0)
 
@@ -624,6 +758,25 @@ class ConstantineGUI:
         cbox.pack_start(Gtk.Label(label="• Modelo de Seguridad: Cero contraseñas propietarias. Autenticación delegada a PAM/sudo."), False, False, 0)
         card.add(cbox)
         box.pack_start(card, False, False, 0)
+
+        # Tarjeta de Actualizaciones de Constantine
+        app_up_card = Gtk.Frame(label=" Actualizaciones de Constantine Antivirus ")
+        au_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        au_box.set_margin_start(15); au_box.set_margin_end(15); au_box.set_margin_top(10); au_box.set_margin_bottom(10)
+
+        au_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl_v = Gtk.Label()
+        lbl_v.set_markup(f"<b>Versión instalada:</b> v{self.updater.current_version} • <b>Repositorio:</b> {self.updater.repo}")
+        lbl_v.set_xalign(0)
+        au_info.pack_start(lbl_v, False, False, 0)
+        au_info.pack_start(Gtk.Label(label="Comprueba si existen nuevas versiones de Constantine y actualiza en un clic."), False, False, 0)
+        au_box.pack_start(au_info, True, True, 0)
+
+        btn_check_app_update = Gtk.Button(label="🔄 Buscar Actualizaciones Ahora")
+        btn_check_app_update.connect("clicked", lambda b: self._manual_check_app_updates())
+        au_box.pack_start(btn_check_app_update, False, False, 0)
+        app_up_card.add(au_box)
+        box.pack_start(app_up_card, False, False, 5)
         return box
 
     # --- Acciones y Eventos ---
@@ -704,22 +857,51 @@ class ConstantineGUI:
     def _refresh_vault_list(self):
         self.vault_store.clear()
         for it in self.vault.list_items():
-            t = time.strftime("%Y-%m-%d %H:%M", time.localtime(it.get("quarantine_time", 0)))
-            self.vault_store.append([it["vault_id"], it.get("threat_name", "Malware"), it.get("original_path", ""), t])
+            t = it.get("quarantine_time_str") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(it.get("quarantine_time", 0)))
+            h = it.get("sha256", "")
+            short_h = h[:16] + "..." if len(h) > 16 else h
+            self.vault_store.append([
+                it["vault_id"],
+                it.get("threat_name", "Malware"),
+                it.get("original_path", ""),
+                t,
+                short_h
+            ])
 
     def _on_restore_vault_item(self, button):
         if not self._check_auth_required(): return
-        model, treeiter = self.vault_tree.get_selection().get_selected()
-        if treeiter and self.vault.restore_file(model[treeiter][0]):
-            self._refresh_vault_list()
-            self._show_msg("Éxito", "Archivo restaurado con permisos seguros.", Gtk.MessageType.INFO)
+        model, paths = self.vault_tree.get_selection().get_selected_rows()
+        if not paths:
+            self._show_msg("Selección", "Por favor selecciona uno o más elementos de la lista del baúl.", Gtk.MessageType.WARNING)
+            return
+
+        restored_count = 0
+        for p in paths:
+            it = model.get_iter(p)
+            vid = model.get_value(it, 0)
+            target_path = model.get_value(it, 2)
+            if self.vault.restore_file(vid, whitelist_manager=self.whitelist):
+                restored_count += 1
+
+        self._refresh_vault_list()
+        self._show_msg("Restauración Completada", f"{restored_count} archivo(s) restaurados con éxito y añadidos automáticamente a la Lista Blanca (Whitelist) permanente.", Gtk.MessageType.INFO)
 
     def _on_purge_vault_item(self, button):
         if not self._check_auth_required(): return
-        model, treeiter = self.vault_tree.get_selection().get_selected()
-        if treeiter and self.vault.purge_file(model[treeiter][0]):
-            self._refresh_vault_list()
-            self._show_msg("Éxito", "Amenaza purgada definitivamente.", Gtk.MessageType.INFO)
+        model, paths = self.vault_tree.get_selection().get_selected_rows()
+        if not paths:
+            self._show_msg("Selección", "Por favor selecciona uno o más elementos para eliminar.", Gtk.MessageType.WARNING)
+            return
+
+        purged_count = 0
+        for p in paths:
+            it = model.get_iter(p)
+            vid = model.get_value(it, 0)
+            if self.vault.purge_file(vid):
+                purged_count += 1
+
+        self._refresh_vault_list()
+        self._show_msg("Purga Completada", f"{purged_count} muestra(s) eliminadas definitivamente del disco.", Gtk.MessageType.INFO)
 
     def _on_apply_dns_clicked(self, button):
         if not self._check_auth_required(): return

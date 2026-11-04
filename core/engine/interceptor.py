@@ -109,7 +109,7 @@ class FanotifyInterceptor:
                             target_path = f"<fd:{event_fd}>"
 
                         # 1. Lista blanca de la distribución (Cero interrupción para binarios legítimos de APT)
-                        if self.whitelist.is_trusted_system_binary(target_path):
+                        if self.whitelist.is_whitelisted(target_path):
                             self.respond(event_fd, FAN_ALLOW)
                         else:
                             # 2. Análisis estático / heurístico

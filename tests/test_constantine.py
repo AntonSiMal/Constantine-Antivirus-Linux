@@ -79,3 +79,10 @@ if __name__ == "__main__":
         incidents = al.get_incidents()
         self.assertEqual(len(incidents), 1)
         self.assertEqual(incidents[0]["threat"], "Trojan.Test")
+
+    def test_auto_updater(self):
+        from core.engine.auto_updater import ConstantineUpdater
+        cu = ConstantineUpdater(current_version="1.0.0")
+        self.assertEqual(cu._parse_version("1.3.0"), (1, 3, 0))
+        self.assertEqual(cu._parse_version("v2.1.4-beta"), (2, 1, 4))
+        self.assertTrue(cu._parse_version("1.3.0") > cu._parse_version("1.2.0"))
