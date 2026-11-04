@@ -1,18 +1,22 @@
 """
 Constantine Antivirus - Hardware & Peripheral Guard (core/engine/hardware_guard.py)
-Monitoreo anti-espía de cámara web y micrófono en Linux:
-Vigila descriptores en /dev/video* y /dev/snd/* para alertar accesos no autorizados.
+Monitoreo anti-espía en tiempo real de cámara web (/dev/video*) y micrófono (/dev/snd/*).
+Detecta accesos ocultos de troyanos RAT y spyware en Linux.
 """
 
 import os
-import time
 import glob
 import subprocess
 import logging
 import threading
-from typing import Callable, Optional, Dict
+from typing import Dict, List, Set, Optional, Callable
 
 logger = logging.getLogger("constantine.hardware")
+
+DEFAULT_AUTHORIZED_APPS = {
+    "firefox", "chrome", "chromium", "brave", "opera",
+    "obs", "discord", "zoom", "teams", "skype", "vlc", "cheese"
+}
 
 class HardwareGuard:
     def __init__(self, notifier=None, on_alert: Optional[Callable] = None):
@@ -20,13 +24,15 @@ class HardwareGuard:
         self.on_alert = on_alert
         self.running = False
         self.thread = None
-        self.known_webcam_pids = set()
+        self.authorized_apps = set(DEFAULT_AUTHORIZED_APPS)
+        self.known_camera_pids: Set[int] = set()
+        self.known_mic_pids: Set[int] = set()
 
-    def get_processes_using_camera(self) -> Dict[int, str]:
-        pids = {}
+    def get_camera_processes(self) -> List[Dict[str, str]]:
+        processes = []
         video_devs = glob.glob("/dev/video*")
         if not video_devs:
-            return pids
+            return processes
 
         try:
             cmd = ["fuser"] + video_devs
@@ -36,16 +42,48 @@ class HardwareGuard:
                 cleaned = token.strip(":")
                 if cleaned.isdigit():
                     pid = int(cleaned)
-                    comm = "desconocido"
-                    try:
-                        with open(f"/proc/{pid}/comm", "r") as f:
-                            comm = f.read().strip()
-                    except Exception:
-                        pass
-                    pids[pid] = comm
+                    comm = self._get_proc_name(pid)
+                    processes.append({
+                        "pid": str(pid),
+                        "comm": comm,
+                        "device": "Cámara Web (/dev/video*)",
+                        "authorized": comm.lower() in self.authorized_apps
+                    })
         except Exception:
             pass
-        return pids
+        return processes
+
+    def get_microphone_processes(self) -> List[Dict[str, str]]:
+        processes = []
+        snd_devs = glob.glob("/dev/snd/pcm*c") # 'c' indica captura de audio
+        if not snd_devs:
+            snd_devs = glob.glob("/dev/snd/*")
+
+        try:
+            cmd = ["fuser"] + snd_devs
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
+            raw = (res.stdout + res.stderr).split()
+            for token in raw:
+                cleaned = token.strip(":")
+                if cleaned.isdigit():
+                    pid = int(cleaned)
+                    comm = self._get_proc_name(pid)
+                    processes.append({
+                        "pid": str(pid),
+                        "comm": comm,
+                        "device": "Micrófono (/dev/snd/*)",
+                        "authorized": comm.lower() in self.authorized_apps
+                    })
+        except Exception:
+            pass
+        return processes
+
+    def _get_proc_name(self, pid: int) -> str:
+        try:
+            with open(f"/proc/{pid}/comm", "r") as f:
+                return f.read().strip()
+        except Exception:
+            return "desconocido"
 
     def start(self):
         self.running = True
@@ -57,18 +95,30 @@ class HardwareGuard:
         while self.running:
             try:
                 time.sleep(2.0)
-                current = self.get_processes_using_camera()
-                for pid, comm in current.items():
-                    if pid not in self.known_webcam_pids:
-                        logger.warning("📷 Cámara web activada por proceso: %s (PID: %d)", comm, pid)
+                # 1. Supervisar Cámara
+                cams = self.get_camera_processes()
+                current_cam_pids = {int(p["pid"]) for p in cams}
+                new_cams = current_cam_pids - self.known_camera_pids
+                for p in cams:
+                    if int(p["pid"]) in new_cams and not p["authorized"]:
+                        logger.warning("📷 Cámara web activada por app no autorizada: %s (PID: %s)", p["comm"], p["pid"])
                         if self.notifier:
                             self.notifier.send(
-                                title="📷 Cámara Web Activada",
-                                body=f"La aplicación <b>{comm}</b> (PID {pid}) ha iniciado el uso de tu cámara.",
-                                urgency="normal",
+                                title="📷 Alerta de Privacidad: Cámara Web",
+                                body=f"La aplicación <b>{p['comm']}</b> (PID {p['pid']}) está usando la cámara.",
+                                urgency="critical",
                                 icon="camera-web"
                             )
-                self.known_webcam_pids = set(current.keys())
+                self.known_camera_pids = current_cam_pids
+
+                # 2. Supervisar Micrófono
+                mics = self.get_microphone_processes()
+                current_mic_pids = {int(p["pid"]) for p in mics}
+                new_mics = current_mic_pids - self.known_mic_pids
+                for p in mics:
+                    if int(p["pid"]) in new_mics and not p["authorized"]:
+                        logger.warning("🎙️ Micrófono activado por app no autorizada: %s (PID: %s)", p["comm"], p["pid"])
+                self.known_mic_pids = current_mic_pids
             except Exception:
                 pass
 

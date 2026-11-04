@@ -54,6 +54,7 @@ rm -f "/etc/skel/.local/share/nautilus/scripts/Analizar con Constantine"
 
 echo "7. Eliminando binarios y archivos del programa (/opt/constantine)..."
 rm -rf /opt/constantine
+rm -f /usr/local/bin/constantine-gui /usr/bin/constantine-gui /usr/local/bin/constantine /usr/bin/constantine
 
 # Preguntar qué hacer con el Baúl de Cuarentena
 echo ""

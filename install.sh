@@ -100,6 +100,17 @@ X-GNOME-Autostart-enabled=true
 AUTOSTART
 chmod 644 /etc/xdg/autostart/constantine-tray.desktop
 
+echo "10. Creando comandos globales en el terminal (/usr/local/bin/constantine-gui y constantine)..."
+mkdir -p /usr/local/bin
+cat << 'BIN_WRAPPER' > /usr/local/bin/constantine-gui
+#!/bin/bash
+exec python3 /opt/constantine/gui/app.py ""
+BIN_WRAPPER
+chmod +x /usr/local/bin/constantine-gui
+ln -sf /usr/local/bin/constantine-gui /usr/bin/constantine-gui 2>/dev/null || true
+ln -sf /usr/local/bin/constantine-gui /usr/local/bin/constantine 2>/dev/null || true
+ln -sf /usr/local/bin/constantine-gui /usr/bin/constantine 2>/dev/null || true
+
 echo "9. Activando política de autorización Polkit (sudo/root nativo)..."
 cp service/constantine.service /etc/systemd/system/
 cp service/org.constantine.antivirus.policy /usr/share/polkit-1/actions/ 2>/dev/null || true

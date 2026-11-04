@@ -1,14 +1,15 @@
 """
 Constantine Antivirus - System & User Whitelist Engine (core/engine/system_whitelist.py)
-Reconocimiento automático de binarios oficiales y gestión de lista blanca de exclusiones:
+Gestión completa de exclusiones y lista blanca de archivos y carpetas:
 1. Paquetes oficiales de la distribución (APT, dpkg, Flatpak, Snap).
-2. Archivos explícitamente restaurados del baúl por el usuario (excepciones permanentes).
+2. Archivos y carpetas agregados manualmente por el usuario.
+3. Archivos restaurados del baúl de cuarentena.
 """
 
 import os
 import json
 import logging
-from typing import Set, Dict, Optional
+from typing import Set, Dict, List, Optional
 
 logger = logging.getLogger("constantine.whitelist")
 
@@ -89,18 +90,23 @@ class SystemWhitelist:
 
     def is_whitelisted(self, file_path: str, file_hash: Optional[str] = None) -> bool:
         """
-        Determina si un archivo debe ser autorizado inmediatamente:
+        Determina si un archivo debe ser autorizado de inmediato:
         - Si es un binario oficial del sistema de la distribución.
-        - Si fue restaurado del baúl por el usuario (exclusión aprobada).
+        - Si su ruta exacta o carpeta contenedora está en la lista blanca de usuario.
+        - Si su hash SHA-256 está explícitamente autorizado.
         """
         if not file_path:
             return False
 
         norm_path = os.path.abspath(file_path)
 
-        # 1. Comprobar exclusiones explícitas de usuario
-        if norm_path in self.user_whitelisted_paths:
-            return True
+        # 1. Comprobar exclusiones explícitas de usuario (archivo exacto o carpeta padre)
+        for wpath in self.user_whitelisted_paths:
+            if norm_path == wpath:
+                return True
+            # Si wpath es una carpeta, autorizar todo su contenido
+            if os.path.isdir(wpath) and norm_path.startswith(os.path.join(wpath, "")):
+                return True
 
         if file_hash and file_hash.lower() in self.user_whitelisted_hashes:
             return True
@@ -108,10 +114,28 @@ class SystemWhitelist:
         # 2. Comprobar binarios del sistema
         return self.is_trusted_system_binary(norm_path)
 
+    def add_path(self, path: str) -> bool:
+        """Agrega un archivo o carpeta a la lista blanca permanente."""
+        if not os.path.exists(path):
+            return False
+        norm_path = os.path.abspath(path)
+        self.user_whitelisted_paths.add(norm_path)
+        self._save_whitelist()
+        logger.info("Añadido a Whitelist: %s", norm_path)
+        return True
+
+    def remove_path(self, path: str) -> bool:
+        """Remueve un archivo o carpeta de la lista blanca."""
+        norm_path = os.path.abspath(path)
+        if norm_path in self.user_whitelisted_paths:
+            self.user_whitelisted_paths.remove(norm_path)
+            self._save_whitelist()
+            logger.info("Removido de Whitelist: %s", norm_path)
+            return True
+        return False
+
     def add_restored_exception(self, file_path: str, file_hash: Optional[str] = None):
-        """
-        Añade permanentemente un archivo a la lista blanca tras ser restaurado del baúl.
-        """
+        """Añade automáticamente un archivo restaurado a la lista blanca."""
         norm_path = os.path.abspath(file_path)
         self.user_whitelisted_paths.add(norm_path)
         if file_hash:
@@ -119,7 +143,12 @@ class SystemWhitelist:
         self._save_whitelist()
         logger.info("🛡️ Archivo restaurado añadido a la Lista Blanca (Whitelist): %s", norm_path)
 
-    def remove_exception(self, file_path: str):
-        norm_path = os.path.abspath(file_path)
-        self.user_whitelisted_paths.discard(norm_path)
-        self._save_whitelist()
+    def list_entries(self) -> List[Dict[str, str]]:
+        """Devuelve todas las entradas de lista blanca de usuario formateadas para la UI."""
+        entries = []
+        for p in sorted(list(self.user_whitelisted_paths)):
+            ptype = "Carpeta" if os.path.isdir(p) else "Archivo"
+            entries.append({"path": p, "type": ptype, "status": "Autorizado"})
+        for h in sorted(list(self.user_whitelisted_hashes)):
+            entries.append({"path": f"Hash SHA-256: {h}", "type": "Firma Hash", "status": "Autorizado"})
+        return entries

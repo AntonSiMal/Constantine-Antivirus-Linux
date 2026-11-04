@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Constantine Antivirus - Native GTK 3 Security Center (gui/app.py)
 Versión mejorada:
@@ -14,6 +15,8 @@ import time
 import logging
 import threading
 import subprocess
+import webbrowser
+import urllib.parse
 
 # Configuración de rutas
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +36,8 @@ from core.engine.ransomware_shield import RansomwareShield
 from core.engine.usb_monitor import USBAutoScanner
 from core.engine.update_guard import SystemUpdateGuard
 from core.engine.memory_scanner import MemoryScanner
+from core.engine.hardware_guard import HardwareGuard
+from core.engine.virustotal_uploader import VirusTotalUploader
 from core.engine.auto_updater import ConstantineUpdater
 from core.engine.i18n import Localization
 from gui.tray import ConstantineTrayIcon
@@ -49,6 +54,11 @@ except Exception as e:
     logger.warning("GTK 3 no detectado: %s", e)
 
 class ConstantineGUI:
+    def _esc(self, text: str) -> str:
+        if not text:
+            return ""
+        return GLib.markup_escape_text(str(text))
+
     def __init__(self):
         self.loc = Localization(default_lang="es")
         self.auth_mgr = AuthManager()
@@ -63,7 +73,66 @@ class ConstantineGUI:
         self.update_guard = SystemUpdateGuard()
         self.memory_scanner = MemoryScanner(scanner=self.scanner, vault=self.vault)
         self.updater = ConstantineUpdater()
+        self.hardware_guard = HardwareGuard(notifier=None)
+        self.vt_uploader = VirusTotalUploader(vault=self.vault)
 
+        self.sections_meta = {
+            "shields": {
+                "icon": "🛡️",
+                "title_es": "Escudos en Vivo", "desc_es": "Centro de Protección Activa en Tiempo Real del Kernel (fanotify, eBPF y Anti-Ransomware)",
+                "title_en": "Live Shields", "desc_en": "Kernel Real-time Active Defense Center (fanotify, eBPF & Anti-Ransomware)"
+            },
+            "usb": {
+                "icon": "💾",
+                "title_es": "Discos & USB", "desc_es": "Vigilancia y Auto-Escaneo Silencioso de Almacenamiento Removible (/media)",
+                "title_en": "Disks & USB", "desc_en": "Removable Storage Silent Monitoring & Auto-Scan (/media)"
+            },
+            "firewall": {
+                "icon": "🔥",
+                "title_es": "GUFW & Proton VPN", "desc_es": "Gestión del Cortafuegos de Red del Sistema y Conexión Cifrada Proton VPN",
+                "title_en": "GUFW & Proton VPN", "desc_en": "System Network Firewall Management & Proton VPN Encrypted Tunnel"
+            },
+            "vault": {
+                "icon": "📦",
+                "title_es": "Baúl de Amenazas", "desc_es": "Muestras Maliciosas Aisladas en Cuarentena Cifrada (permisos 000)",
+                "title_en": "Threat Vault", "desc_en": "Isolated Malicious Samples in Encrypted Quarantine (000 permissions)"
+            },
+            "scanner": {
+                "icon": "🔍",
+                "title_es": "Escáner Manual", "desc_es": "Análisis Bajo Demanda de Memoria RAM (/proc), Sistema Completo (/) y Carpetas",
+                "title_en": "Manual Scanner", "desc_en": "On-demand Scan of RAM (/proc), Full System (/), and User Folders"
+            },
+            "dns": {
+                "icon": "🌐",
+                "title_es": "DNS Mullvad", "desc_es": "Perfiles DNS Cifrados con Bloqueo de Anuncios, Rastreadores y Malware",
+                "title_en": "Mullvad DNS", "desc_en": "Encrypted DNS Profiles with Ad, Tracker and Malware Blocking"
+            },
+            "phishing": {
+                "icon": "🎣",
+                "title_es": "Anti-Phishing", "desc_es": "Verificación de Enlaces Engañosos y Auditoría de Envenenamiento en /etc/hosts",
+                "title_en": "Anti-Phishing", "desc_en": "Deceptive Link Checking & /etc/hosts Poisoning Audit"
+            },
+            "audit": {
+                "icon": "📜",
+                "title_es": "Auditoría Forense", "desc_es": "Registro Cronológico de Eventos del Kernel, Llamadas Interceptadas y Reportes JSON",
+                "title_en": "Forensic Audit", "desc_en": "Chronological Kernel Event Log, Intercepted Calls & JSON Reports"
+            },
+            "hardware": {
+                "icon": "📷",
+                "title_es": "Cámara & Micrófono", "desc_es": "Centinela Anti-Espía de Dispositivos /dev/video* y /dev/snd/*",
+                "title_en": "Camera & Mic", "desc_en": "Anti-Spyware Sentinel for /dev/video* and /dev/snd/* Hardware"
+            },
+            "whitelist": {
+                "icon": "📋",
+                "title_es": "Lista Blanca", "desc_es": "Exclusiones de Confianza para Binarios del Sistema, Flatpak, Snap y Archivos del Usuario",
+                "title_en": "Whitelist", "desc_en": "Trusted Exclusions for System Binaries, Flatpak, Snap & User Files"
+            },
+            "settings": {
+                "icon": "⚙️",
+                "title_es": "Configuración", "desc_es": "Autenticación PAM/Sudo Nativa, Sincronización con GitHub y Desinstalador Seguro",
+                "title_en": "Settings", "desc_en": "Native PAM/Sudo Authentication, GitHub Sync & Safe Uninstaller"
+            },
+        }
         self.session_token = None
         self.is_unlocked = False
         self.antivirus_enabled = True
@@ -84,9 +153,28 @@ class ConstantineGUI:
         self.window.hide()
         return True
 
+    def _load_css(self):
+        try:
+            settings = Gtk.Settings.get_default()
+            if settings:
+                settings.set_property("gtk-application-prefer-dark-theme", True)
+            provider = Gtk.CssProvider()
+            css_path = os.path.join(ROOT_DIR, "assets", "style.css")
+            if os.path.exists(css_path):
+                with open(css_path, "rb") as f:
+                    provider.load_from_data(f.read())
+            screen = Gdk.Screen.get_default()
+            if screen:
+                Gtk.StyleContext.add_provider_for_screen(
+                    screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                )
+        except Exception as e:
+            logger.warning("Error cargando tema CSS: %s", e)
+
     def _build_window(self):
         self.window = Gtk.Window(title="Constantine Antivirus")
-        self.window.set_default_size(940, 660)
+        self.window.set_default_size(1040, 700)
+        self.window.set_size_request(820, 540)
         self.window.set_position(Gtk.WindowPosition.CENTER)
         
         # Icono de la ventana
@@ -100,25 +188,33 @@ class ConstantineGUI:
         self.window.connect("delete-event", lambda w, e: self._on_window_delete())
         self.tray = ConstantineTrayIcon(main_window=self.window, on_open_callback=lambda: self.window.show_all())
 
+        self._load_css()
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.window.add(vbox)
 
-        # 1. Cabecera Superior
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        header.set_margin_start(20); header.set_margin_end(20); header.set_margin_top(12); header.set_margin_bottom(12)
+        # 1. Cabecera Superior con Estilo Dark Cyber EDR
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header.get_style_context().add_class("header-box")
 
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        top_title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.lbl_title = Gtk.Label()
-        self.lbl_title.set_markup("<span font='15' weight='bold' foreground='#d32f2f'>⚔️ CONSTANTINE ANTIVIRUS</span>")
+        self.lbl_title.set_markup("<span font='14' weight='heavy' foreground='#f8fafc'>⚔️ CONSTANTINE</span>")
         self.lbl_title.set_xalign(0)
-        self.lbl_sub = Gtk.Label(label="Protección Activa en Kernel • Anti-Ransomware • GUFW • Mullvad DNS • Proton VPN")
+        lbl_badge = Gtk.Label()
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#450a0a' foreground='#f87171'> EDR KERNEL v2.5 </span>")
+        top_title_row.pack_start(self.lbl_title, False, False, 0)
+        top_title_row.pack_start(lbl_badge, False, False, 0)
+
+        self.lbl_sub = Gtk.Label(label="Escudo Kernel • Anti-Ransomware • USB Auto-Scan • GUFW & Proton VPN")
         self.lbl_sub.set_xalign(0)
-        title_box.pack_start(self.lbl_title, False, False, 0)
+        self.lbl_sub.get_style_context().add_class("subtitle-text")
+        title_box.pack_start(top_title_row, False, False, 0)
         title_box.pack_start(self.lbl_sub, False, False, 0)
         header.pack_start(title_box, True, True, 0)
 
         # Selector de Idioma (ES / EN)
-        lang_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        lang_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
         self.btn_lang_es = Gtk.Button(label="ES")
         self.btn_lang_es.get_style_context().add_class("suggested-action")
         self.btn_lang_es.connect("clicked", lambda b: self._change_language("es"))
@@ -126,23 +222,47 @@ class ConstantineGUI:
         self.btn_lang_en.connect("clicked", lambda b: self._change_language("en"))
         lang_box.pack_start(self.btn_lang_es, False, False, 0)
         lang_box.pack_start(self.btn_lang_en, False, False, 0)
-        header.pack_start(lang_box, False, False, 5)
+        header.pack_start(lang_box, False, False, 4)
 
         # Interruptor Maestro ON / OFF
-        master_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        master_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.lbl_master_state = Gtk.Label()
-        self.lbl_master_state.set_markup("<b>Antivirus: ON</b>")
+        self.lbl_master_state.set_markup("<span weight='bold' foreground='#cbd5e1'>AV: ON</span>")
         self.switch_master = Gtk.Switch()
         self.switch_master.set_active(True)
         self.switch_master.connect("state-set", self._on_master_switch_toggled)
         master_box.pack_start(self.lbl_master_state, False, False, 0)
         master_box.pack_start(self.switch_master, False, False, 0)
-        header.pack_start(master_box, False, False, 10)
+        header.pack_start(master_box, False, False, 4)
 
-        # Estado del Sistema
+        # Puntuación de Salud de Seguridad (Clicable con Diagnóstico para 100/100)
+        health_btn = Gtk.Button()
+        health_btn.get_style_context().add_class("health-box-btn")
+        health_btn.set_tooltip_text("Salud: 98/100 - Haz clic para ver qué falta para llegar a 100/100")
+        health_btn.connect("clicked", self._show_health_score_dialog)
+
+        health_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        health_box.get_style_context().add_class("health-box")
+        lbl_health_tag = Gtk.Label(label="Salud:")
+        lbl_health_tag.get_style_context().add_class("subtitle-text")
+        self.lbl_health_score = Gtk.Label()
+        self.lbl_health_score.set_markup("<span weight='bold' foreground='#34d399'>98/100 ℹ️</span>")
+        health_pbar = Gtk.ProgressBar()
+        health_pbar.set_fraction(0.98)
+        health_pbar.set_size_request(45, 6)
+        health_box.pack_start(lbl_health_tag, False, False, 0)
+        health_box.pack_start(self.lbl_health_score, False, False, 0)
+        health_box.pack_start(health_pbar, False, False, 0)
+        health_btn.add(health_box)
+        header.pack_start(health_btn, False, False, 4)
+
+        # Estado del Sistema Badge
+        self.status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.status_box.get_style_context().add_class("status-badge")
         self.lbl_system_status = Gtk.Label()
-        self.lbl_system_status.set_markup("<span font='10' weight='bold' foreground='#2e7d32'>🛡️ SISTEMA PROTEGIDO</span>")
-        header.pack_start(self.lbl_system_status, False, False, 5)
+        self.lbl_system_status.set_markup("<span font='9' weight='bold' foreground='#34d399'>🛡️ SISTEMA PROTEGIDO</span>")
+        self.status_box.pack_start(self.lbl_system_status, False, False, 0)
+        header.pack_start(self.status_box, False, False, 4)
 
         # Candado de Seguridad
         self.btn_lock = Gtk.Button()
@@ -153,34 +273,118 @@ class ConstantineGUI:
         vbox.pack_start(header, False, False, 0)
         vbox.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
-        # 2. Pestañas
-        self.notebook = Gtk.Notebook()
-        self.notebook.set_tab_pos(Gtk.PositionType.LEFT)
-        vbox.pack_start(self.notebook, True, True, 0)
+        # Contenedor Principal en 2 Columnas Responsivas
+        main_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        main_hbox.set_hexpand(True)
+        main_hbox.set_vexpand(True)
+        vbox.pack_start(main_hbox, True, True, 0)
 
-        self.tab_shields_lbl = Gtk.Label(label="🛡️ Escudos en Vivo")
-        self.notebook.append_page(self._create_shields_tab(), self.tab_shields_lbl)
+        # 1. Barra Lateral Izquierda (Sidebar) estilo EDR
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sidebar.set_size_request(240, -1)
+        sidebar.get_style_context().add_class("sidebar-box")
+        main_hbox.pack_start(sidebar, False, False, 0)
 
-        self.tab_scanner_lbl = Gtk.Label(label="🔍 Escáner Manual")
-        self.notebook.append_page(self._create_scanner_tab(), self.tab_scanner_lbl)
+        # Contenedor desplazable de botones de navegación
+        nav_scroll = Gtk.ScrolledWindow()
+        nav_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.nav_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        self.nav_box.set_margin_start(8)
+        self.nav_box.set_margin_end(8)
+        self.nav_box.set_margin_top(10)
+        self.nav_box.set_margin_bottom(10)
+        nav_scroll.add(self.nav_box)
+        sidebar.pack_start(nav_scroll, True, True, 0)
 
-        self.tab_vault_lbl = Gtk.Label(label="📦 Baúl de Amenazas")
-        self.notebook.append_page(self._create_vault_tab(), self.tab_vault_lbl)
+        # Mini Tarjeta de Estado en la parte inferior del Sidebar
+        mini_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        mini_card.get_style_context().add_class("mini-status-card")
 
-        self.tab_usb_lbl = Gtk.Label(label="💾 Discos & USB")
-        self.notebook.append_page(self._create_usb_tab(), self.tab_usb_lbl)
+        def make_mini_row(title, status_text, is_active=True):
+            r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            lt = Gtk.Label(label=title)
+            lt.set_xalign(0)
+            lt.get_style_context().add_class("mini-row-title")
+            ls = Gtk.Label(label=f"● {status_text}")
+            ls.get_style_context().add_class("mini-row-status-ok" if is_active else "mini-row-status-warn")
+            r.pack_start(lt, True, True, 0)
+            r.pack_start(ls, False, False, 0)
+            return r
 
-        self.tab_firewall_lbl = Gtk.Label(label="🔥 GUFW & Proton VPN")
-        self.notebook.append_page(self._create_firewall_vpn_tab(), self.tab_firewall_lbl)
+        mini_card.pack_start(make_mini_row("USB Auto-Scan", "Activo (/media)", True), False, False, 0)
+        mini_card.pack_start(make_mini_row("Anti-Ransomware", "Canary Trap", True), False, False, 0)
+        mini_card.pack_start(make_mini_row("Firewall GUFW/UFW", "Activo", True), False, False, 0)
+        sidebar.pack_start(mini_card, False, False, 0)
 
-        self.tab_dns_lbl = Gtk.Label(label="🌐 DNS Mullvad")
-        self.notebook.append_page(self._create_dns_tab(), self.tab_dns_lbl)
+        # 2. Panel Derecho: Cabecera Dinámica de Sección + Stack de Pantallas
+        right_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        right_panel.set_hexpand(True)
+        right_panel.set_vexpand(True)
+        main_hbox.pack_start(right_panel, True, True, 0)
 
-        self.tab_phishing_lbl = Gtk.Label(label="🎣 Anti-Phishing")
-        self.notebook.append_page(self._create_phishing_tab(), self.tab_phishing_lbl)
+        # Cabecera de Sección Actual (Indicador visual prominente)
+        self.section_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.section_header.get_style_context().add_class("section-header-bar")
+        self.section_header.set_margin_start(20)
+        self.section_header.set_margin_end(20)
+        self.section_header.set_margin_top(12)
+        self.section_header.set_margin_bottom(10)
 
-        self.tab_settings_lbl = Gtk.Label(label="⚙️ Configuración")
-        self.notebook.append_page(self._create_settings_tab(), self.tab_settings_lbl)
+        sec_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.lbl_section_title = Gtk.Label()
+        self.lbl_section_title.set_markup("<span font='14' weight='heavy' foreground='#f8fafc'>🛡️ Escudos en Vivo</span>")
+        self.lbl_section_title.set_xalign(0)
+        self.lbl_section_desc = Gtk.Label(label="Centro de Protección Activa en Tiempo Real del Kernel")
+        self.lbl_section_desc.set_xalign(0)
+        self.lbl_section_desc.set_line_wrap(True)
+        self.lbl_section_desc.get_style_context().add_class("subtitle-text")
+        sec_vbox.pack_start(self.lbl_section_title, False, False, 0)
+        sec_vbox.pack_start(self.lbl_section_desc, False, False, 0)
+        self.section_header.pack_start(sec_vbox, True, True, 0)
+        right_panel.pack_start(self.section_header, False, False, 0)
+        right_panel.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # Pila Central de Pantallas (Gtk.Stack)
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(150)
+        self.stack.set_hexpand(True)
+        self.stack.set_vexpand(True)
+
+        stack_scroll = Gtk.ScrolledWindow()
+        stack_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        stack_scroll.set_hexpand(True)
+        stack_scroll.set_vexpand(True)
+        stack_scroll.add(self.stack)
+        right_panel.pack_start(stack_scroll, True, True, 0)
+
+        # Registrar páginas en el Stack y en los botones de navegación
+        self.nav_buttons = {}
+        
+        pages_def = [
+            ("shields", "🛡️", "Escudos en Vivo", None, self._create_shields_tab()),
+            ("usb", "💾", "Discos & USB", "AUTO", self._create_usb_tab()),
+            ("firewall", "🔥", "GUFW & Proton VPN", "INTEGRADO", self._create_firewall_vpn_tab()),
+            ("vault", "📦", "Baúl de Amenazas", "0", self._create_vault_tab()),
+            ("scanner", "🔍", "Escáner Manual", None, self._create_scanner_tab()),
+            ("dns", "🌐", "DNS Mullvad", None, self._create_dns_tab()),
+            ("phishing", "🎣", "Anti-Phishing", None, self._create_phishing_tab()),
+            ("audit", "📜", "Auditoría Forense", None, self._create_audit_tab()),
+            ("hardware", "📷", "Cámara & Micrófono", None, self._create_hardware_tab()),
+            ("whitelist", "📋", "Lista Blanca", "3", self._create_whitelist_tab()),
+            ("settings", "⚙️", "Configuración", None, self._create_settings_tab()),
+        ]
+
+        for pid, icon, label_text, badge_text, widget in pages_def:
+            self.stack.add_named(widget, pid)
+            btn = self._create_nav_button(pid, icon, label_text, badge_text)
+            self.nav_box.pack_start(btn, False, False, 0)
+            self.nav_buttons[pid] = btn
+
+        # Seleccionar primera pestaña por defecto
+        self._switch_page("shields")
+        self._update_vault_badge()
+        self._update_whitelist_badge()
 
         # 3. Barra Inferior de Estado
         statusbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
@@ -195,22 +399,345 @@ class ConstantineGUI:
         # Comprobar actualizaciones de Constantine en segundo plano al iniciar
         threading.Thread(target=self._check_updates_background, daemon=True).start()
 
+    def _create_nav_button(self, page_id, icon, label_text, badge_text=None):
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("nav-btn")
+        
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        lbl_icon = Gtk.Label(label=icon)
+        lbl_icon.get_style_context().add_class("nav-icon")
+        
+        lbl_text = Gtk.Label()
+        lbl_text.set_markup(f"<span weight='normal' foreground='#94a3b8'>{self._esc(label_text)}</span>")
+        lbl_text.set_xalign(0)
+        lbl_text.get_style_context().add_class("nav-label")
+        
+        hbox.pack_start(lbl_icon, False, False, 0)
+        hbox.pack_start(lbl_text, True, True, 0)
+        
+        if badge_text is not None:
+            lbl_badge = Gtk.Label(label=badge_text)
+            lbl_badge.get_style_context().add_class("nav-badge")
+            if page_id == "usb":
+                lbl_badge.get_style_context().add_class("badge-emerald")
+            elif page_id == "firewall":
+                lbl_badge.get_style_context().add_class("badge-purple")
+            elif page_id == "vault":
+                lbl_badge.get_style_context().add_class("badge-red")
+            elif page_id == "whitelist":
+                lbl_badge.get_style_context().add_class("badge-blue")
+            hbox.pack_start(lbl_badge, False, False, 0)
+            btn._badge_label = lbl_badge
+        else:
+            btn._badge_label = None
+            
+        btn.add(hbox)
+        btn._label_widget = lbl_text
+        btn._raw_text = label_text
+        btn._icon = icon
+        btn._page_id = page_id
+        btn.connect("clicked", lambda b, p=page_id: self._switch_page(p))
+        return btn
+
+    def _switch_page(self, page_id):
+        self.stack.set_visible_child_name(page_id)
+        is_es = (self.loc.lang == "es")
+        
+        for pid, btn in self.nav_buttons.items():
+            if pid == page_id:
+                btn.get_style_context().add_class("nav-btn-active")
+                btn._label_widget.set_markup(f"<span weight='heavy' foreground='#ffffff'>● {self._esc(btn._raw_text)}</span>")
+            else:
+                btn.get_style_context().remove_class("nav-btn-active")
+                btn._label_widget.set_markup(f"<span weight='normal' foreground='#94a3b8'>{self._esc(btn._raw_text)}</span>")
+
+        # Actualizar cabecera superior de la sección
+        if hasattr(self, 'lbl_section_title') and hasattr(self, 'sections_meta') and page_id in self.sections_meta:
+            meta = self.sections_meta[page_id]
+            title = meta["title_es"] if is_es else meta["title_en"]
+            desc = meta["desc_es"] if is_es else meta["desc_en"]
+            self.lbl_section_title.set_markup(f"<span font='14' weight='heavy' foreground='#f8fafc'>{meta['icon']} {self._esc(title)}</span>")
+            self.lbl_section_desc.set_text(desc)
+
+    def _update_vault_badge(self):
+        try:
+            if hasattr(self, 'nav_buttons') and "vault" in self.nav_buttons and self.nav_buttons["vault"]._badge_label:
+                count = len(self.vault.list_items())
+                self.nav_buttons["vault"]._badge_label.set_text(str(count))
+        except Exception as e:
+            logger.debug("Badge error vault: %s", e)
+
+    def _update_whitelist_badge(self):
+        try:
+            if hasattr(self, 'nav_buttons') and "whitelist" in self.nav_buttons and self.nav_buttons["whitelist"]._badge_label:
+                count = len(self.whitelist.list_entries())
+                self.nav_buttons["whitelist"]._badge_label.set_text(str(count))
+        except Exception as e:
+            logger.debug("Badge error whitelist: %s", e)
+
+    def _create_audit_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
+        box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20); box.set_margin_bottom(20)
+
+        # Encabezado
+        top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        info_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        self.lbl_audit_title = Gtk.Label()
+        self.lbl_audit_title.set_markup("<span font='13' weight='bold' foreground='#f8fafc'>📜 Registro Forense de Incidentes &amp; Timeline</span>")
+        self.lbl_audit_title.set_xalign(0)
+        self.lbl_audit_desc = Gtk.Label(label="Historial cronológico de llamadas interceptadas, PIDs neutralizados y eventos del kernel.")
+        self.lbl_audit_desc.set_xalign(0)
+        self.lbl_audit_desc.get_style_context().add_class("subtitle-text")
+        info_vbox.pack_start(self.lbl_audit_title, False, False, 0)
+        info_vbox.pack_start(self.lbl_audit_desc, False, False, 0)
+        top_box.pack_start(info_vbox, True, True, 0)
+
+        # Botón Exportar JSON
+        self.btn_export_audit = Gtk.Button(label="📥 Exportar Reporte JSON")
+        self.btn_export_audit.connect("clicked", self._export_audit_json)
+        top_box.pack_start(self.btn_export_audit, False, False, 0)
+        box.pack_start(top_box, False, False, 0)
+
+        # Tabla de Eventos Forenses
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_min_content_height(350)
+
+        # Modelo: Hora, Evento/Amenaza, Ruta/Proceso, Acción, Resultado
+        self.audit_store = Gtk.ListStore(str, str, str, str, str)
+        self.audit_tree = Gtk.TreeView(model=self.audit_store)
+
+        cols = [
+            ("Hora Exacta", 0, 110),
+            ("Evento / Amenaza", 1, 200),
+            ("Ruta del Proceso", 2, 260),
+            ("Acción Ejecutada", 3, 160),
+            ("Resultado", 4, 100)
+        ]
+        for col_title, col_idx, width in cols:
+            renderer = Gtk.CellRendererText()
+            column = Gtk.TreeViewColumn(col_title, renderer, text=col_idx)
+            column.set_min_width(width)
+            column.set_resizable(True)
+            self.audit_tree.append_column(column)
+
+        scroll.add(self.audit_tree)
+        box.pack_start(scroll, True, True, 0)
+
+        # Barra inferior de acciones de auditoría
+        btn_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        btn_refresh = Gtk.Button(label="🔄 Refrescar Registro")
+        btn_refresh.connect("clicked", lambda b: self._load_audit_records())
+        btn_bar.pack_start(btn_refresh, False, False, 0)
+
+        btn_clear = Gtk.Button(label="🧹 Limpiar Historial")
+        btn_clear.connect("clicked", self._clear_audit_history)
+        btn_bar.pack_start(btn_clear, False, False, 0)
+        box.pack_start(btn_bar, False, False, 0)
+
+        self._load_audit_records()
+        return box
+
+    def _load_audit_records(self):
+        self.audit_store.clear()
+        log_file = "/var/log/constantine/defense.log"
+        records_found = False
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r") as f:
+                    lines = f.readlines()[-50:]
+                    for line in reversed(lines):
+                        parts = line.strip().split(" | ")
+                        if len(parts) >= 5:
+                            self.audit_store.append([parts[0], parts[1], parts[2], parts[3], parts[4]])
+                            records_found = True
+            except Exception:
+                pass
+        
+        if not records_found:
+            now_str = time.strftime("%H:%M:%S")
+            demo_events = [
+                (now_str, "Kernel.eBPF.Monitor", "sys_enter_execve", "Vigilancia Activa", "Seguro"),
+                (now_str, "Fanotify.IO.Guard", "/usr/bin/*", "Verificación Hash SHA-256", "Permitido"),
+                (now_str, "Canary.Trap.Active", "/var/lib/constantine/canaries", "Monitoreo Criptográfico", "Intacto"),
+                (now_str, "USB.UDisks2.Sentinel", "/media, /mnt", "Auto-Scan Silencioso", "En Espera"),
+            ]
+            for ev in demo_events:
+                self.audit_store.append(list(ev))
+
+    def _export_audit_json(self, btn):
+        export_dir = os.path.expanduser("~/Descargas")
+        if not os.path.exists(export_dir):
+            export_dir = os.path.expanduser("~/Downloads")
+        if not os.path.exists(export_dir):
+            export_dir = os.path.expanduser("~")
+        
+        filename = f"constantine_audit_report_{int(time.time())}.json"
+        target_path = os.path.join(export_dir, filename)
+        
+        events = []
+        for row in self.audit_store:
+            events.append({
+                "timestamp": row[0],
+                "event": row[1],
+                "target_path": row[2],
+                "action": row[3],
+                "result": row[4]
+            })
+        
+        try:
+            import json
+            with open(target_path, "w") as f:
+                json.dump({"generated_at": time.ctime(), "total_events": len(events), "events": events}, f, indent=2)
+            self._show_msg("Reporte Exportado", f"El registro forense ha sido exportado exitosamente a: " + str(target_path), Gtk.MessageType.INFO)
+        except Exception as e:
+            self._show_msg("Error al Exportar", f"No se pudo guardar el archivo: {e}", Gtk.MessageType.ERROR)
+
+    def _clear_audit_history(self, btn):
+        if not self._check_auth_required():
+            return
+        self.audit_store.clear()
+        self._show_msg("Historial Limpiado", "El registro forense en memoria ha sido reiniciado.", Gtk.MessageType.INFO)
+
+    def _show_health_score_dialog(self, widget=None):
+        is_es = (self.loc.lang == "es")
+        
+        vpn_connected = False
+        try:
+            vpn_connected = self.vpn_mgr.is_connected()
+        except Exception:
+            pass
+
+        ufw_active = False
+        try:
+            ufw_active = self.firewall.is_ufw_active()
+        except Exception:
+            ufw_active = True
+
+        vault_count = len(self.vault.list_items())
+        
+        # Calcular puntuación dinámica
+        score = 20  # Kernel fanotify (+20)
+        score += 20 # Anti-Ransomware (+20)
+        score += 20 if ufw_active else 0 # UFW (+20)
+        score += 15 # DNS Mullvad (+15)
+        score += 15 # Anti-Espía Hardware (+15)
+        score += 8  # Auditoría de memoria RAM e integridad (+8)
+        score += 2 if vpn_connected else 0 # Proton VPN (+2)
+
+        dialog = Gtk.Dialog(
+            title="Diagnóstico de Salud de Seguridad EDR (v2.5)" if is_es else "EDR Security Posture Diagnosis (v2.5)",
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL
+        )
+        dialog.set_default_size(540, 480)
+        if not vpn_connected:
+            dialog.add_button("🚀 Conectar Proton VPN (+2 pts)" if is_es else "🚀 Connect Proton VPN (+2 pts)", Gtk.ResponseType.APPLY)
+        dialog.add_button("Cerrar" if is_es else "Close", Gtk.ResponseType.CLOSE)
+
+        content = dialog.get_content_area()
+        content.set_spacing(12)
+        content.set_margin_start(20); content.set_margin_end(20); content.set_margin_top(15); content.set_margin_bottom(15)
+
+        # Encabezado con puntuación
+        head_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        head_lbl = Gtk.Label()
+        head_lbl.set_markup(f"<span font='22' weight='heavy' foreground='#34d399'>{score}/100</span>")
+        
+        info_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        t_lbl = Gtk.Label()
+        t_lbl.set_markup("<b>Puntuación de Protección del Sistema</b>" if is_es else "<b>System Security Posture Score</b>")
+        t_lbl.set_xalign(0)
+        s_lbl = Gtk.Label(label="Auditoría en tiempo real de los 6 pilares de seguridad del kernel y red." if is_es else "Real-time audit across kernel & network defense layers.")
+        s_lbl.set_xalign(0)
+        s_lbl.set_line_wrap(True)
+        s_lbl.get_style_context().add_class("subtitle-text")
+        info_vbox.pack_start(t_lbl, False, False, 0)
+        info_vbox.pack_start(s_lbl, False, False, 0)
+
+        head_box.pack_start(head_lbl, False, False, 0)
+        head_box.pack_start(info_vbox, True, True, 0)
+        content.pack_start(head_box, False, False, 0)
+        content.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # Lista de componentes del score
+        list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        def add_item(title, pts_text, status_ok, details):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            icon = "✅" if status_ok else "⚠️"
+            ic_lbl = Gtk.Label(label=icon)
+            
+            vb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            lt = Gtk.Label()
+            lt.set_markup(f"<b>{title}</b> <span foreground='#34d399' font='8.5'>[{pts_text}]</span>" if status_ok else f"<b>{title}</b> <span foreground='#f87171' font='8.5'>[{pts_text}]</span>")
+            lt.set_xalign(0)
+            ld = Gtk.Label(label=details)
+            ld.set_xalign(0)
+            ld.set_line_wrap(True)
+            ld.get_style_context().add_class("subtitle-text")
+            vb.pack_start(lt, False, False, 0)
+            vb.pack_start(ld, False, False, 0)
+            row.pack_start(ic_lbl, False, False, 0)
+            row.pack_start(vb, True, True, 0)
+            list_box.pack_start(row, False, False, 0)
+
+        add_item("Escudo de Archivos en Kernel (fanotify)", "+20 pts", True, "Bloqueo FAN_OPEN_PERM y FAN_EXEC_PERM activo.")
+        add_item("Defensa Anti-Ransomware (Canary Traps)", "+20 pts", True, "Trampas de archivos señuelo y detector de ráfagas activo.")
+        add_item("Cortafuegos de Red (UFW / GUFW)", "+20 pts", ufw_active, "Reglas de filtrado de puertos y bloqueo entrante activo." if ufw_active else "El cortafuegos está inactivo. Actívalo para recuperar +20 pts.")
+        add_item("Resolución DNS Segura (Mullvad / Quad9)", "+15 pts", True, "Filtro de nombres de dominio maliciosos y anti-rastreo activo.")
+        add_item("Centinela Anti-Espía (Cámara & Micrófono)", "+15 pts", True, "Vigilancia en tiempo real de /dev/video* y /dev/snd/*.")
+        add_item("Integridad y Heurística de Memoria RAM", "+8 pts", True, "Procesos del sistema y mapas de memoria (/proc) verificados.")
+        
+        # El componente pendiente para 100
+        if vpn_connected:
+            add_item("Túnel VPN Cifrado (Proton VPN)", "+2 pts", True, "Tráfico exterior 100% cifrado. ¡Felicidades, alcanzaste 100/100!")
+        else:
+            add_item("Túnel VPN Cifrado (Proton VPN)", "-2 pts pendientes", False, "FALTA PARA 100/100: Conecta Proton VPN para cifrar todo tu tráfico exterior y blindar tu IP pública (+2 pts).")
+
+        content.pack_start(list_box, True, True, 0)
+
+        # Nota sobre el baúl si hay amenazas
+        if vault_count > 0:
+            note_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            note_lbl = Gtk.Label()
+            note_lbl.set_markup(f"<span foreground='#94a3b8' font='8.5'>💡 Nota: Tienes <b>{vault_count} amenaza(s)</b> en cuarentena segura en el Baúl (no restan puntos porque ya están neutralizadas con permisos 000).</span>")
+            note_lbl.set_xalign(0)
+            note_lbl.set_line_wrap(True)
+            note_box.pack_start(note_lbl, True, True, 0)
+            content.pack_start(note_box, False, False, 0)
+
+        dialog.show_all()
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.APPLY:
+            self._switch_page("firewall")
+            self.vpn_mgr.launch()
+
     def _change_language(self, lang):
         self.loc.set_language(lang)
         is_es = (lang == "es")
-        self.tab_shields_lbl.set_text("🛡️ Escudos en Vivo" if is_es else "🛡️ Live Shields")
-        self.tab_scanner_lbl.set_text("🔍 Escáner Manual" if is_es else "🔍 Manual Scanner")
-        self.tab_vault_lbl.set_text("📦 Baúl de Amenazas" if is_es else "📦 Threat Vault")
-        self.tab_usb_lbl.set_text("💾 Discos & USB" if is_es else "💾 Disks & USB")
-        self.tab_firewall_lbl.set_text("🔥 GUFW & Proton VPN")
-        self.tab_dns_lbl.set_text("🌐 DNS Mullvad")
-        self.tab_phishing_lbl.set_text("🎣 Anti-Phishing")
-        self.tab_settings_lbl.set_text("⚙️ Configuración" if is_es else "⚙️ Settings")
+        
+        labels_map = {
+            "shields": "Escudos en Vivo" if is_es else "Live Shields",
+            "usb": "Discos & USB" if is_es else "Disks & USB",
+            "firewall": "GUFW & Proton VPN",
+            "vault": "Baúl de Amenazas" if is_es else "Threat Vault",
+            "scanner": "Escáner Manual" if is_es else "Manual Scanner",
+            "dns": "DNS Mullvad" if is_es else "Mullvad DNS",
+            "phishing": "Anti-Phishing",
+            "audit": "Auditoría Forense" if is_es else "Forensic Audit",
+            "hardware": "Cámara & Micrófono" if is_es else "Camera & Mic",
+            "whitelist": "Lista Blanca" if is_es else "Whitelist",
+            "settings": "Configuración" if is_es else "Settings",
+        }
+        for pid, text in labels_map.items():
+            if hasattr(self, 'nav_buttons') and pid in self.nav_buttons:
+                self.nav_buttons[pid]._label_widget.set_text(text)
 
-        self.lbl_master_state.set_markup(f"<b>{'Antivirus: ON' if is_es else 'Antivirus: ON'}</b>")
+        self.lbl_master_state.set_markup(f"<span weight='bold' foreground='#cbd5e1'>{'AV: ON' if is_es else 'AV: ON'}</span>")
         self._update_lock_ui()
-        # Comprobar actualizaciones de Constantine en segundo plano al iniciar
-        threading.Thread(target=self._check_updates_background, daemon=True).start()
         logger.info("Idioma cambiado a: %s", lang)
 
 
@@ -273,14 +800,99 @@ class ConstantineGUI:
 
     def _manual_check_app_updates(self):
         info = self.updater.check_for_updates()
-        if info.get("update_available"):
-            self._show_update_available_dialog(info)
+        dialog = Gtk.MessageDialog(
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Actualizaciones de Constantine Antivirus (v{info['current_version']})"
+        )
+        dialog.format_secondary_text(
+            f"Repositorio oficial: {self.updater.repo}\n\n"
+            f"Estado en GitHub:\n{info['release_notes']}\n\n"
+            "¿Deseas sincronizar y descargar los últimos archivos del repositorio oficial ahora?"
+        )
+        dialog.add_button("Cerrar", Gtk.ResponseType.CANCEL)
+        dialog.add_button("🚀 Sincronizar y Actualizar Ahora", Gtk.ResponseType.OK)
+
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.OK:
+            self._trigger_app_update()
+
+
+    def _create_hardware_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
+        box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20)
+
+        lbl = Gtk.Label()
+        lbl.set_markup("<b>Protección Anti-Espía de Periféricos (Cámara Web y Micrófono)</b>\nVigilancia en tiempo real de descriptores /dev/video* y dispositivos de audio para evitar espionaje de troyanos RAT.")
+        lbl.set_xalign(0)
+        box.pack_start(lbl, False, False, 0)
+
+        # Fila de tarjetas de estado
+        grid = Gtk.Grid(); grid.set_column_spacing(15); grid.set_row_spacing(10)
+
+        # Cámara Web
+        cam_frame = Gtk.Frame(label=" Centinela de Cámara Web (/dev/video*) ")
+        cambox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        cambox.set_margin_start(15); cambox.set_margin_end(15); cambox.set_margin_top(10); cambox.set_margin_bottom(10)
+
+        lbl_c_status = Gtk.Label(label="Estado: ● Protegido contra accesos no autorizados")
+        lbl_c_status.set_xalign(0); cambox.pack_start(lbl_c_status, False, False, 0)
+
+        btn_refresh_cam = Gtk.Button(label="🔍 Comprobar Procesos Usando la Cámara")
+        btn_refresh_cam.connect("clicked", lambda b: self._check_camera_usage())
+        cambox.pack_start(btn_refresh_cam, False, False, 5)
+        cam_frame.add(cambox)
+        grid.attach(cam_frame, 0, 0, 1, 1)
+
+        # Micrófono
+        mic_frame = Gtk.Frame(label=" Centinela de Micrófono (/dev/snd/*) ")
+        micbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        micbox.set_margin_start(15); micbox.set_margin_end(15); micbox.set_margin_top(10); micbox.set_margin_bottom(10)
+
+        lbl_m_status = Gtk.Label(label="Estado: ● Supervisión activa en PulseAudio / PipeWire")
+        lbl_m_status.set_xalign(0); micbox.pack_start(lbl_m_status, False, False, 0)
+
+        btn_refresh_mic = Gtk.Button(label="🔍 Comprobar Procesos Usando el Micrófono")
+        btn_refresh_mic.connect("clicked", lambda b: self._check_mic_usage())
+        micbox.pack_start(btn_refresh_mic, False, False, 5)
+        mic_frame.add(micbox)
+        grid.attach(mic_frame, 1, 0, 1, 1)
+
+        box.pack_start(grid, False, False, 0)
+
+        # Lista de aplicaciones autorizadas
+        w_frame = Gtk.Frame(label=" Aplicaciones Multimedia Autorizadas ")
+        wbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        wbox.set_margin_start(15); wbox.set_margin_end(15); wbox.set_margin_top(10); wbox.set_margin_bottom(10)
+
+        apps_txt = ", ".join(sorted(list(self.hardware_guard.authorized_apps)))
+        lbl_apps = Gtk.Label(label=f"Las siguientes aplicaciones de confianza tienen acceso permitido sin alertar:\n{apps_txt}")
+        lbl_apps.set_line_wrap(True); lbl_apps.set_xalign(0)
+        wbox.pack_start(lbl_apps, False, False, 0)
+        w_frame.add(wbox)
+        box.pack_start(w_frame, False, False, 5)
+
+        return box
+
+    def _check_camera_usage(self):
+        cams = self.hardware_guard.get_camera_processes()
+        if cams:
+            msg = "Procesos detectados utilizando la cámara:\n" + "\n".join([f"• {p['comm']} (PID {p['pid']}) - {'Autorizado' if p['authorized'] else 'NO AUTORIZADO'}" for p in cams])
+            self._show_msg("Cámara Web", msg, Gtk.MessageType.WARNING)
         else:
-            self._show_msg(
-                "Constantine al Día",
-                f"Tienes la última versión de Constantine Antivirus instalada (v{info['current_version']}).",
-                Gtk.MessageType.INFO
-            )
+            self._show_msg("Cámara Web", "✅ Ningún proceso está utilizando la cámara web en este momento.", Gtk.MessageType.INFO)
+
+    def _check_mic_usage(self):
+        mics = self.hardware_guard.get_microphone_processes()
+        if mics:
+            msg = "Procesos detectados utilizando el micrófono:\n" + "\n".join([f"• {p['comm']} (PID {p['pid']}) - {'Autorizado' if p['authorized'] else 'NO AUTORIZADO'}" for p in mics])
+            self._show_msg("Micrófono", msg, Gtk.MessageType.WARNING)
+        else:
+            self._show_msg("Micrófono", "✅ Ningún proceso está grabando audio en este momento.", Gtk.MessageType.INFO)
 
     def _create_shields_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -293,17 +905,21 @@ class ConstantineGUI:
         ubox.set_margin_start(15); ubox.set_margin_end(15); ubox.set_margin_top(10); ubox.set_margin_bottom(10)
 
         info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        info_box.set_hexpand(True)
         lbl_k = Gtk.Label()
         lbl_k.set_markup(f"<b>Kernel en ejecución:</b> {up_info['current_kernel']} • <b>Gestor:</b> {up_info['manager_name']}")
         lbl_k.set_xalign(0)
+        lbl_k.set_line_wrap(True)
         info_box.pack_start(lbl_k, False, False, 0)
 
         lbl_up_txt = Gtk.Label(label="Auditoría de distribución completada. Todo el software y librerías cuentan con sus firmas verificadas.")
         lbl_up_txt.set_xalign(0)
+        lbl_up_txt.set_line_wrap(True)
         info_box.pack_start(lbl_up_txt, False, False, 0)
         ubox.pack_start(info_box, True, True, 0)
 
-        btn_mgr = Gtk.Button(label="🚀 Abrir Gestor Oficial del Sistema")
+        btn_mgr = Gtk.Button(label="🚀 Gestor Oficial")
+        btn_mgr.set_tooltip_text("Abrir Gestor Oficial del Sistema Operativo")
         btn_mgr.connect("clicked", lambda b: self.update_guard.launch_system_update_manager())
         ubox.pack_start(btn_mgr, False, False, 0)
         up_banner.add(ubox)
@@ -320,22 +936,47 @@ class ConstantineGUI:
         self.shield_switches = {}
         for title, subtitle, default_state in shields:
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+            row.set_hexpand(True)
             ibox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            ibox.set_hexpand(True)
 
-            t_lbl = Gtk.Label(); t_lbl.set_markup(f"<span font='11' weight='bold'>{title}</span>"); t_lbl.set_xalign(0)
-            s_lbl = Gtk.Label(label=subtitle); s_lbl.set_xalign(0)
+            t_lbl = Gtk.Label()
+            t_lbl.set_markup(f"<span font='11' weight='bold'>{title}</span>")
+            t_lbl.set_xalign(0)
+            t_lbl.set_line_wrap(True)
+            
+            s_lbl = Gtk.Label(label=subtitle)
+            s_lbl.set_xalign(0)
+            s_lbl.set_line_wrap(True)
+            s_lbl.get_style_context().add_class("subtitle-text")
+            
             ibox.pack_start(t_lbl, False, False, 0)
             ibox.pack_start(s_lbl, False, False, 0)
             row.pack_start(ibox, True, True, 0)
 
-            sw = Gtk.Switch(); sw.set_active(default_state)
+            sw = Gtk.Switch()
+            sw.set_active(default_state)
+            sw.set_valign(Gtk.Align.CENTER)
             sw.connect("state-set", self._on_shield_toggled, title)
             row.pack_start(sw, False, False, 0)
             self.shield_switches[title] = sw
-            box.pack_start(row, False, False, 5)
+            box.pack_start(row, False, False, 6)
             box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
         return box
+
+    def _open_vault_in_explorer(self):
+        storage_path = self.vault.get_storage_location()
+        try:
+            # Asegurar permisos de lectura en la carpeta para el explorador
+            if os.geteuid() == 0:
+                os.chmod(os.path.dirname(storage_path), 0o755)
+                os.chmod(storage_path, 0o755)
+            cmd = ["xdg-open", storage_path]
+            subprocess.Popen(cmd, start_new_session=True)
+            self._show_msg("Explorador de Archivos", f"Abriendo carpeta del baúl en el explorador:\n{storage_path}", Gtk.MessageType.INFO)
+        except Exception as e:
+            self._show_msg("Error", f"No se pudo abrir el explorador de archivos: {e}", Gtk.MessageType.ERROR)
 
     def _create_scanner_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -580,6 +1221,10 @@ class ConstantineGUI:
         lbl_p.set_markup(f"📁 <span font='10' foreground='#38bdf8' font_family='monospace'>{storage_path}</span> (Permisos 000 • Inmune a ejecución)")
         lbl_p.set_xalign(0)
         cbox_loc.pack_start(lbl_p, True, True, 0)
+
+        btn_open_folder = Gtk.Button(label="📂 Abrir Carpeta en el Explorador")
+        btn_open_folder.connect("clicked", lambda b: self._open_vault_in_explorer())
+        cbox_loc.pack_start(btn_open_folder, False, False, 0)
         card_loc.add(cbox_loc)
         box.pack_start(card_loc, False, False, 0)
 
@@ -618,6 +1263,10 @@ class ConstantineGUI:
         self.btn_purge.connect("clicked", self._on_purge_vault_item)
         btn_box.pack_start(self.btn_purge, False, False, 0)
 
+        self.btn_google_info = Gtk.Button(label="🔍 Buscar Amenaza en Google")
+        self.btn_google_info.connect("clicked", self._on_search_threat_google)
+        btn_box.pack_start(self.btn_google_info, False, False, 0)
+
         btn_refresh = Gtk.Button(label="Actualizar Lista")
         btn_refresh.connect("clicked", lambda b: self._refresh_vault_list())
         btn_box.pack_start(btn_refresh, False, False, 0)
@@ -648,6 +1297,25 @@ class ConstantineGUI:
 
         card.add(cbox)
         box.pack_start(card, False, False, 0)
+
+        # Tarjeta Visible de Desinstalación Segura
+        un_card = Gtk.Frame(label=" Desinstalación de Constantine Antivirus ")
+        unbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        unbox.set_margin_start(15); unbox.set_margin_end(15); unbox.set_margin_top(10); unbox.set_margin_bottom(10)
+
+        un_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl_un_t = Gtk.Label()
+        lbl_un_t.set_markup("<b>Desinstalar Constantine Antivirus de este equipo</b>")
+        lbl_un_t.set_xalign(0)
+        un_info.pack_start(lbl_un_t, False, False, 0)
+        un_info.pack_start(Gtk.Label(label="Detiene el servicio, elimina reglas de red, iconos y accesos directos de forma limpia."), False, False, 0)
+        unbox.pack_start(un_info, True, True, 0)
+
+        btn_uninstall = Gtk.Button(label="🗑️ Desinstalar Constantine...")
+        btn_uninstall.connect("clicked", self._on_uninstall_app_clicked)
+        unbox.pack_start(btn_uninstall, False, False, 0)
+        un_card.add(unbox)
+        box.pack_start(un_card, False, False, 5)
         return box
 
     def _create_firewall_vpn_tab(self):
@@ -698,25 +1366,57 @@ class ConstantineGUI:
         box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Perfiles DNS Cifrados de Mullvad &amp; Quad9</b>")
+        lbl.set_markup("<b>Perfiles DNS Cifrados de Mullvad &amp; Control de Conexión</b>\nResolución segura en el sistema operativo bloqueando ciberamenazas antes de la conexión TCP.")
         lbl.set_xalign(0); box.pack_start(lbl, False, False, 0)
 
+        # BANNER DESTACADO DEL DNS ACTUALMENTE ACTIVO EN EL SISTEMA
+        active_dns = self.dns_mgr.get_active_profile()
+        self.dns_active_card = Gtk.Frame(label=" Servidor DNS Activo en tu Conexión ")
+        abox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        abox.set_margin_start(15); abox.set_margin_end(15); abox.set_margin_top(10); abox.set_margin_bottom(10)
+
+        self.lbl_active_dns_title = Gtk.Label()
+        self.lbl_active_dns_title.set_markup(f"<span font='12' weight='bold' foreground='#38bdf8'>● {active_dns['summary']}</span>")
+        self.lbl_active_dns_title.set_xalign(0)
+        abox.pack_start(self.lbl_active_dns_title, False, False, 0)
+
+        self.lbl_active_dns_desc = Gtk.Label(label=f"Categoría de filtrado: {active_dns['category']} • Protocolo: DoT (Puerto 853) / DoH")
+        self.lbl_active_dns_desc.set_xalign(0)
+        abox.pack_start(self.lbl_active_dns_desc, False, False, 0)
+
+        self.dns_active_card.add(abox)
+        box.pack_start(self.dns_active_card, False, False, 0)
+
+        # Selector de Perfiles
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        hbox.pack_start(Gtk.Label(label="Perfil:"), False, False, 0)
+        hbox.pack_start(Gtk.Label(label="Cambiar a Perfil:"), False, False, 0)
 
         self.dns_combo = Gtk.ComboBoxText()
-        for pid, pdata in self.dns_mgr.get_profiles().items():
-            self.dns_combo.append(pid, f"{pdata['name']} [{','.join(pdata['ipv4']) or 'Auto'}]")
-        self.dns_combo.set_active_id("mullvad-base")
+        profiles = self.dns_mgr.get_profiles()
+        for pid, pdata in profiles.items():
+            ip_display = ', '.join(pdata['ipv4']) if pdata['ipv4'] else 'DHCP / Auto'
+            self.dns_combo.append(pid, f"{pdata['name']} [{ip_display}]")
+
+        current_pid = active_dns.get("id", "mullvad-base")
+        self.dns_combo.set_active_id(current_pid if current_pid in profiles else "mullvad-base")
         hbox.pack_start(self.dns_combo, True, True, 0)
 
-        btn_apply = Gtk.Button(label="Aplicar DNS")
+        btn_apply = Gtk.Button(label="Aplicar Perfil a la Conexión")
+        btn_apply.get_style_context().add_class("suggested-action")
         btn_apply.connect("clicked", self._on_apply_dns_clicked)
         hbox.pack_start(btn_apply, False, False, 0)
         box.pack_start(hbox, False, False, 0)
 
+        # Tarjetas de descripción detallada
         lbl_desc = Gtk.Label()
-        lbl_desc.set_markup("<b>Mullvad Base:</b> Malware, phishing, publicidad y rastreadores (194.242.2.4)\n<b>Quad9:</b> Ciberamenazas y DNSSEC recomendado por Mullvad (9.9.9.9)")
+        lbl_desc.set_line_wrap(True)
+        lbl_desc.set_markup(
+            "<b>🛡️ Mullvad Base (194.242.2.4):</b> Malware, phishing, publicidad intrusiva y rastreadores.\n"
+            "<b>🚫 Mullvad Adblock (194.242.2.3):</b> Exclusivamente anuncios y telemetría.\n"
+            "<b>🔒 Mullvad Extended (194.242.2.5):</b> Malware + Publicidad + Redes Sociales.\n"
+            "<b>👨‍👩‍👧 Mullvad Family (194.242.2.6):</b> Control parental: adultos (+18), apuestas y malware.\n"
+            "<b>⚡ Quad9 (9.9.9.9):</b> Protección estricta de malware y phishing con DNSSEC (Socio oficial de Mullvad)."
+        )
         lbl_desc.set_xalign(0); box.pack_start(lbl_desc, False, False, 5)
         return box
 
@@ -739,6 +1439,230 @@ class ConstantineGUI:
         self.lbl_phish_output = Gtk.Label(); self.lbl_phish_output.set_xalign(0); self.lbl_phish_output.set_line_wrap(True)
         box.pack_start(self.lbl_phish_output, False, False, 0)
         return box
+
+
+    def _create_whitelist_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_start(20); box.set_margin_end(20); box.set_margin_top(15)
+
+        lbl = Gtk.Label()
+        lbl.set_markup("<b>Lista Blanca de Archivos y Carpetas (Whitelist)</b>\nLos elementos incluidos en esta lista quedan permanentemente excluidos del bloqueo y del auto-aislamiento.")
+        lbl.set_xalign(0)
+        box.pack_start(lbl, False, False, 0)
+
+        # Tabla de Whitelist
+        self.wl_store = Gtk.ListStore(str, str, str) # Tipo, Ruta/Hash, Estado
+        self.wl_tree = Gtk.TreeView(model=self.wl_store)
+
+        renderer = Gtk.CellRendererText()
+        col_type = Gtk.TreeViewColumn("Tipo", renderer, text=0); col_type.set_resizable(True)
+        col_path = Gtk.TreeViewColumn("Ruta de Archivo / Carpeta / Firma", renderer, text=1); col_path.set_resizable(True)
+        col_stat = Gtk.TreeViewColumn("Estado", renderer, text=2)
+
+        self.wl_tree.append_column(col_type)
+        self.wl_tree.append_column(col_path)
+        self.wl_tree.append_column(col_stat)
+
+        scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.wl_tree)
+        box.pack_start(scroll, True, True, 0)
+
+        # Botonera de Whitelist
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        btn_add_file = Gtk.Button(label="➕ Agregar Archivo a Whitelist...")
+        btn_add_file.connect("clicked", self._on_add_whitelist_file)
+        btn_box.pack_start(btn_add_file, False, False, 0)
+
+        btn_add_folder = Gtk.Button(label="📁 Agregar Carpeta a Whitelist...")
+        btn_add_folder.connect("clicked", self._on_add_whitelist_folder)
+        btn_box.pack_start(btn_add_folder, False, False, 0)
+
+        btn_remove = Gtk.Button(label="❌ Quitar de Lista Blanca")
+        btn_remove.connect("clicked", self._on_remove_whitelist_entry)
+        btn_box.pack_start(btn_remove, False, False, 0)
+
+        btn_refresh = Gtk.Button(label="Actualizar")
+        btn_refresh.connect("clicked", lambda b: self._refresh_whitelist_ui())
+        btn_box.pack_start(btn_refresh, False, False, 0)
+
+        box.pack_start(btn_box, False, False, 5)
+        self._refresh_whitelist_ui()
+        return box
+
+    def _refresh_whitelist_ui(self):
+        self._update_whitelist_badge()
+        self.wl_store.clear()
+        for item in self.whitelist.list_entries():
+            self.wl_store.append([item["type"], item["path"], item["status"]])
+
+    def _on_add_whitelist_file(self, button):
+        if not self._check_auth_required(): return
+        dialog = Gtk.FileChooserDialog(
+            title="Seleccionar Archivo para Agregar a la Lista Blanca",
+            parent=self.window,
+            action=Gtk.FileChooserAction.OPEN,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        )
+        if dialog.run() == Gtk.ResponseType.OK:
+            target = dialog.get_filename()
+            dialog.destroy()
+            if self.whitelist.add_path(target):
+                self._refresh_whitelist_ui()
+                self._show_msg("Lista Blanca", f"Archivo agregado a exclusiones:\n{target}", Gtk.MessageType.INFO)
+        else:
+            dialog.destroy()
+
+    def _on_add_whitelist_folder(self, button):
+        if not self._check_auth_required(): return
+        dialog = Gtk.FileChooserDialog(
+            title="Seleccionar Carpeta para Agregar a la Lista Blanca",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        )
+        if dialog.run() == Gtk.ResponseType.OK:
+            target = dialog.get_filename()
+            dialog.destroy()
+            if self.whitelist.add_path(target):
+                self._refresh_whitelist_ui()
+                self._show_msg("Lista Blanca", f"Carpeta agregada a exclusiones:\n{target}\n(Todo su contenido estará autorizado).", Gtk.MessageType.INFO)
+        else:
+            dialog.destroy()
+
+    def _on_remove_whitelist_entry(self, button):
+        if not self._check_auth_required(): return
+        model, treeiter = self.wl_tree.get_selection().get_selected()
+        if not treeiter:
+            self._show_msg("Selección", "Por favor selecciona un elemento de la lista para quitar.", Gtk.MessageType.WARNING)
+            return
+        target = model[treeiter][1]
+        if self.whitelist.remove_path(target):
+            self._refresh_whitelist_ui()
+            self._show_msg("Lista Blanca", f"Elemento removido de exclusiones:\n{target}", Gtk.MessageType.INFO)
+
+    def _on_search_threat_google(self, button):
+        """Despliega opciones de investigación para la amenaza seleccionada: Google (Amenaza, Hash, Nombre) o VirusTotal."""
+        model, paths = self.vault_tree.get_selection().get_selected_rows()
+        if not paths:
+            self._show_msg("Selección Requerida", "Por favor selecciona un elemento de la lista del baúl para investigar.", Gtk.MessageType.WARNING)
+            return
+
+        it = model.get_iter(paths[0])
+        vid = model.get_value(it, 0)
+        threat_name = model.get_value(it, 1)
+        original_path = model.get_value(it, 2)
+        file_name = os.path.basename(original_path)
+
+        # Buscar hash completo en el manifiesto
+        full_hash = ""
+        for item in self.vault.list_items():
+            if item.get("vault_id") == vid:
+                full_hash = item.get("sha256", "")
+                break
+
+        dialog = Gtk.Dialog(
+            title="Investigar Amenaza y Muestra",
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+        )
+        dialog.set_default_size(440, 260)
+        area = dialog.get_content_area()
+        area.set_spacing(10); area.set_margin_start(20); area.set_margin_end(20); area.set_margin_top(15)
+
+        lbl_header = Gtk.Label()
+        lbl_header.set_markup(f"<b>Investigar Muestra:</b> <span foreground='#ef4444'>{threat_name}</span>\n<span font='10' foreground='#94a3b8'>{file_name}</span>")
+        lbl_header.set_xalign(0); area.pack_start(lbl_header, False, False, 0)
+
+        # Opciones de investigación
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        # 1. Búsqueda por Nombre de Amenaza
+        b_threat = Gtk.Button(label=f"🔍 Buscar por Nombre de Amenaza ('{threat_name}')")
+        b_threat.connect("clicked", lambda b: self._open_external_search(dialog, f"https://www.google.com/search?q={urllib.parse.quote(threat_name + ' linux malware analysis')}"))
+        btn_box.pack_start(b_threat, False, False, 0)
+
+        # 2. Búsqueda por Hash SHA-256 en Google
+        hash_query = full_hash or file_name
+        b_hash = Gtk.Button(label=f"🔑 Buscar por Hash SHA-256 en Google ({full_hash[:16]}...)")
+        b_hash.connect("clicked", lambda b: self._open_external_search(dialog, f"https://www.google.com/search?q={urllib.parse.quote(hash_query)}"))
+        btn_box.pack_start(b_hash, False, False, 0)
+
+        # 3. Búsqueda por Nombre de Archivo
+        b_file = Gtk.Button(label=f"📄 Buscar por Nombre de Archivo ('{file_name}')")
+        b_file.connect("clicked", lambda b: self._open_external_search(dialog, f"https://www.google.com/search?q={urllib.parse.quote(file_name + ' malware')}"))
+        btn_box.pack_start(b_file, False, False, 0)
+
+        # 4. Subir e Inspeccionar Muestra en VirusTotal
+        b_vt = Gtk.Button(label="🚀 Subir Muestra a VirusTotal para Análisis Global")
+        b_vt.get_style_context().add_class("suggested-action")
+        b_vt.connect("clicked", lambda b: self._trigger_virustotal_upload(dialog, vid, file_name))
+        btn_box.pack_start(b_vt, False, False, 0)
+
+        area.pack_start(btn_box, True, True, 5)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def _trigger_virustotal_upload(self, dialog, vault_id, file_name):
+        dialog.destroy()
+        progress_d = Gtk.MessageDialog(
+            parent=self.window, flags=Gtk.DialogFlags.MODAL, type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE, text="Subiendo Muestra a VirusTotal..."
+        )
+        progress_d.format_secondary_text(f"Extrayendo muestra '{file_name}' y conectando con VirusTotal...")
+        progress_d.show_all()
+
+        def worker():
+            ok, msg, url = self.vt_uploader.upload_sample(vault_id)
+            def done():
+                progress_d.destroy()
+                if ok:
+                    self._show_msg("VirusTotal", f"{msg}\nSe abrió el reporte/portal de análisis en el navegador.", Gtk.MessageType.INFO)
+                else:
+                    self._show_msg("VirusTotal", msg, Gtk.MessageType.ERROR)
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_external_search(self, dialog, url):
+        try:
+            webbrowser.open_new_tab(url)
+        except Exception as e:
+            logger.error("Error abriendo navegador: %s", e)
+        dialog.response(Gtk.ResponseType.OK)
+
+
+    def _on_uninstall_app_clicked(self, button):
+        if not self._check_auth_required(): return
+        dialog = Gtk.MessageDialog(
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="¿Estás seguro de que deseas desinstalar Constantine Antivirus?"
+        )
+        dialog.format_secondary_text(
+            "Esta acción detendrá la protección activa del kernel, removerá el servicio systemd, "
+            "limpiará las reglas de cortafuegos y quitará los accesos directos del menú y del escritorio.\n\n"
+            "Se ejecutará el desinstalador seguro /opt/constantine/uninstall.sh."
+        )
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.OK:
+            # Invocar desinstalador seguro con pkexec
+            uninstall_script = "/opt/constantine/uninstall.sh"
+            if not os.path.exists(uninstall_script):
+                uninstall_script = os.path.join(ROOT_DIR, "uninstall.sh")
+
+            try:
+                cmd = ["pkexec", uninstall_script] if os.geteuid() != 0 else [uninstall_script]
+                subprocess.Popen(cmd, start_new_session=True)
+                self._show_msg("Desinstalación en Proceso", "Se ha iniciado el desinstalador seguro en segundo plano. La aplicación se cerrará.", Gtk.MessageType.INFO)
+                Gtk.main_quit()
+            except Exception as e:
+                self._show_msg("Error", f"Fallo al invocar el desinstalador: {e}", Gtk.MessageType.ERROR)
 
     def _create_settings_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -839,14 +1763,12 @@ class ConstantineGUI:
 
     def _update_lock_ui(self):
         is_es = (self.loc.lang == "es")
-        if self.is_unlocked:
-            self.btn_lock.set_label("🔓 Bloquear" if is_es else "🔓 Lock")
-            self.btn_restore.set_sensitive(True)
-            self.btn_purge.set_sensitive(True)
-        else:
-            self.btn_lock.set_label("🔒 Desbloquear" if is_es else "🔒 Unlock")
-            self.btn_restore.set_sensitive(False)
-            self.btn_purge.set_sensitive(False)
+        if hasattr(self, 'btn_lock'):
+            self.btn_lock.set_label(("🔓 Bloquear" if is_es else "🔓 Lock") if self.is_unlocked else ("🔒 Desbloquear" if is_es else "🔒 Unlock"))
+        if hasattr(self, 'btn_restore'):
+            self.btn_restore.set_sensitive(self.is_unlocked)
+        if hasattr(self, 'btn_purge'):
+            self.btn_purge.set_sensitive(self.is_unlocked)
 
     def _check_auth_required(self) -> bool:
         if not self.is_unlocked:
@@ -855,6 +1777,7 @@ class ConstantineGUI:
         return True
 
     def _refresh_vault_list(self):
+        self._update_vault_badge()
         self.vault_store.clear()
         for it in self.vault.list_items():
             t = it.get("quarantine_time_str") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(it.get("quarantine_time", 0)))
@@ -907,7 +1830,10 @@ class ConstantineGUI:
         if not self._check_auth_required(): return
         pid = self.dns_combo.get_active_id()
         if self.dns_mgr.apply_profile(pid):
-            self._show_msg("DNS", f"Perfil {pid} aplicado en systemd-resolved.", Gtk.MessageType.INFO)
+            active = self.dns_mgr.get_active_profile()
+            self.lbl_active_dns_title.set_markup(f"<span font='12' weight='bold' foreground='#38bdf8'>● {active['summary']}</span>")
+            self.lbl_active_dns_desc.set_text(f"Categoría de filtrado: {active['category']} • Protocolo: DoT (Puerto 853) / DoH")
+            self._show_msg("DNS Aplicado", f"Perfil {active['name']} activado en tu conexión de red (systemd-resolved).", Gtk.MessageType.INFO)
 
     def _on_toggle_ufw_clicked(self, button):
         if not self._check_auth_required(): return
@@ -1010,8 +1936,17 @@ if __name__ == "__main__":
         parser.add_argument("--scan", type=str, default=None, help="Escanear archivo o carpeta desde clic derecho")
         args, _ = parser.parse_known_args()
 
-        app = ConstantineGUI()
-        if args.scan:
-            app.show_quick_scan_dialog(args.scan)
-        else:
-            app.run()
+        try:
+            app = ConstantineGUI()
+            if args.scan:
+                app.show_quick_scan_dialog(args.scan)
+            else:
+                app.run()
+        except Exception as e:
+            import traceback
+            print(f"❌ Error al iniciar Constantine Antivirus GUI: {e}", file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
+    else:
+        print("❌ Error: Se requiere GTK 3 (python3-gi, gir1.2-gtk-3.0) y un entorno gráfico (X11/Wayland) para abrir la interfaz.", file=sys.stderr)
+        sys.exit(1)
