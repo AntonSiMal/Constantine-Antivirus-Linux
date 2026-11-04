@@ -116,6 +116,54 @@ class QuarantineVault:
         key_len = len(VAULT_XOR_KEY)
         return bytes(b ^ VAULT_XOR_KEY[i % key_len] for i, b in enumerate(raw_bytes))
 
+    def quarantine_proc_exe(self, pid: int, proc_name: str, threat_name: str) -> Optional[str]:
+        """Extrae el ejecutable activo o borrado desde /proc/<pid>/exe y lo aísla en el Baúl."""
+        proc_exe = f"/proc/{pid}/exe"
+        try:
+            if not os.path.exists(proc_exe):
+                return None
+            with open(proc_exe, "rb") as f:
+                original_bytes = f.read()
+
+            file_hash = hashlib.sha256(original_bytes).hexdigest()
+            vault_id = secrets.token_hex(12)
+            dest_payload_path = os.path.join(self.payloads_dir, f"{vault_id}.quar")
+
+            encrypted_bytes = self._encrypt_data(original_bytes)
+            with open(dest_payload_path, "wb") as f:
+                f.write(encrypted_bytes)
+            os.chmod(dest_payload_path, 0o000)
+
+            orig_path = f"/proc/{pid} ({proc_name})"
+            try:
+                target_link = os.readlink(proc_exe)
+                if target_link:
+                    orig_path = target_link
+            except Exception:
+                pass
+
+            now = time.time()
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+
+            entry = {
+                "vault_id": vault_id,
+                "original_path": orig_path,
+                "threat_name": threat_name,
+                "sha256": file_hash,
+                "quarantine_time": now,
+                "quarantine_time_str": now_str,
+                "detected_by": "MemoryRAMScanner"
+            }
+
+            manifest = self._load_manifest()
+            manifest.append(entry)
+            self._save_manifest(manifest)
+            logger.info("📦 Proceso de RAM aislado en Baúl con AES-256-GCM: PID %d -> %s", pid, vault_id)
+            return vault_id
+        except Exception as e:
+            logger.error("Error aislando proceso en cuarentena: %s", e)
+            return None
+
     def _obfuscate(self, data: bytes) -> bytes:
         return self._encrypt_data(data)
 

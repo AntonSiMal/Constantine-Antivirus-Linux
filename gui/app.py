@@ -252,7 +252,7 @@ class ConstantineGUI:
         self.lbl_title = Gtk.Label()
         self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.4 </span>")
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.5 </span>")
         title_box.pack_start(self.lbl_title, False, False, 0)
         title_box.pack_start(lbl_badge, False, False, 0)
         self.headerbar.pack_start(title_box)
@@ -685,7 +685,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v3.4)" if is_es else "EDR Security Posture Diagnosis (v3.4)",
+            title="Diagnóstico de Salud de Seguridad EDR (v3.5)" if is_es else "EDR Security Posture Diagnosis (v3.5)",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -1195,6 +1195,7 @@ class ConstantineGUI:
         threats_count = 0
         try:
             if mode == "ram":
+                seen_threats = set()
                 def ram_cb(pid, comm, current, total, threats, last_threat=None):
                     if self.abort_scan:
                         return
@@ -1202,17 +1203,33 @@ class ConstantineGUI:
                     if current % 3 == 0 or current == total:
                         GLib.idle_add(self._update_scan_ui, frac, f"/proc/{pid} ({comm})", current, threats)
                     if last_threat:
-                        proc_info = f"/proc/{last_threat['pid']} ({last_threat['comm']})"
-                        GLib.idle_add(self._add_threat_to_results, proc_info, last_threat["reason"], "Detectado en RAM")
+                        t_key = (last_threat['pid'], last_threat['reason'])
+                        if t_key not in seen_threats:
+                            seen_threats.add(t_key)
+                            proc_info = f"/proc/{last_threat['pid']} ({last_threat['comm']})"
+                            GLib.idle_add(self._add_threat_to_results, proc_info, last_threat["reason"], "Aislado en Baúl")
 
                 res = self.memory_scanner.scan_ram(progress_callback=ram_cb, abort_check=lambda: self.abort_scan)
                 scanned_count = res.get("scanned", 0)
                 threats_count = res.get("threats_count", 0)
 
-                # Mostrar todas las amenazas de memoria detectadas en la tabla
+                # Asegurar registro de amenazas en la tabla y aislar en el Baúl
                 for thr in res.get("threats", []):
-                    proc_info = f"/proc/{thr['pid']} ({thr['comm']})"
-                    GLib.idle_add(self._add_threat_to_results, proc_info, thr["reason"], "Detectado en RAM")
+                    t_key = (thr['pid'], thr['reason'])
+                    if t_key not in seen_threats:
+                        seen_threats.add(t_key)
+                        proc_info = f"/proc/{thr['pid']} ({thr['comm']})"
+                        GLib.idle_add(self._add_threat_to_results, proc_info, thr["reason"], "Aislado en Baúl")
+                    # Aislar en el Baúl físico para que aparezcan en la pestaña Baúl de Amenazas
+                    if self.vault:
+                        target_file = thr.get("target_path")
+                        if target_file and os.path.isfile(target_file):
+                            self.vault.quarantine_file(target_file, thr["reason"], detected_by="RAMScanner")
+                        else:
+                            self.vault.quarantine_proc_exe(thr["pid"], thr["comm"], thr["reason"])
+
+                # Refrescar la tabla del Baúl inmediatamente
+                GLib.idle_add(self._refresh_vault_list)
 
             else:
                 files_to_scan = []
@@ -1993,15 +2010,17 @@ class ConstantineGUI:
         restored = 0
         for it in self.vault.list_items():
             orig = it.get("original_path", "").lower()
-            if "constantine" in orig or "demons.yar" in orig or orig.endswith(".yar"):
+            is_self = ("constantine" in orig or "demons.yar" in orig or orig.endswith(".yar"))
+            is_fp = ("socket_helper.py" in orig or "connection.py" in orig or "urllib3" in orig or "mactahoe" in orig or "whitesur" in orig)
+            if is_self or is_fp:
                 vid = it.get("vault_id")
                 if self.vault.restore_file(vid, whitelist_manager=self.whitelist):
                     restored += 1
         self._refresh_vault_list()
         if restored > 0:
-            self._show_msg("Autocura de Constantine", f"Se han restaurado {restored} archivo(s) del propio antivirus y se han protegido en la Lista Blanca (Whitelist).", Gtk.MessageType.INFO)
+            self._show_msg("Autocura y Restauración", f"Se han restaurado {restored} archivo(s) de sistema / temas / antivirus y se han protegido en la Lista Blanca (Whitelist).", Gtk.MessageType.INFO)
         else:
-            self._show_msg("Autocura de Constantine", "No se encontraron archivos propios de Constantine en el Baúl.", Gtk.MessageType.INFO)
+            self._show_msg("Autocura y Restauración", "No se encontraron archivos propios ni falsos positivos en el Baúl.", Gtk.MessageType.INFO)
 
     def _on_restore_vault_item(self, button):
         if not self._check_auth_required(): return

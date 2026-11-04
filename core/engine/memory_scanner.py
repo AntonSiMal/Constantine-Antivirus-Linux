@@ -68,61 +68,77 @@ class MemoryScanner:
 
             # 1. Comprobar ejecutable en disco
             exe_link = f"/proc/{pid}/exe"
+            target = ""
             try:
                 if os.path.exists(exe_link):
                     target = os.readlink(exe_link)
-                    # Autoprotección: no analizar ejecutables propios de Constantine
-                    if "constantine" in target.lower() or "/opt/constantine" in target.lower():
-                        continue
-                    if " (deleted)" in target:
-                        # Excluir binarios oficiales de actualización de paquetes
-                        if not target.startswith("/usr/") and not target.startswith("/var/lib/flatpak"):
-                            is_malicious = True
-                            reason = f"Ejecutable borrado en disco pero activo en RAM ({target})"
-                    elif self.scanner and os.path.isfile(target):
-                        if target in scanned_binaries_cache:
-                            cached = scanned_binaries_cache[target]
-                            if cached.get("is_malicious"):
-                                is_malicious = True
-                                reason = cached.get("reason", "Malware en RAM")
-                        else:
-                            res = self.scanner.scan_file(file_path=target)
-                            is_m = res.is_malicious
-                            r_text = res.threat_name or "Malware en RAM"
-                            scanned_binaries_cache[target] = {"is_malicious": is_m, "reason": r_text}
-                            if is_m:
-                                is_malicious = True
-                                reason = r_text
             except Exception:
                 pass
 
-            # 2. Comprobar mapas de memoria buscando segmentos RWX sospechosos
+            # Autoprotección: no analizar ejecutables propios de Constantine ni del kernel
+            if target:
+                if "constantine" in target.lower() or "/opt/constantine" in target.lower():
+                    continue
+
+            # 2. Si el ejecutable fue borrado en disco mientras sigue corriendo en RAM
+            if target and " (deleted)" in target:
+                clean_target = target.replace(" (deleted)", "")
+                # Excluir binarios oficiales de actualización de paquetes (apt, flatpak, systemd)
+                if not clean_target.startswith(("/usr/", "/bin/", "/sbin/", "/snap/", "/var/lib/flatpak/")):
+                    is_malicious = True
+                    reason = f"Ejecutable borrado en disco pero activo en RAM ({clean_target})"
+
+            # 3. Analizar binario en disco con Scanner (hash + YARA) si no es del sistema
+            if not is_malicious and target and os.path.isfile(target):
+                if target in scanned_binaries_cache:
+                    cached = scanned_binaries_cache[target]
+                    if cached.get("is_malicious"):
+                        is_malicious = True
+                        reason = cached.get("reason", "Malware en RAM")
+                else:
+                    is_system = target.startswith(("/usr/", "/bin/", "/sbin/", "/snap/", "/var/lib/flatpak/"))
+                    if not is_system:
+                        res = self.scanner.scan_file(file_path=target)
+                        is_m = res.is_malicious
+                        r_text = res.threat_name or "Malware en RAM"
+                        scanned_binaries_cache[target] = {"is_malicious": is_m, "reason": r_text}
+                        if is_m:
+                            is_malicious = True
+                            reason = r_text
+                    else:
+                        scanned_binaries_cache[target] = {"is_malicious": False, "reason": ""}
+
+            # 4. Comprobar mapas de memoria buscando inyecciones anónimas RWX
+            # IMPORTANTE: Excluir binarios oficiales del sistema para evitar falsos positivos
+            # en motores JIT legítimos (Cinnamon GJS, GNOME Terminal VTE, WebKit, Python ctypes)
             if not is_malicious:
-                maps_path = f"/proc/{pid}/maps"
-                try:
-                    if os.path.exists(maps_path):
-                        with open(maps_path, "r") as f:
-                            lines_checked = 0
-                            for line in f:
-                                lines_checked += 1
-                                if lines_checked > 200: # Límite de seguridad para evitar bloqueos
-                                    break
-                                parts = line.split()
-                                if len(parts) >= 2:
-                                    perms = parts[1]
-                                    # Permiso rwxp en segmento anónimo suele delatar inyección de shellcode
-                                    if perms.startswith("rwx") and len(parts) < 6:
-                                        is_malicious = True
-                                        reason = "Inyección de memoria detectada (Segmento RWX anónimo)"
+                is_system_binary = target.startswith(("/usr/", "/bin/", "/sbin/", "/snap/", "/var/lib/flatpak/"))
+                if not is_system_binary:
+                    maps_path = f"/proc/{pid}/maps"
+                    try:
+                        if os.path.exists(maps_path):
+                            with open(maps_path, "r") as f:
+                                lines_checked = 0
+                                for line in f:
+                                    lines_checked += 1
+                                    if lines_checked > 200:
                                         break
-                except Exception:
-                    pass
+                                    parts = line.split()
+                                    if len(parts) >= 2:
+                                        perms = parts[1]
+                                        if perms.startswith("rwx") and len(parts) < 6:
+                                            is_malicious = True
+                                            reason = "Inyección de memoria detectada (Segmento RWX anónimo)"
+                                            break
+                    except Exception:
+                        pass
 
             if is_malicious:
                 threats_found.append({
                     "pid": pid,
                     "comm": proc_name,
-                    "reason": reason
+                    "reason": reason,
+                    "target_path": target.replace(" (deleted)", "") if target else ""
                 })
 
             if progress_callback:
