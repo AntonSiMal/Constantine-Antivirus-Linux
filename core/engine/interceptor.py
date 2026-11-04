@@ -103,35 +103,45 @@ class FanotifyInterceptor:
                     event_fd = meta.fd
                     pid = meta.pid
                     if event_fd >= 0:
+                        decision = FAN_ALLOW
+                        target_path = f"<fd:{event_fd}>"
                         try:
-                            target_path = os.readlink(f"/proc/self/fd/{event_fd}")
-                        except Exception:
-                            target_path = f"<fd:{event_fd}>"
+                            try:
+                                target_path = os.readlink(f"/proc/self/fd/{event_fd}")
+                            except Exception:
+                                pass
 
-                        # 1. Lista blanca de la distribución (Cero interrupción para binarios legítimos de APT)
-                        if self.whitelist.is_whitelisted(target_path):
-                            self.respond(event_fd, FAN_ALLOW)
-                        else:
-                            # 2. Análisis estático / heurístico
-                            proc_name = self.get_process_name(pid)
-                            scan_res = self.scanner.scan_file(target_fd=event_fd, file_path=target_path)
-
-                            if scan_res.is_malicious:
-                                # Acción Autónoma Silenciosa: Bloquear y Aislar sin molestar al usuario con preguntas
-                                self.respond(event_fd, FAN_DENY)
-                                if self.vault and os.path.exists(target_path):
-                                    self.vault.quarantine_file(target_path, scan_res.threat_name or "Malware")
-                                if self.notifier:
-                                    self.notifier.alert_threat_blocked(scan_res.threat_name or "Malware", target_path, pid, proc_name)
-                                if self.firewall:
-                                    self.firewall.isolate_pid(pid, terminate=False)
+                            # 1. Lista blanca rápida (< 0.05ms)
+                            if self.whitelist.is_whitelisted(target_path):
+                                decision = FAN_ALLOW
                             else:
-                                self.respond(event_fd, FAN_ALLOW)
+                                # 2. Análisis estático / heurístico
+                                proc_name = self.get_process_name(pid)
+                                scan_res = self.scanner.scan_file(target_fd=event_fd, file_path=target_path)
 
-                        try:
-                            os.close(event_fd)
-                        except OSError:
-                            pass
+                                if scan_res.is_malicious:
+                                    decision = FAN_DENY
+                                    logger.warning("🚨 [BLOQUEO FAN_DENY] %s intentó acceder a %s (%s)", proc_name, target_path, scan_res.threat_name)
+                                    if self.vault and os.path.exists(target_path):
+                                        self.vault.quarantine_file(target_path, scan_res.threat_name or "Malware")
+                                    if self.notifier:
+                                        self.notifier.alert_threat_blocked(scan_res.threat_name or "Malware", target_path, pid, proc_name)
+                                    if self.firewall:
+                                        self.firewall.isolate_pid(pid, terminate=False)
+                                else:
+                                    decision = FAN_ALLOW
+                        except Exception as e:
+                            logger.error("Error analizando evento fanotify en %s (PID: %d): %s", target_path, pid, e)
+                            decision = FAN_ALLOW
+                        finally:
+                            try:
+                                self.respond(event_fd, decision)
+                            except Exception as re_err:
+                                logger.error("Fallo enviando respuesta al kernel para fd %d: %s", event_fd, re_err)
+                            try:
+                                os.close(event_fd)
+                            except Exception:
+                                pass
                     offset += meta.event_len
             except KeyboardInterrupt:
                 break

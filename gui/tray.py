@@ -40,10 +40,11 @@ except Exception:
         HAS_APPINDICATOR = False
 
 class ConstantineTrayIcon:
-    def __init__(self, main_window=None, on_open_callback=None, on_toggle_protection=None):
+    def __init__(self, main_window=None, on_open_callback=None, on_toggle_protection=None, on_quit_callback=None):
         self.main_window = main_window
         self.on_open_callback = on_open_callback
         self.on_toggle_protection = on_toggle_protection
+        self.on_quit_callback = on_quit_callback
         self.indicator = None
         self.status_icon = None
 
@@ -150,4 +151,7 @@ class ConstantineTrayIcon:
         VPNManager().launch()
 
     def _on_exit(self, widget):
-        Gtk.main_quit()
+        if self.on_quit_callback:
+            self.on_quit_callback()
+        else:
+            Gtk.main_quit()

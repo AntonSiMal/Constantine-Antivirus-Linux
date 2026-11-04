@@ -456,3 +456,20 @@ entry:focus {
     font-family: -apple-system, 'SF Mono', 'JetBrains Mono', monospace, sans-serif;
     color: #86868b;
 }
+
+/* Botón de Apagar estilo Apple macOS */
+button.power-btn {
+    background-image: none;
+    background-color: rgba(255, 69, 58, 0.12);
+    border: 1px solid rgba(255, 69, 58, 0.3);
+    color: #ff453a;
+    font-weight: 700;
+    border-radius: 8px;
+    padding: 4px 10px;
+}
+
+button.power-btn:hover {
+    background-color: #ff453a;
+    color: #ffffff;
+    box-shadow: 0 0 10px rgba(255, 69, 58, 0.4);
+}

@@ -42,6 +42,26 @@ from core.engine.auto_updater import ConstantineUpdater
 from core.engine.i18n import Localization
 from gui.tray import ConstantineTrayIcon
 
+IPC_SOCKET_PATH = f"/tmp/constantine_gui_{os.getuid()}.sock"
+
+def check_single_instance_and_notify() -> bool:
+    """Si ya hay una instancia corriendo en segundo plano, le envía SHOW y sale."""
+    import socket
+    if os.path.exists(IPC_SOCKET_PATH):
+        try:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(1.0)
+            client.connect(IPC_SOCKET_PATH)
+            client.sendall(b"SHOW")
+            client.close()
+            return True
+        except Exception:
+            try:
+                os.remove(IPC_SOCKET_PATH)
+            except Exception:
+                pass
+    return False
+
 logger = logging.getLogger("constantine.gui")
 
 try:
@@ -146,12 +166,41 @@ class ConstantineGUI:
             print("Error: Se requiere GTK 3 (python3-gi) para iniciar la interfaz gráfica.")
             return
 
+        self._start_ipc_server()
         self._build_window()
 
+    def _start_ipc_server(self):
+        import socket
+        try:
+            if os.path.exists(IPC_SOCKET_PATH):
+                os.remove(IPC_SOCKET_PATH)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(IPC_SOCKET_PATH)
+            server.listen(5)
+            def listen_loop():
+                while True:
+                    try:
+                        conn, _ = server.accept()
+                        data = conn.recv(1024)
+                        if b"SHOW" in data:
+                            GLib.idle_add(self._restore_and_present_window)
+                        conn.close()
+                    except Exception:
+                        break
+            threading.Thread(target=listen_loop, daemon=True).start()
+        except Exception as e:
+            logger.debug("No se pudo iniciar socket IPC: %s", e)
+
+    def _restore_and_present_window(self):
+        if hasattr(self, 'headerbar'):
+            self.headerbar.show_all()
+        self.window.show_all()
+        self.window.present()
+
     def _on_window_delete(self):
-        # Cerrar limpiamente la aplicacion para no dejar procesos huerfanos
-        Gtk.main_quit()
-        return False
+        # Al pulsar [X], NO cerrar la aplicación, minimizar a segundo plano / bandeja
+        self.window.hide()
+        return True
 
     def _load_css(self):
         try:
@@ -173,8 +222,8 @@ class ConstantineGUI:
 
     def _build_window(self):
         self.window = Gtk.Window(title="Constantine Antivirus")
-        self.window.set_default_size(1040, 700)
-        self.window.set_size_request(820, 540)
+        self.window.set_default_size(980, 640)
+        self.window.set_size_request(760, 480)
         self.window.set_position(Gtk.WindowPosition.CENTER)
         
         # Icono de la ventana
@@ -186,7 +235,7 @@ class ConstantineGUI:
                 pass
 
         self.window.connect("delete-event", lambda w, e: self._on_window_delete())
-        self.tray = ConstantineTrayIcon(main_window=self.window, on_open_callback=lambda: self.window.show_all())
+        self.tray = ConstantineTrayIcon(main_window=self.window, on_open_callback=lambda: self._restore_and_present_window(), on_quit_callback=lambda: self._on_request_shutdown())
 
         self._load_css()
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -203,7 +252,7 @@ class ConstantineGUI:
         self.lbl_title = Gtk.Label()
         self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.1 </span>")
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.3 </span>")
         title_box.pack_start(self.lbl_title, False, False, 0)
         title_box.pack_start(lbl_badge, False, False, 0)
         self.headerbar.pack_start(title_box)
@@ -219,6 +268,14 @@ class ConstantineGUI:
         lang_box.pack_start(self.btn_lang_es, False, False, 0)
         lang_box.pack_start(self.btn_lang_en, False, False, 0)
         self.headerbar.pack_start(lang_box)
+
+        # Botón de Apagar / Salir (Solo activo cuando está desbloqueado)
+        self.btn_power = Gtk.Button()
+        self.btn_power.get_style_context().add_class("power-btn")
+        self.btn_power.set_label("⏻")
+        self.btn_power.set_tooltip_text("🔒 Desbloquea la aplicación para apagar Constantine")
+        self.btn_power.connect("clicked", self._on_power_button_clicked)
+        self.headerbar.pack_end(self.btn_power)
 
         # Derecha: Controles estilo macOS (pack_end)
         self.btn_lock = Gtk.Button()
@@ -268,7 +325,7 @@ class ConstantineGUI:
 
         # 1. Barra Lateral Izquierda (Sidebar) estilo EDR
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        sidebar.set_size_request(240, -1)
+        sidebar.set_size_request(220, -1)
         sidebar.get_style_context().add_class("sidebar-box")
         main_hbox.pack_start(sidebar, False, False, 0)
 
@@ -628,7 +685,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v3.1)" if is_es else "EDR Security Posture Diagnosis (v3.1)",
+            title="Diagnóstico de Salud de Seguridad EDR (v3.3)" if is_es else "EDR Security Posture Diagnosis (v3.3)",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -1787,6 +1844,38 @@ class ConstantineGUI:
             return True
         return False
 
+    def _on_power_button_clicked(self, button):
+        self._on_request_shutdown()
+
+    def _on_request_shutdown(self):
+        if not self._check_auth_required():
+            self._show_msg("Seguridad EDR", "🔒 La aplicación está bloqueada. Debes autenticarte con tu contraseña de administrador para poder apagar Constantine Antivirus.", Gtk.MessageType.WARNING)
+            return
+
+        dialog = Gtk.MessageDialog(
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="🛑 ¿Deseas apagar Constantine Antivirus?"
+        )
+        dialog.format_secondary_text("Al apagar la aplicación se cerrará el centro de control y se detendrán los monitores activos. ¿Confirmas que deseas apagar y salir por completo?")
+        dialog.add_button("Cancelar", Gtk.ResponseType.CANCEL)
+        dialog.add_button("🛑 Apagar y Salir", Gtk.ResponseType.OK)
+        
+        resp = dialog.run()
+        dialog.destroy()
+        
+        if resp == Gtk.ResponseType.OK:
+            logger.info("Apagado autorizado por el usuario. Saliendo...")
+            try:
+                if os.path.exists(IPC_SOCKET_PATH):
+                    os.remove(IPC_SOCKET_PATH)
+            except Exception:
+                pass
+            Gtk.main_quit()
+            sys.exit(0)
+
     def _on_lock_clicked(self, button):
         if self.is_unlocked:
             self.auth_mgr.revoke_session(self.session_token)
@@ -1828,6 +1917,13 @@ class ConstantineGUI:
         is_es = (self.loc.lang == "es")
         if hasattr(self, 'btn_lock'):
             self.btn_lock.set_label(("🔓 Bloquear" if is_es else "🔓 Lock") if self.is_unlocked else ("🔒 Desbloquear" if is_es else "🔒 Unlock"))
+        if hasattr(self, 'btn_power'):
+            if self.is_unlocked:
+                self.btn_power.set_label("⏻ Apagar" if is_es else "⏻ Quit")
+                self.btn_power.set_tooltip_text("🛑 Apagar y salir de Constantine Antivirus" if is_es else "🛑 Turn off and exit Constantine Antivirus")
+            else:
+                self.btn_power.set_label("⏻")
+                self.btn_power.set_tooltip_text("🔒 Desbloquea la aplicación para apagar Constantine" if is_es else "🔒 Unlock application to turn off Constantine")
         if hasattr(self, 'btn_restore'):
             self.btn_restore.set_sensitive(self.is_unlocked)
         if hasattr(self, 'btn_purge'):
@@ -2020,6 +2116,10 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Constantine Antivirus GUI")
         parser.add_argument("--scan", type=str, default=None, help="Escanear archivo o carpeta desde clic derecho")
         args, _ = parser.parse_known_args()
+
+        if not args.scan and check_single_instance_and_notify():
+            print("Constantine Antivirus ya está en ejecución. Mostrando ventana principal...")
+            sys.exit(0)
 
         try:
             app = ConstantineGUI()

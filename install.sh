@@ -12,7 +12,7 @@ fi
 echo "1. Instalando dependencias del sistema apt..."
 apt-get update -qq
 apt-get install -y -qq \
-    python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
+    python3 python3-pip python3-gi python3-gi-cairo python3-cryptography gir1.2-gtk-3.0 \
     gir1.2-appindicator3-0.1 gir1.2-ayatanaappindicator3-0.1 \
     libnotify-bin yara bpfcc-tools linux-headers-$(uname -r) \
     nftables iproute2 ufw gufw udisks2 policykit-1 || true

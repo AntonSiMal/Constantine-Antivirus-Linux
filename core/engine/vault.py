@@ -15,9 +15,16 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger("constantine.vault")
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    HAS_AESGCM = True
+except ImportError:
+    HAS_AESGCM = False
+
 DEFAULT_VAULT_DIR = "/var/lib/constantine/vault"
 USER_VAULT_DIR = os.path.expanduser("~/.config/constantine/vault")
 VAULT_XOR_KEY = b"C0nst4nt1n3_V4ult_S3cur1ty_2026_K3y"
+AES_MAGIC_HEADER = b"CST_AES256GCM:"
 
 class QuarantineVault:
     def __init__(self, vault_dir: Optional[str] = None):
@@ -30,7 +37,27 @@ class QuarantineVault:
 
         self.payloads_dir = os.path.join(self.vault_dir, "payloads")
         self.manifest_file = os.path.join(self.vault_dir, "manifest.json")
+        self.key_file = os.path.join(self.vault_dir, ".vault_aes.key")
         self._init_vault()
+
+    def _get_or_create_aes_key(self) -> bytes:
+        if os.path.exists(self.key_file):
+            try:
+                with open(self.key_file, "rb") as f:
+                    k = f.read()
+                    if len(k) == 32:
+                        return k
+            except Exception:
+                pass
+        # Generar nueva clave de 256 bits y guardar con permisos 0400
+        new_key = os.urandom(32)
+        try:
+            with open(self.key_file, "wb") as f:
+                f.write(new_key)
+            os.chmod(self.key_file, 0o400)
+        except Exception:
+            pass
+        return new_key
 
     def _init_vault(self):
         os.makedirs(self.payloads_dir, mode=0o700, exist_ok=True)
@@ -58,9 +85,39 @@ class QuarantineVault:
         except Exception as e:
             logger.debug("Error guardando manifiesto: %s", e)
 
-    def _obfuscate(self, data: bytes) -> bytes:
+    def _encrypt_data(self, data: bytes) -> bytes:
+        """Cifra datos usando AES-256-GCM autenticado (o fallback si no hay cryptography)."""
+        if HAS_AESGCM:
+            try:
+                key = self._get_or_create_aes_key()
+                aesgcm = AESGCM(key)
+                nonce = os.urandom(12) # 96-bit nonce estándar
+                ciphertext = aesgcm.encrypt(nonce, data, None)
+                return AES_MAGIC_HEADER + nonce + ciphertext
+            except Exception as e:
+                logger.error("Fallo cifrado AES-256-GCM, usando fallback: %s", e)
+        # Fallback XOR
         key_len = len(VAULT_XOR_KEY)
         return bytes(b ^ VAULT_XOR_KEY[i % key_len] for i, b in enumerate(data))
+
+    def _decrypt_data(self, raw_bytes: bytes) -> bytes:
+        """Descifra datos detectando automáticamente si es AES-256-GCM o XOR legado."""
+        if raw_bytes.startswith(AES_MAGIC_HEADER) and HAS_AESGCM:
+            try:
+                header_len = len(AES_MAGIC_HEADER)
+                nonce = raw_bytes[header_len:header_len+12]
+                ciphertext = raw_bytes[header_len+12:]
+                key = self._get_or_create_aes_key()
+                aesgcm = AESGCM(key)
+                return aesgcm.decrypt(nonce, ciphertext, None)
+            except Exception as e:
+                logger.error("Error descifrando carga AES-GCM: %s", e)
+        # Fallback para cargas XOR previas
+        key_len = len(VAULT_XOR_KEY)
+        return bytes(b ^ VAULT_XOR_KEY[i % key_len] for i, b in enumerate(raw_bytes))
+
+    def _obfuscate(self, data: bytes) -> bytes:
+        return self._encrypt_data(data)
 
     def quarantine_file(self, file_path: str, threat_name: str, detected_by: str = "Scanner") -> Optional[str]:
         if not os.path.exists(file_path):
@@ -74,7 +131,7 @@ class QuarantineVault:
             dest_payload_path = os.path.join(self.payloads_dir, f"{vault_id}.quar")
 
             # Cifrar bytes y retirar permisos de ejecución
-            obfuscated_bytes = self._obfuscate(original_bytes)
+            obfuscated_bytes = self._encrypt_data(original_bytes)
             with open(dest_payload_path, "wb") as f:
                 f.write(obfuscated_bytes)
             os.chmod(dest_payload_path, 0o000)
@@ -133,7 +190,7 @@ class QuarantineVault:
             with open(payload_path, "rb") as f:
                 obfuscated = f.read()
 
-            original_bytes = self._obfuscate(obfuscated)
+            original_bytes = self._decrypt_data(obfuscated)
             target = destination_path or item["original_path"]
 
             target_dir = os.path.dirname(target)
