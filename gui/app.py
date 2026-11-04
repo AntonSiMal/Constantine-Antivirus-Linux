@@ -278,14 +278,26 @@ class ConstantineGUI:
 
     def _manual_check_app_updates(self):
         info = self.updater.check_for_updates()
-        if info.get("update_available"):
-            self._show_update_available_dialog(info)
-        else:
-            self._show_msg(
-                "Constantine al Día",
-                f"Tienes la última versión de Constantine Antivirus instalada (v{info['current_version']}).",
-                Gtk.MessageType.INFO
-            )
+        dialog = Gtk.MessageDialog(
+            parent=self.window,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Actualizaciones de Constantine Antivirus (v{info['current_version']})"
+        )
+        dialog.format_secondary_text(
+            f"Repositorio oficial: {self.updater.repo}\n\n"
+            f"Estado en GitHub:\n{info['release_notes']}\n\n"
+            "¿Deseas sincronizar y descargar los últimos archivos del repositorio oficial ahora?"
+        )
+        dialog.add_button("Cerrar", Gtk.ResponseType.CANCEL)
+        dialog.add_button("🚀 Sincronizar y Actualizar Ahora", Gtk.ResponseType.OK)
+
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.OK:
+            self._trigger_app_update()
 
     def _create_shields_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -726,25 +738,57 @@ class ConstantineGUI:
         box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Perfiles DNS Cifrados de Mullvad &amp; Quad9</b>")
+        lbl.set_markup("<b>Perfiles DNS Cifrados de Mullvad &amp; Control de Conexión</b>\nResolución segura en el sistema operativo bloqueando ciberamenazas antes de la conexión TCP.")
         lbl.set_xalign(0); box.pack_start(lbl, False, False, 0)
 
+        # BANNER DESTACADO DEL DNS ACTUALMENTE ACTIVO EN EL SISTEMA
+        active_dns = self.dns_mgr.get_active_profile()
+        self.dns_active_card = Gtk.Frame(label=" Servidor DNS Activo en tu Conexión ")
+        abox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        abox.set_margin_start(15); abox.set_margin_end(15); abox.set_margin_top(10); abox.set_margin_bottom(10)
+
+        self.lbl_active_dns_title = Gtk.Label()
+        self.lbl_active_dns_title.set_markup(f"<span font='12' weight='bold' foreground='#38bdf8'>● {active_dns['summary']}</span>")
+        self.lbl_active_dns_title.set_xalign(0)
+        abox.pack_start(self.lbl_active_dns_title, False, False, 0)
+
+        self.lbl_active_dns_desc = Gtk.Label(label=f"Categoría de filtrado: {active_dns['category']} • Protocolo: DoT (Puerto 853) / DoH")
+        self.lbl_active_dns_desc.set_xalign(0)
+        abox.pack_start(self.lbl_active_dns_desc, False, False, 0)
+
+        self.dns_active_card.add(abox)
+        box.pack_start(self.dns_active_card, False, False, 0)
+
+        # Selector de Perfiles
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        hbox.pack_start(Gtk.Label(label="Perfil:"), False, False, 0)
+        hbox.pack_start(Gtk.Label(label="Cambiar a Perfil:"), False, False, 0)
 
         self.dns_combo = Gtk.ComboBoxText()
-        for pid, pdata in self.dns_mgr.get_profiles().items():
-            self.dns_combo.append(pid, f"{pdata['name']} [{','.join(pdata['ipv4']) or 'Auto'}]")
-        self.dns_combo.set_active_id("mullvad-base")
+        profiles = self.dns_mgr.get_profiles()
+        for pid, pdata in profiles.items():
+            ip_display = ', '.join(pdata['ipv4']) if pdata['ipv4'] else 'DHCP / Auto'
+            self.dns_combo.append(pid, f"{pdata['name']} [{ip_display}]")
+
+        current_pid = active_dns.get("id", "mullvad-base")
+        self.dns_combo.set_active_id(current_pid if current_pid in profiles else "mullvad-base")
         hbox.pack_start(self.dns_combo, True, True, 0)
 
-        btn_apply = Gtk.Button(label="Aplicar DNS")
+        btn_apply = Gtk.Button(label="Aplicar Perfil a la Conexión")
+        btn_apply.get_style_context().add_class("suggested-action")
         btn_apply.connect("clicked", self._on_apply_dns_clicked)
         hbox.pack_start(btn_apply, False, False, 0)
         box.pack_start(hbox, False, False, 0)
 
+        # Tarjetas de descripción detallada
         lbl_desc = Gtk.Label()
-        lbl_desc.set_markup("<b>Mullvad Base:</b> Malware, phishing, publicidad y rastreadores (194.242.2.4)\n<b>Quad9:</b> Ciberamenazas y DNSSEC recomendado por Mullvad (9.9.9.9)")
+        lbl_desc.set_line_wrap(True)
+        lbl_desc.set_markup(
+            "<b>🛡️ Mullvad Base (194.242.2.4):</b> Malware, phishing, publicidad intrusiva y rastreadores.\n"
+            "<b>🚫 Mullvad Adblock (194.242.2.3):</b> Exclusivamente anuncios y telemetría.\n"
+            "<b>🔒 Mullvad Extended (194.242.2.5):</b> Malware + Publicidad + Redes Sociales.\n"
+            "<b>👨‍👩‍👧 Mullvad Family (194.242.2.6):</b> Control parental: adultos (+18), apuestas y malware.\n"
+            "<b>⚡ Quad9 (9.9.9.9):</b> Protección estricta de malware y phishing con DNSSEC (Socio oficial de Mullvad)."
+        )
         lbl_desc.set_xalign(0); box.pack_start(lbl_desc, False, False, 5)
         return box
 
@@ -1084,7 +1128,10 @@ class ConstantineGUI:
         if not self._check_auth_required(): return
         pid = self.dns_combo.get_active_id()
         if self.dns_mgr.apply_profile(pid):
-            self._show_msg("DNS", f"Perfil {pid} aplicado en systemd-resolved.", Gtk.MessageType.INFO)
+            active = self.dns_mgr.get_active_profile()
+            self.lbl_active_dns_title.set_markup(f"<span font='12' weight='bold' foreground='#38bdf8'>● {active['summary']}</span>")
+            self.lbl_active_dns_desc.set_text(f"Categoría de filtrado: {active['category']} • Protocolo: DoT (Puerto 853) / DoH")
+            self._show_msg("DNS Aplicado", f"Perfil {active['name']} activado en tu conexión de red (systemd-resolved).", Gtk.MessageType.INFO)
 
     def _on_toggle_ufw_clicked(self, button):
         if not self._check_auth_required(): return
