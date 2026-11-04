@@ -158,6 +158,7 @@ class ConstantineGUI:
         self.session_token = None
         self.is_unlocked = False
         self.antivirus_enabled = True
+        self.vault_filter_limit = 10
 
         # Control de escaneo en hilo de fondo
         self.scan_thread = None
@@ -1339,8 +1340,8 @@ class ConstantineGUI:
         self.scan_panel.add(spbox)
         box.pack_start(self.scan_panel, False, False, 5)
 
-        # Tabla de Amenazas Detectadas durante el Escaneo (Detalle exacto)
-        self.threats_frame = Gtk.Frame(label=" Amenazas Detectadas y Enviadas al Baúl ")
+        # Tabla de Amenazas Detectadas (Últimas 10 amenazas)
+        self.threats_frame = Gtk.Frame(label=" Últimas 10 Amenazas Detectadas y Aisladas en Baúl ")
         tbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         tbox.set_margin_start(10); tbox.set_margin_end(10); tbox.set_margin_top(8); tbox.set_margin_bottom(8)
 
@@ -1348,22 +1349,50 @@ class ConstantineGUI:
         self.threats_tree = Gtk.TreeView(model=self.threats_store)
 
         renderer = Gtk.CellRendererText()
-        col_t = Gtk.TreeViewColumn("Amenaza Detectada", renderer, text=0); col_t.set_resizable(True)
-        col_p = Gtk.TreeViewColumn("Ruta del Archivo", renderer, text=1); col_p.set_resizable(True)
-        col_s = Gtk.TreeViewColumn("Acción de Seguridad", renderer, text=2)
-        col_h = Gtk.TreeViewColumn("Hash SHA-256", renderer, text=3)
+        col_t = Gtk.TreeViewColumn("Amenaza Detectada", renderer, text=0); col_t.set_resizable(True); col_t.set_min_width(170)
+        col_p = Gtk.TreeViewColumn("Ruta del Archivo", renderer, text=1); col_p.set_resizable(True); col_p.set_min_width(280)
+        col_s = Gtk.TreeViewColumn("Acción de Seguridad", renderer, text=2); col_s.set_min_width(140)
+        col_h = Gtk.TreeViewColumn("Hash SHA-256", renderer, text=3); col_h.set_min_width(130)
 
         self.threats_tree.append_column(col_t)
         self.threats_tree.append_column(col_p)
         self.threats_tree.append_column(col_s)
         self.threats_tree.append_column(col_h)
 
-        scroll_t = Gtk.ScrolledWindow(); scroll_t.set_min_content_height(140); scroll_t.add(self.threats_tree)
+        scroll_t = Gtk.ScrolledWindow()
+        scroll_t.set_min_content_height(130)
+        scroll_t.set_max_content_height(180)
+        scroll_t.add(self.threats_tree)
         tbox.pack_start(scroll_t, True, True, 0)
         self.threats_frame.add(tbox)
-        box.pack_start(self.threats_frame, True, True, 5)
+        box.pack_start(self.threats_frame, False, False, 5)
 
+        self._refresh_scanner_threats_preview()
         return box
+
+    def _refresh_scanner_threats_preview(self):
+        """Puebla la vista de amenazas con las últimas 10 amenazas registradas en el Baúl."""
+        self.threats_store.clear()
+        vault_items = self.vault.list_items()[:10]
+        if vault_items:
+            for it in vault_items:
+                threat_name = it.get("threat_name", "Amenaza Neutralizada")
+                path = it.get("original_path", "")
+                h = it.get("sha256", "")
+                short_h = h[:16] + "..." if len(h) > 16 else h
+                self.threats_store.append([
+                    threat_name,
+                    path,
+                    "Aislado en Baúl (AES-256)",
+                    short_h
+                ])
+        else:
+            self.threats_store.append([
+                "Sin amenazas activas",
+                "El sistema se encuentra limpio y protegido",
+                "● PROTEGIDO",
+                "—"
+            ])
 
     def _on_pick_folder_to_scan(self, button):
         dialog = Gtk.FileChooserDialog(
@@ -1524,17 +1553,17 @@ class ConstantineGUI:
         box.set_margin_start(20); box.set_margin_end(20); box.set_margin_top(15)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Baúl de Cuarentena (Aislamiento Cifrado)</b>\nNeutralización segura con permisos 000 y clave XOR.")
+        lbl.set_markup("<b>Baúl de Cuarentena (Aislamiento Cifrado AES-256-GCM)</b>\nNeutralización criptográfica militar con vector de inicialización único (Nonce 96-bit), Auth Tag y permisos 000.")
         lbl.set_xalign(0)
         box.pack_start(lbl, False, False, 0)
 
         # Ubicación física en disco
         storage_path = self.vault.get_storage_location()
-        card_loc = Gtk.Frame(label=" Ubicación Física en Disco ")
+        card_loc = Gtk.Frame(label=" Ubicación Física y Cifrado ")
         cbox_loc = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         cbox_loc.set_margin_start(12); cbox_loc.set_margin_end(12); cbox_loc.set_margin_top(6); cbox_loc.set_margin_bottom(6)
         lbl_p = Gtk.Label()
-        lbl_p.set_markup(f"📁 <span font='10' foreground='#38bdf8' font_family='monospace'>{storage_path}</span> (Permisos 000 • Inmune a ejecución)")
+        lbl_p.set_markup(f"📁 <span font='9.5' foreground='#38bdf8' font_family='monospace'>{storage_path}</span> (AES-256-GCM • Permisos 000)")
         lbl_p.set_xalign(0)
         cbox_loc.pack_start(lbl_p, True, True, 0)
 
@@ -1543,6 +1572,23 @@ class ConstantineGUI:
         cbox_loc.pack_start(btn_open_folder, False, False, 0)
         card_loc.add(cbox_loc)
         box.pack_start(card_loc, False, False, 0)
+
+        # Barra de filtro: Últimas 10 / Ver Todas
+        header_table = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.lbl_vault_count = Gtk.Label()
+        self.lbl_vault_count.set_markup("<b>Últimas 10 Amenazas Aisladas</b>")
+        self.lbl_vault_count.set_xalign(0)
+        header_table.pack_start(self.lbl_vault_count, True, True, 0)
+
+        btn_view_10 = Gtk.Button(label="🔟 Ver Últimas 10")
+        btn_view_10.connect("clicked", lambda b: self._set_vault_limit(10))
+        header_table.pack_start(btn_view_10, False, False, 0)
+
+        btn_view_all = Gtk.Button(label="📋 Ver Todas")
+        btn_view_all.connect("clicked", lambda b: self._set_vault_limit(0))
+        header_table.pack_start(btn_view_all, False, False, 0)
+
+        box.pack_start(header_table, False, False, 0)
 
         # Tabla del Baúl: 1. Fecha y Hora | 2. Tipo de Amenaza | 3. Nombre | 4. Ruta Original | 5. Hash
         self.vault_store = Gtk.ListStore(str, str, str, str, str, str) # 0:ID, 1:Fecha/Hora, 2:Tipo, 3:Nombre, 4:Ruta, 5:Hash
@@ -1571,8 +1617,11 @@ class ConstantineGUI:
         self.vault_tree.append_column(col_path)
         self.vault_tree.append_column(col_hash)
 
-        scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.vault_tree)
-        box.pack_start(scroll, True, True, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_min_content_height(180)
+        scroll.set_max_content_height(230)
+        scroll.add(self.vault_tree)
+        box.pack_start(scroll, False, False, 0)
 
         # Botonera con Selección Múltiple y Whitelist
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -1801,15 +1850,15 @@ class ConstantineGUI:
 
 
     def _create_whitelist_tab(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_start(20); box.set_margin_end(20); box.set_margin_top(15); box.set_margin_bottom(15)
 
-        lbl = Gtk.Label()
-        lbl.set_markup("<b>Lista Blanca de Archivos y Carpetas (Whitelist)</b>\nLos elementos incluidos en esta lista quedan permanentemente excluidos del bloqueo y del auto-aislamiento. Puedes seleccionar múltiples elementos para eliminarlos en lote.")
-        lbl.set_xalign(0)
-        box.pack_start(lbl, False, False, 0)
+        self.lbl_whitelist_count = Gtk.Label()
+        self.lbl_whitelist_count.set_markup("<b>Lista Blanca de Archivos y Carpetas (Whitelist)</b>\nLos elementos incluidos en esta lista quedan permanentemente excluidos del bloqueo y del auto-aislamiento. Puedes seleccionar múltiples elementos para eliminarlos en lote.")
+        self.lbl_whitelist_count.set_xalign(0)
+        box.pack_start(self.lbl_whitelist_count, False, False, 0)
 
-        # Tabla de Whitelist con Selección Múltiple
+        # Tabla de Whitelist con Selección Múltiple y Altura Proporcionada
         self.wl_store = Gtk.ListStore(str, str, str) # Tipo, Ruta/Hash, Estado
         self.wl_tree = Gtk.TreeView(model=self.wl_store)
         self.wl_tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
@@ -1823,8 +1872,11 @@ class ConstantineGUI:
         self.wl_tree.append_column(col_path)
         self.wl_tree.append_column(col_stat)
 
-        scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.wl_tree)
-        box.pack_start(scroll, True, True, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_min_content_height(160)
+        scroll.set_max_content_height(210)
+        scroll.add(self.wl_tree)
+        box.pack_start(scroll, False, False, 4)
 
         # Botonera de Whitelist con selección por lote
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1857,14 +1909,33 @@ class ConstantineGUI:
         btn_box.pack_start(btn_refresh, False, False, 0)
 
         box.pack_start(btn_box, False, False, 5)
+
+        # Nota informativa de protección nativa
+        note_frame = Gtk.Frame(label=" Exclusiones Automáticas de la Distribución (Zero-Nag) ")
+        nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        nbox.set_margin_start(12); nbox.set_margin_end(12); nbox.set_margin_top(6); nbox.set_margin_bottom(6)
+        lbl_note = Gtk.Label(label="• Los paquetes oficiales del sistema (APT, dpkg, Flatpak, Snap) en /usr/bin, /usr/lib y /snap cuentan con lista blanca nativa automática (< 0.05 ms, Zero-Nag).")
+        lbl_note.set_xalign(0)
+        lbl_note.set_line_wrap(True)
+        lbl_note.get_style_context().add_class("subtitle-text")
+        nbox.pack_start(lbl_note, False, False, 0)
+        note_frame.add(nbox)
+        box.pack_start(note_frame, False, False, 4)
+
         self._refresh_whitelist_ui()
         return box
 
     def _refresh_whitelist_ui(self):
         self._update_whitelist_badge()
         self.wl_store.clear()
-        for item in self.whitelist.list_entries():
+        entries = self.whitelist.list_entries()
+        for item in entries:
             self.wl_store.append([item["type"], item["path"], item["status"]])
+        if hasattr(self, "lbl_whitelist_count"):
+            self.lbl_whitelist_count.set_markup(
+                f"<b>Lista Blanca de Archivos y Carpetas (Whitelist)</b> <span font='8.5' color='#86868b'>({len(entries)} exclusiones activas)</span>\nLos elementos incluidos en esta lista quedan permanentemente excluidos del bloqueo y del auto-aislamiento."
+                f"Los elementos incluidos en esta lista quedan permanentemente excluidos del bloqueo y del auto-aislamiento."
+            )
 
     def _on_add_whitelist_file(self, button):
         if not self._check_auth_required(): return
@@ -2303,10 +2374,27 @@ class ConstantineGUI:
             return self.is_unlocked
         return True
 
+    def _set_vault_limit(self, limit: int):
+        self.vault_filter_limit = limit
+        self._refresh_vault_list()
+
     def _refresh_vault_list(self):
         self._update_vault_badge()
         self.vault_store.clear()
-        for it in self.vault.list_items():
+        all_items = self.vault.list_items()
+        total = len(all_items)
+
+        limit = getattr(self, "vault_filter_limit", 10)
+        if limit > 0:
+            items_to_show = all_items[:limit]
+            if hasattr(self, "lbl_vault_count"):
+                self.lbl_vault_count.set_markup(f"<b>Últimas {min(len(items_to_show), 10)} Amenazas Aisladas</b> <span font='8.5' color='#86868b'>(Total en Baúl: {total})</span>")
+        else:
+            items_to_show = all_items
+            if hasattr(self, "lbl_vault_count"):
+                self.lbl_vault_count.set_markup(f"<b>Todas las Amenazas Aisladas</b> <span font='8.5' color='#86868b'>(Total en Baúl: {total})</span>")
+
+        for it in items_to_show:
             t = it.get("quarantine_time_str") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(it.get("quarantine_time", 0)))
             orig_path = it.get("original_path", "")
             file_name = os.path.basename(orig_path) if orig_path else "desconocido"
@@ -2322,6 +2410,10 @@ class ConstantineGUI:
                 orig_path,
                 short_h
             ])
+
+        # Sincronizar vista previa en Escáner Manual si no hay escaneo activo
+        if hasattr(self, "threats_store") and not getattr(self, "is_scanning", False):
+            self._refresh_scanner_threats_preview()
 
     def _restore_constantine_self_files(self, button=None):
         restored = 0

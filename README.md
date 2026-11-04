@@ -47,7 +47,7 @@ A diferencia de las herramientas antivirus tradicionales en Linux limitadas a es
 * **Autenticación Nativa Linux con `sudo` / PAM (Zero-Breach):** Cero contraseñas propietarias o inseguras. Los usuarios administradores autorizan acciones críticas utilizando su propia contraseña personal de Linux.
 * **Despliegue Multi-Usuario Global:** Disponible para todos los usuarios actuales y futuros gracias a la configuración de `/etc/skel/`, `/usr/share/applications/` y `/etc/xdg/autostart/`.
 * **Soporte Multilingüe (i18n):** Selector en la cabecera para alternar instantáneamente entre **Español (ES)** e **Inglés (EN)**.
-* **Baúl de Cuarentena Cifrado:** Archivos neutralizados con cifrado XOR y permisos `000` en `/var/lib/constantine/vault/`.
+* **Baúl de Cuarentena Cifrado:** Archivos neutralizados con cifrado militar autenticado AES-256-GCM y permisos `000` en `/var/lib/constantine/vault/`.
 * **Auditoría Forense:** Registro cronológico de eventos con exportación de reportes en formato JSON.
 
 ---
@@ -64,7 +64,7 @@ Constantine-Antivirus-Linux/
 │   ├── engine/
 │   │   ├── interceptor.py        # Interceptación síncrona fanotify + Whitelist
 │   │   ├── scanner.py            # YARA + Hashes + Heurística
-│   │   ├── vault.py              # Baúl de cuarentena cifrado XOR permisos 000
+│   │   ├── vault.py              # Baúl de cuarentena cifrado AES-256-GCM permisos 000
 │   │   ├── ransomware_shield.py  # Honeypots (canaries) y neutralización SIGKILL
 │   │   ├── usb_monitor.py        # Vigilancia y auto-escaneo USB silencioso
 │   │   ├── persistence_guard.py  # Centinela de arranque (systemd, cron, rc.local)

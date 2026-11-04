@@ -1,8 +1,9 @@
 """
 Constantine Antivirus - Quarantine Vault (core/engine/vault.py)
-Aislamiento seguro, cifrado XOR y gestión del baúl de amenazas.
-Registra fecha, hora y ubicación física exacta de cada muestra,
-permite restauración unitaria o masiva añadiendo automáticamente a la Lista Blanca.
+Aislamiento seguro, cifrado AES-256-GCM militar y gestión del baúl de amenazas.
+Registra fecha, hora y ubicación física exacta de cada muestra con permisos 000,
+vector de inicialización único (Nonce de 96 bits) y firma de autenticación (Auth Tag).
+Permite restauración unitaria o masiva añadiendo automáticamente a la Lista Blanca.
 """
 
 import os
@@ -15,109 +16,101 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger("constantine.vault")
 
+DEFAULT_VAULT_DIR = "/var/lib/constantine/vault"
+USER_VAULT_DIR = os.path.expanduser("~/.local/share/constantine/vault")
+DEFAULT_KEY_FILE = "/var/lib/constantine/.vault_aes.key"
+USER_KEY_FILE = os.path.expanduser("~/.local/share/constantine/.vault_aes.key")
+
+VAULT_MAGIC_HEADER = b"CST_AES256GCM:"
+VAULT_XOR_KEY = b"C0nst4nt1n3_V4ult_S3cur1ty_2026_K3y"
+
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    HAS_AESGCM = True
+    HAS_AES = True
 except ImportError:
-    HAS_AESGCM = False
-
-DEFAULT_VAULT_DIR = "/var/lib/constantine/vault"
-USER_VAULT_DIR = os.path.expanduser("~/.config/constantine/vault")
-VAULT_XOR_KEY = b"C0nst4nt1n3_V4ult_S3cur1ty_2026_K3y"
-AES_MAGIC_HEADER = b"CST_AES256GCM:"
+    HAS_AES = False
+    logger.warning("Librería 'cryptography' no disponible. Usando fallback XOR.")
 
 class QuarantineVault:
-    def __init__(self, vault_dir: Optional[str] = None):
-        if vault_dir:
-            self.vault_dir = vault_dir
+    def __init__(self, storage_dir: Optional[str] = None, vault_dir: Optional[str] = None):
+        storage_dir = storage_dir or vault_dir
+        if storage_dir:
+            self.base_dir = storage_dir
+            self.key_file = os.path.join(self.base_dir, ".vault_aes.key")
         elif os.geteuid() == 0 and os.path.exists("/var/lib"):
-            self.vault_dir = DEFAULT_VAULT_DIR
+            self.base_dir = DEFAULT_VAULT_DIR
+            self.key_file = DEFAULT_KEY_FILE
         else:
-            self.vault_dir = USER_VAULT_DIR
+            self.base_dir = USER_VAULT_DIR
+            self.key_file = USER_KEY_FILE
 
-        self.payloads_dir = os.path.join(self.vault_dir, "payloads")
-        self.manifest_file = os.path.join(self.vault_dir, "manifest.json")
-        self.key_file = os.path.join(self.vault_dir, ".vault_aes.key")
-        self._init_vault()
-
-    def _get_or_create_aes_key(self) -> bytes:
-        if os.path.exists(self.key_file):
-            try:
-                with open(self.key_file, "rb") as f:
-                    k = f.read()
-                    if len(k) == 32:
-                        return k
-            except Exception:
-                pass
-        # Generar nueva clave de 256 bits y guardar con permisos 0400
-        new_key = os.urandom(32)
-        try:
-            with open(self.key_file, "wb") as f:
-                f.write(new_key)
-            os.chmod(self.key_file, 0o400)
-        except Exception:
-            pass
-        return new_key
-
-    def _init_vault(self):
-        os.makedirs(self.payloads_dir, mode=0o700, exist_ok=True)
-        if not os.path.exists(self.manifest_file):
-            self._save_manifest([])
+        self.payloads_dir = os.path.join(self.base_dir, "payloads")
+        self.manifest_file = os.path.join(self.base_dir, "vault_manifest.json")
+        self._ensure_storage()
+        self._aes_key = self._get_or_create_aes_key()
 
     def get_storage_location(self) -> str:
-        """Devuelve la ruta física en disco donde se resguardan las cargas cifradas."""
-        return os.path.abspath(self.payloads_dir)
+        return self.base_dir
 
-    def _load_manifest(self) -> List[Dict]:
+    def _ensure_storage(self):
         try:
-            if os.path.exists(self.manifest_file):
-                with open(self.manifest_file, "r") as f:
-                    return json.load(f)
+            os.makedirs(self.payloads_dir, exist_ok=True)
+            if os.geteuid() == 0:
+                os.chmod(self.base_dir, 0o700)
+                os.chmod(self.payloads_dir, 0o700)
         except Exception as e:
-            logger.debug("Error cargando manifiesto: %s", e)
-        return []
+            logger.debug("No se pudieron ajustar permisos 0700 en baúl: %s", e)
 
-    def _save_manifest(self, data: List[Dict]):
+    def _get_or_create_aes_key(self) -> bytes:
+        if not HAS_AES:
+            return b""
         try:
-            with open(self.manifest_file, "w") as f:
-                json.dump(data, f, indent=2)
-            os.chmod(self.manifest_file, 0o600)
+            if os.path.exists(self.key_file):
+                with open(self.key_file, "rb") as f:
+                    key = f.read()
+                if len(key) == 32:
+                    return key
+            key = AESGCM.generate_key(bit_length=256)
+            key_dir = os.path.dirname(self.key_file)
+            if key_dir:
+                os.makedirs(key_dir, exist_ok=True)
+            with open(self.key_file, "wb") as f:
+                f.write(key)
+            try:
+                os.chmod(self.key_file, 0o400)
+            except Exception:
+                pass
+            return key
         except Exception as e:
-            logger.debug("Error guardando manifiesto: %s", e)
+            logger.warning("Error gestionando clave AES: %s", e)
+            return b""
 
     def _encrypt_data(self, data: bytes) -> bytes:
-        """Cifra datos usando AES-256-GCM autenticado (o fallback si no hay cryptography)."""
-        if HAS_AESGCM:
+        if HAS_AES and self._aes_key:
             try:
-                key = self._get_or_create_aes_key()
-                aesgcm = AESGCM(key)
-                nonce = os.urandom(12) # 96-bit nonce estándar
+                aesgcm = AESGCM(self._aes_key)
+                nonce = secrets.token_bytes(12)
                 ciphertext = aesgcm.encrypt(nonce, data, None)
-                return AES_MAGIC_HEADER + nonce + ciphertext
+                return VAULT_MAGIC_HEADER + nonce + ciphertext
             except Exception as e:
-                logger.error("Fallo cifrado AES-256-GCM, usando fallback: %s", e)
-        # Fallback XOR
+                logger.error("Fallo cifrando con AES-256-GCM: %s", e)
         key_len = len(VAULT_XOR_KEY)
         return bytes(b ^ VAULT_XOR_KEY[i % key_len] for i, b in enumerate(data))
 
     def _decrypt_data(self, raw_bytes: bytes) -> bytes:
-        """Descifra datos detectando automáticamente si es AES-256-GCM o XOR legado."""
-        if raw_bytes.startswith(AES_MAGIC_HEADER) and HAS_AESGCM:
+        if raw_bytes.startswith(VAULT_MAGIC_HEADER) and HAS_AES and self._aes_key:
             try:
-                header_len = len(AES_MAGIC_HEADER)
-                nonce = raw_bytes[header_len:header_len+12]
-                ciphertext = raw_bytes[header_len+12:]
-                key = self._get_or_create_aes_key()
-                aesgcm = AESGCM(key)
+                offset = len(VAULT_MAGIC_HEADER)
+                nonce = raw_bytes[offset:offset+12]
+                ciphertext = raw_bytes[offset+12:]
+                aesgcm = AESGCM(self._aes_key)
                 return aesgcm.decrypt(nonce, ciphertext, None)
             except Exception as e:
-                logger.error("Error descifrando carga AES-GCM: %s", e)
-        # Fallback para cargas XOR previas
+                logger.error("Fallo descifrando AES-256-GCM: %s", e)
         key_len = len(VAULT_XOR_KEY)
         return bytes(b ^ VAULT_XOR_KEY[i % key_len] for i, b in enumerate(raw_bytes))
 
     def quarantine_proc_exe(self, pid: int, proc_name: str, threat_name: str) -> Optional[str]:
-        """Extrae el ejecutable activo o borrado desde /proc/<pid>/exe y lo aísla en el Baúl."""
         proc_exe = f"/proc/{pid}/exe"
         try:
             if not os.path.exists(proc_exe):
@@ -183,13 +176,11 @@ class QuarantineVault:
             vault_id = secrets.token_hex(12)
             dest_payload_path = os.path.join(self.payloads_dir, f"{vault_id}.quar")
 
-            # Cifrar bytes y retirar permisos de ejecución
             obfuscated_bytes = self._encrypt_data(original_bytes)
             with open(dest_payload_path, "wb") as f:
                 f.write(obfuscated_bytes)
             os.chmod(dest_payload_path, 0o000)
 
-            # Eliminar del archivo de origen en el sistema
             try:
                 os.remove(file_path)
             except Exception:
@@ -230,88 +221,77 @@ class QuarantineVault:
         return self._load_manifest()
 
     def restore_file(self, vault_id: str, destination_path: Optional[str] = None, whitelist_manager=None) -> bool:
-        """
-        Restaura un archivo del baúl y lo añade automáticamente a la Lista Blanca (Whitelist)
-        para que fanotify no vuelva a bloquearlo.
-        """
         manifest = self._load_manifest()
-        item = next((x for x in manifest if x["vault_id"] == vault_id), None)
+        item = next((it for it in manifest if it["vault_id"] == vault_id), None)
         if not item:
             return False
 
         payload_path = os.path.join(self.payloads_dir, f"{vault_id}.quar")
-        if not os.path.exists(payload_path):
+        target_path = destination_path or item.get("original_path")
+        if not target_path or not os.path.exists(payload_path):
             return False
 
         try:
-            os.chmod(payload_path, 0o600)
+            try:
+                os.chmod(payload_path, 0o600)
+            except Exception:
+                pass
             with open(payload_path, "rb") as f:
-                obfuscated = f.read()
+                encrypted_bytes = f.read()
 
-            original_bytes = self._decrypt_data(obfuscated)
-            target = destination_path or item["original_path"]
+            restored_bytes = self._decrypt_data(encrypted_bytes)
+            parent_dir = os.path.dirname(target_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
 
-            target_dir = os.path.dirname(target)
-            if target_dir:
-                os.makedirs(target_dir, exist_ok=True)
+            with open(target_path, "wb") as f:
+                f.write(restored_bytes)
+            os.chmod(target_path, 0o644)
+            os.remove(payload_path)
 
-            with open(target, "wb") as f:
-                f.write(original_bytes)
-            os.chmod(target, 0o755 if target.endswith((".sh", ".bin", ".elf")) else 0o644)
+            manifest = [it for it in manifest if it["vault_id"] != vault_id]
+            self._save_manifest(manifest)
 
+            if whitelist_manager:
+                whitelist_manager.add_restored_exception(target_path, item.get("sha256"))
+
+            logger.info("Restaurado de baúl: %s -> %s", vault_id, target_path)
+            return True
+        except Exception as e:
+            logger.error("Error restaurando muestra: %s", e)
+            return False
+
+    def delete_item(self, vault_id: str) -> bool:
+        manifest = self._load_manifest()
+        payload_path = os.path.join(self.payloads_dir, f"{vault_id}.quar")
+        if os.path.exists(payload_path):
             try:
                 os.remove(payload_path)
             except Exception:
                 pass
+        new_manifest = [it for it in manifest if it["vault_id"] != vault_id]
+        self._save_manifest(new_manifest)
+        return True
 
-            manifest = [x for x in manifest if x["vault_id"] != vault_id]
-            self._save_manifest(manifest)
+    def purge_all(self) -> int:
+        items = self.list_items()
+        count = len(items)
+        for it in items:
+            self.delete_item(it["vault_id"])
+        return count
 
-            # AÑADIR AUTOMÁTICAMENTE A LA LISTA BLANCA (WHITELIST)
-            if whitelist_manager:
-                whitelist_manager.add_restored_exception(target, item.get("sha256"))
-
-            logger.info("Archivo restaurado y añadido a la Whitelist: %s", target)
-            return True
-        except Exception as e:
-            logger.error("Error al restaurar archivo: %s", e)
-            return False
-
-    def purge_file(self, vault_id: str) -> bool:
-        manifest = self._load_manifest()
-        item = next((x for x in manifest if x["vault_id"] == vault_id), None)
-        if not item:
-            return False
-
-        payload_path = os.path.join(self.payloads_dir, f"{vault_id}.quar")
+    def _load_manifest(self) -> List[Dict]:
+        if not os.path.exists(self.manifest_file):
+            return []
         try:
-            if os.path.exists(payload_path):
-                os.chmod(payload_path, 0o600)
-                size = os.path.getsize(payload_path)
-                with open(payload_path, "wb") as f:
-                    f.write(b"\x00" * size)
-                os.remove(payload_path)
+            with open(self.manifest_file, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
 
-            manifest = [x for x in manifest if x["vault_id"] != vault_id]
-            self._save_manifest(manifest)
-            logger.info("Muestra purgada definitivamente del baúl: %s", vault_id)
-            return True
+    def _save_manifest(self, manifest: List[Dict]):
+        try:
+            with open(self.manifest_file, "w") as f:
+                json.dump(manifest, f, indent=2)
         except Exception as e:
-            logger.error("Error al purgar archivo: %s", e)
-            return False
-
-    def restore_multiple(self, vault_ids: List[str], whitelist_manager=None) -> int:
-        """Restaura múltiples archivos seleccionados y los añade a la lista blanca."""
-        success_count = 0
-        for vid in vault_ids:
-            if self.restore_file(vid, whitelist_manager=whitelist_manager):
-                success_count += 1
-        return success_count
-
-    def purge_multiple(self, vault_ids: List[str]) -> int:
-        """Elimina definitivamente múltiples archivos seleccionados del baúl."""
-        success_count = 0
-        for vid in vault_ids:
-            if self.purge_file(vid):
-                success_count += 1
-        return success_count
+            logger.error("Error guardando manifest de baúl: %s", e)
