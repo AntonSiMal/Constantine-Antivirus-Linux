@@ -153,24 +153,6 @@ git push origin main
 
 ---
 
-
----
-
-## 🗑️ Desinstalación Segura y Limpia
-
-Si en algún momento deseas desinstalar Constantine Antivirus, puedes ejecutar el desinstalador seguro que limpia el sistema por completo sin dejar residuos:
-
-```bash
-sudo ./uninstall.sh
-```
-
-El script se encarga de:
-1. Detener y deshabilitar el demonio `constantine.service` en systemd.
-2. Eliminar las tablas y reglas de aislamiento de red creadas en `nftables`.
-3. Remover los accesos directos en el menú de aplicaciones, el inicio automático en la barra de tareas y el escritorio de todos los usuarios.
-4. Eliminar los archivos binarios y librerías en `/opt/constantine/`.
-5. **Preguntar al usuario:** Te da la opción de conservar de forma segura o destruir definitivamente las muestras aisladas en el Baúl de Cuarentena (`/var/lib/constantine/vault/`).
-
 ## 📄 Licencia
 
 Este proyecto está liberado bajo la Licencia **GNU General Public License v3.0**. Consulta el archivo `LICENSE` para más información.

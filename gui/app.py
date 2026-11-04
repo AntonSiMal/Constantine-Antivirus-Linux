@@ -14,8 +14,6 @@ import time
 import logging
 import threading
 import subprocess
-import webbrowser
-import urllib.parse
 
 # Configuración de rutas
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -181,9 +179,6 @@ class ConstantineGUI:
         self.tab_phishing_lbl = Gtk.Label(label="🎣 Anti-Phishing")
         self.notebook.append_page(self._create_phishing_tab(), self.tab_phishing_lbl)
 
-        self.tab_whitelist_lbl = Gtk.Label(label="📋 Lista Blanca")
-        self.notebook.append_page(self._create_whitelist_tab(), self.tab_whitelist_lbl)
-
         self.tab_settings_lbl = Gtk.Label(label="⚙️ Configuración")
         self.notebook.append_page(self._create_settings_tab(), self.tab_settings_lbl)
 
@@ -278,26 +273,14 @@ class ConstantineGUI:
 
     def _manual_check_app_updates(self):
         info = self.updater.check_for_updates()
-        dialog = Gtk.MessageDialog(
-            parent=self.window,
-            flags=Gtk.DialogFlags.MODAL,
-            type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.NONE,
-            text=f"Actualizaciones de Constantine Antivirus (v{info['current_version']})"
-        )
-        dialog.format_secondary_text(
-            f"Repositorio oficial: {self.updater.repo}\n\n"
-            f"Estado en GitHub:\n{info['release_notes']}\n\n"
-            "¿Deseas sincronizar y descargar los últimos archivos del repositorio oficial ahora?"
-        )
-        dialog.add_button("Cerrar", Gtk.ResponseType.CANCEL)
-        dialog.add_button("🚀 Sincronizar y Actualizar Ahora", Gtk.ResponseType.OK)
-
-        resp = dialog.run()
-        dialog.destroy()
-
-        if resp == Gtk.ResponseType.OK:
-            self._trigger_app_update()
+        if info.get("update_available"):
+            self._show_update_available_dialog(info)
+        else:
+            self._show_msg(
+                "Constantine al Día",
+                f"Tienes la última versión de Constantine Antivirus instalada (v{info['current_version']}).",
+                Gtk.MessageType.INFO
+            )
 
     def _create_shields_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -635,10 +618,6 @@ class ConstantineGUI:
         self.btn_purge.connect("clicked", self._on_purge_vault_item)
         btn_box.pack_start(self.btn_purge, False, False, 0)
 
-        self.btn_google_info = Gtk.Button(label="🔍 Buscar Amenaza en Google")
-        self.btn_google_info.connect("clicked", self._on_search_threat_google)
-        btn_box.pack_start(self.btn_google_info, False, False, 0)
-
         btn_refresh = Gtk.Button(label="Actualizar Lista")
         btn_refresh.connect("clicked", lambda b: self._refresh_vault_list())
         btn_box.pack_start(btn_refresh, False, False, 0)
@@ -669,25 +648,6 @@ class ConstantineGUI:
 
         card.add(cbox)
         box.pack_start(card, False, False, 0)
-
-        # Tarjeta Visible de Desinstalación Segura
-        un_card = Gtk.Frame(label=" Desinstalación de Constantine Antivirus ")
-        unbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
-        unbox.set_margin_start(15); unbox.set_margin_end(15); unbox.set_margin_top(10); unbox.set_margin_bottom(10)
-
-        un_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        lbl_un_t = Gtk.Label()
-        lbl_un_t.set_markup("<b>Desinstalar Constantine Antivirus de este equipo</b>")
-        lbl_un_t.set_xalign(0)
-        un_info.pack_start(lbl_un_t, False, False, 0)
-        un_info.pack_start(Gtk.Label(label="Detiene el servicio, elimina reglas de red, iconos y accesos directos de forma limpia."), False, False, 0)
-        unbox.pack_start(un_info, True, True, 0)
-
-        btn_uninstall = Gtk.Button(label="🗑️ Desinstalar Constantine...")
-        btn_uninstall.connect("clicked", self._on_uninstall_app_clicked)
-        unbox.pack_start(btn_uninstall, False, False, 0)
-        un_card.add(unbox)
-        box.pack_start(un_card, False, False, 5)
         return box
 
     def _create_firewall_vpn_tab(self):
@@ -738,57 +698,25 @@ class ConstantineGUI:
         box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Perfiles DNS Cifrados de Mullvad &amp; Control de Conexión</b>\nResolución segura en el sistema operativo bloqueando ciberamenazas antes de la conexión TCP.")
+        lbl.set_markup("<b>Perfiles DNS Cifrados de Mullvad &amp; Quad9</b>")
         lbl.set_xalign(0); box.pack_start(lbl, False, False, 0)
 
-        # BANNER DESTACADO DEL DNS ACTUALMENTE ACTIVO EN EL SISTEMA
-        active_dns = self.dns_mgr.get_active_profile()
-        self.dns_active_card = Gtk.Frame(label=" Servidor DNS Activo en tu Conexión ")
-        abox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        abox.set_margin_start(15); abox.set_margin_end(15); abox.set_margin_top(10); abox.set_margin_bottom(10)
-
-        self.lbl_active_dns_title = Gtk.Label()
-        self.lbl_active_dns_title.set_markup(f"<span font='12' weight='bold' foreground='#38bdf8'>● {active_dns['summary']}</span>")
-        self.lbl_active_dns_title.set_xalign(0)
-        abox.pack_start(self.lbl_active_dns_title, False, False, 0)
-
-        self.lbl_active_dns_desc = Gtk.Label(label=f"Categoría de filtrado: {active_dns['category']} • Protocolo: DoT (Puerto 853) / DoH")
-        self.lbl_active_dns_desc.set_xalign(0)
-        abox.pack_start(self.lbl_active_dns_desc, False, False, 0)
-
-        self.dns_active_card.add(abox)
-        box.pack_start(self.dns_active_card, False, False, 0)
-
-        # Selector de Perfiles
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        hbox.pack_start(Gtk.Label(label="Cambiar a Perfil:"), False, False, 0)
+        hbox.pack_start(Gtk.Label(label="Perfil:"), False, False, 0)
 
         self.dns_combo = Gtk.ComboBoxText()
-        profiles = self.dns_mgr.get_profiles()
-        for pid, pdata in profiles.items():
-            ip_display = ', '.join(pdata['ipv4']) if pdata['ipv4'] else 'DHCP / Auto'
-            self.dns_combo.append(pid, f"{pdata['name']} [{ip_display}]")
-
-        current_pid = active_dns.get("id", "mullvad-base")
-        self.dns_combo.set_active_id(current_pid if current_pid in profiles else "mullvad-base")
+        for pid, pdata in self.dns_mgr.get_profiles().items():
+            self.dns_combo.append(pid, f"{pdata['name']} [{','.join(pdata['ipv4']) or 'Auto'}]")
+        self.dns_combo.set_active_id("mullvad-base")
         hbox.pack_start(self.dns_combo, True, True, 0)
 
-        btn_apply = Gtk.Button(label="Aplicar Perfil a la Conexión")
-        btn_apply.get_style_context().add_class("suggested-action")
+        btn_apply = Gtk.Button(label="Aplicar DNS")
         btn_apply.connect("clicked", self._on_apply_dns_clicked)
         hbox.pack_start(btn_apply, False, False, 0)
         box.pack_start(hbox, False, False, 0)
 
-        # Tarjetas de descripción detallada
         lbl_desc = Gtk.Label()
-        lbl_desc.set_line_wrap(True)
-        lbl_desc.set_markup(
-            "<b>🛡️ Mullvad Base (194.242.2.4):</b> Malware, phishing, publicidad intrusiva y rastreadores.\n"
-            "<b>🚫 Mullvad Adblock (194.242.2.3):</b> Exclusivamente anuncios y telemetría.\n"
-            "<b>🔒 Mullvad Extended (194.242.2.5):</b> Malware + Publicidad + Redes Sociales.\n"
-            "<b>👨‍👩‍👧 Mullvad Family (194.242.2.6):</b> Control parental: adultos (+18), apuestas y malware.\n"
-            "<b>⚡ Quad9 (9.9.9.9):</b> Protección estricta de malware y phishing con DNSSEC (Socio oficial de Mullvad)."
-        )
+        lbl_desc.set_markup("<b>Mullvad Base:</b> Malware, phishing, publicidad y rastreadores (194.242.2.4)\n<b>Quad9:</b> Ciberamenazas y DNSSEC recomendado por Mullvad (9.9.9.9)")
         lbl_desc.set_xalign(0); box.pack_start(lbl_desc, False, False, 5)
         return box
 
@@ -811,155 +739,6 @@ class ConstantineGUI:
         self.lbl_phish_output = Gtk.Label(); self.lbl_phish_output.set_xalign(0); self.lbl_phish_output.set_line_wrap(True)
         box.pack_start(self.lbl_phish_output, False, False, 0)
         return box
-
-
-    def _create_whitelist_tab(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_margin_start(20); box.set_margin_end(20); box.set_margin_top(15)
-
-        lbl = Gtk.Label()
-        lbl.set_markup("<b>Lista Blanca de Archivos y Carpetas (Whitelist)</b>\nLos elementos incluidos en esta lista quedan permanentemente excluidos del bloqueo y del auto-aislamiento.")
-        lbl.set_xalign(0)
-        box.pack_start(lbl, False, False, 0)
-
-        # Tabla de Whitelist
-        self.wl_store = Gtk.ListStore(str, str, str) # Tipo, Ruta/Hash, Estado
-        self.wl_tree = Gtk.TreeView(model=self.wl_store)
-
-        renderer = Gtk.CellRendererText()
-        col_type = Gtk.TreeViewColumn("Tipo", renderer, text=0); col_type.set_resizable(True)
-        col_path = Gtk.TreeViewColumn("Ruta de Archivo / Carpeta / Firma", renderer, text=1); col_path.set_resizable(True)
-        col_stat = Gtk.TreeViewColumn("Estado", renderer, text=2)
-
-        self.wl_tree.append_column(col_type)
-        self.wl_tree.append_column(col_path)
-        self.wl_tree.append_column(col_stat)
-
-        scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.wl_tree)
-        box.pack_start(scroll, True, True, 0)
-
-        # Botonera de Whitelist
-        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-
-        btn_add_file = Gtk.Button(label="➕ Agregar Archivo a Whitelist...")
-        btn_add_file.connect("clicked", self._on_add_whitelist_file)
-        btn_box.pack_start(btn_add_file, False, False, 0)
-
-        btn_add_folder = Gtk.Button(label="📁 Agregar Carpeta a Whitelist...")
-        btn_add_folder.connect("clicked", self._on_add_whitelist_folder)
-        btn_box.pack_start(btn_add_folder, False, False, 0)
-
-        btn_remove = Gtk.Button(label="❌ Quitar de Lista Blanca")
-        btn_remove.connect("clicked", self._on_remove_whitelist_entry)
-        btn_box.pack_start(btn_remove, False, False, 0)
-
-        btn_refresh = Gtk.Button(label="Actualizar")
-        btn_refresh.connect("clicked", lambda b: self._refresh_whitelist_ui())
-        btn_box.pack_start(btn_refresh, False, False, 0)
-
-        box.pack_start(btn_box, False, False, 5)
-        self._refresh_whitelist_ui()
-        return box
-
-    def _refresh_whitelist_ui(self):
-        self.wl_store.clear()
-        for item in self.whitelist.list_entries():
-            self.wl_store.append([item["type"], item["path"], item["status"]])
-
-    def _on_add_whitelist_file(self, button):
-        if not self._check_auth_required(): return
-        dialog = Gtk.FileChooserDialog(
-            title="Seleccionar Archivo para Agregar a la Lista Blanca",
-            parent=self.window,
-            action=Gtk.FileChooserAction.OPEN,
-            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
-        )
-        if dialog.run() == Gtk.ResponseType.OK:
-            target = dialog.get_filename()
-            dialog.destroy()
-            if self.whitelist.add_path(target):
-                self._refresh_whitelist_ui()
-                self._show_msg("Lista Blanca", f"Archivo agregado a exclusiones:\n{target}", Gtk.MessageType.INFO)
-        else:
-            dialog.destroy()
-
-    def _on_add_whitelist_folder(self, button):
-        if not self._check_auth_required(): return
-        dialog = Gtk.FileChooserDialog(
-            title="Seleccionar Carpeta para Agregar a la Lista Blanca",
-            parent=self.window,
-            action=Gtk.FileChooserAction.SELECT_FOLDER,
-            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
-        )
-        if dialog.run() == Gtk.ResponseType.OK:
-            target = dialog.get_filename()
-            dialog.destroy()
-            if self.whitelist.add_path(target):
-                self._refresh_whitelist_ui()
-                self._show_msg("Lista Blanca", f"Carpeta agregada a exclusiones:\n{target}\n(Todo su contenido estará autorizado).", Gtk.MessageType.INFO)
-        else:
-            dialog.destroy()
-
-    def _on_remove_whitelist_entry(self, button):
-        if not self._check_auth_required(): return
-        model, treeiter = self.wl_tree.get_selection().get_selected()
-        if not treeiter:
-            self._show_msg("Selección", "Por favor selecciona un elemento de la lista para quitar.", Gtk.MessageType.WARNING)
-            return
-        target = model[treeiter][1]
-        if self.whitelist.remove_path(target):
-            self._refresh_whitelist_ui()
-            self._show_msg("Lista Blanca", f"Elemento removido de exclusiones:\n{target}", Gtk.MessageType.INFO)
-
-    def _on_search_threat_google(self, button):
-        """Abre en el navegador una búsqueda en Google sobre la amenaza seleccionada."""
-        model, paths = self.vault_tree.get_selection().get_selected_rows()
-        if not paths:
-            self._show_msg("Selección", "Por favor selecciona una amenaza de la lista del baúl.", Gtk.MessageType.WARNING)
-            return
-        it = model.get_iter(paths[0])
-        threat_name = model.get_value(it, 1)
-
-        query = f"{threat_name} linux malware analysis"
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://www.google.com/search?q={encoded_query}"
-        try:
-            webbrowser.open_new_tab(url)
-            self._show_msg("Búsqueda en Google", f"Abriendo navegador con información de seguridad sobre:\n<b>{threat_name}</b>", Gtk.MessageType.INFO)
-        except Exception as e:
-            self._show_msg("Error", f"No se pudo abrir el navegador: {e}", Gtk.MessageType.ERROR)
-
-
-    def _on_uninstall_app_clicked(self, button):
-        if not self._check_auth_required(): return
-        dialog = Gtk.MessageDialog(
-            parent=self.window,
-            flags=Gtk.DialogFlags.MODAL,
-            type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
-            text="¿Estás seguro de que deseas desinstalar Constantine Antivirus?"
-        )
-        dialog.format_secondary_text(
-            "Esta acción detendrá la protección activa del kernel, removerá el servicio systemd, "
-            "limpiará las reglas de cortafuegos y quitará los accesos directos del menú y del escritorio.\n\n"
-            "Se ejecutará el desinstalador seguro /opt/constantine/uninstall.sh."
-        )
-        resp = dialog.run()
-        dialog.destroy()
-
-        if resp == Gtk.ResponseType.OK:
-            # Invocar desinstalador seguro con pkexec
-            uninstall_script = "/opt/constantine/uninstall.sh"
-            if not os.path.exists(uninstall_script):
-                uninstall_script = os.path.join(ROOT_DIR, "uninstall.sh")
-
-            try:
-                cmd = ["pkexec", uninstall_script] if os.geteuid() != 0 else [uninstall_script]
-                subprocess.Popen(cmd, start_new_session=True)
-                self._show_msg("Desinstalación en Proceso", "Se ha iniciado el desinstalador seguro en segundo plano. La aplicación se cerrará.", Gtk.MessageType.INFO)
-                Gtk.main_quit()
-            except Exception as e:
-                self._show_msg("Error", f"Fallo al invocar el desinstalador: {e}", Gtk.MessageType.ERROR)
 
     def _create_settings_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -1128,10 +907,7 @@ class ConstantineGUI:
         if not self._check_auth_required(): return
         pid = self.dns_combo.get_active_id()
         if self.dns_mgr.apply_profile(pid):
-            active = self.dns_mgr.get_active_profile()
-            self.lbl_active_dns_title.set_markup(f"<span font='12' weight='bold' foreground='#38bdf8'>● {active['summary']}</span>")
-            self.lbl_active_dns_desc.set_text(f"Categoría de filtrado: {active['category']} • Protocolo: DoT (Puerto 853) / DoH")
-            self._show_msg("DNS Aplicado", f"Perfil {active['name']} activado en tu conexión de red (systemd-resolved).", Gtk.MessageType.INFO)
+            self._show_msg("DNS", f"Perfil {pid} aplicado en systemd-resolved.", Gtk.MessageType.INFO)
 
     def _on_toggle_ufw_clicked(self, button):
         if not self._check_auth_required(): return
