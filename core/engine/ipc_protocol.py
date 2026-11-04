@@ -6,7 +6,7 @@ Canal de comunicación interprocesos (IPC) seguro entre la GUI de usuario no pri
      * Verifica UID, GID y PID del proceso emisor antes de procesar cualquier comando.
      * Rechaza conexiones no autorizadas o de usuarios ajenos sin privilegios.
 2. Formato de Mensajes Estructurado y Serialización JSON con HMAC-SHA256:
-   - Esquema estricto: {"version": "4.0.0", "command": "...", "params": {...}, "token": "..."}.
+   - Esquema estricto: {"version": "4.0.9", "command": "...", "params": {...}, "token": "..."}.
    - Respuestas atómicas: {"status": "OK"|"ERROR", "data": {...}, "error": "..."}.
 3. Separación Estricta de Privilegios (Least Privilege Architecture):
    - La GUI se ejecuta como usuario estándar sin privilegios de root.
@@ -37,7 +37,7 @@ class SecureIPCMessage:
     @staticmethod
     def pack(command: str, params: Optional[Dict[str, Any]] = None, token: str = "") -> bytes:
         payload = {
-            "version": "4.0.0",
+            "version": "4.0.9",
             "timestamp": time.time(),
             "command": command,
             "params": params or {},

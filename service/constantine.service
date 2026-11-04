@@ -14,7 +14,51 @@ RestartSec=5s
 RestartPreventExitStatus=2
 StartLimitIntervalSec=60
 StartLimitBurst=5
-ProtectSystem=full
+
+# =========================================================================
+# AISLAMIENTO Y HARDENING DEL SERVICIO SYSTEMD (Principio de Mínimo Privilegio)
+# =========================================================================
+
+# 1. Prevención estricta de escalada de privilegios y suplantación de bits SUID
+NoNewPrivileges=true
+
+# 2. Protección del Sistema de Archivos Base
+# Protege /usr, /boot, /etc como solo lectura para impedir que un atacante altere binarios del OS
+ProtectSystem=strict
+
+# Directorios de escritura explícitamente delimitados requeridos para operación del antivirus:
+# - /var/lib/constantine (Baúl de cuarentena y señuelos canaries)
+# - /var/log/constantine (Bitácoras forenses de defensa)
+# - /run/constantine     (Socket IPC de comunicación con la GUI)
+# - /etc/constantine     (Almacén de clave segura .vault_key)
+ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine
+
+# Directorios del programa protegidos en modo solo lectura
+ReadOnlyPaths=/opt/constantine
+
+# 3. Protección de Memoria del Kernel y Dispositivos Críticos
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=false
+
+# 4. Aislamiento de Espacio de Nombres y Memoria Temporal
+# Protege /tmp de accesos cruzados entre usuarios manteniendo visibilidad para fanotify
+PrivateTmp=true
+
+# Restricción de acceso a espacio de direcciones de memoria cruda de hardware (/dev/mem, /dev/kmem)
+ProtectMemoryProtection=true
+
+# 5. Restricción Estricta de Capacidades Linux (Capability Bounding Set)
+# Solo conserva las capacidades del kernel estrictamente necesarias para el motor:
+# - CAP_SYS_ADMIN: Requerido por fanotify (FAN_CLASS_CONTENT) y cgroups
+# - CAP_NET_ADMIN / CAP_NET_RAW: Requerido por nftables/iptables y corte de sockets
+# - CAP_KILL: Requerido para contención SIGSTOP/SIGKILL de procesos maliciosos
+# - CAP_DAC_OVERRIDE / CAP_DAC_READ_SEARCH: Inspección y cuarentena de archivos del sistema
+# - CAP_BPF / CAP_PERFMON: Sondas eBPF de kernel
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON
+
+# 6. Descriptores y Límites Operativos
 LimitNOFILE=65536
 
 [Install]

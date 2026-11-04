@@ -1228,7 +1228,13 @@ class ConstantineGUI:
             self.lbl_live_scan_current.set_markup("<span font='8.5' color='#ff3b30'>● Demonio en segundo plano inactivo (constantine.service detenido)</span>")
             return True
 
-        self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia activa en kernel (fanotify E/S, eBPF & Inotify)</span>")
+        ebpf_diag = self.ebpf_monitor.get_status_info() if hasattr(self, "ebpf_monitor") else {}
+        if ebpf_diag.get("is_active"):
+            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia nativa en kernel activa (fanotify, eBPF multiprueba & inotify)</span>")
+        elif ebpf_diag.get("is_degraded") or ebpf_diag.get("is_operational"):
+            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#ff9500'>⚠️ Vigilancia en modo degradado (eBPF inactivo: operando con sondeo /proc y fanotify)</span>")
+        else:
+            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia activa en kernel (fanotify E/S & inotify)</span>")
 
         # 1. Leer incidentes reales del registro forense
         incidents = self.audit_logger.get_incidents()
@@ -1267,29 +1273,73 @@ class ConstantineGUI:
         return True
 
     def _on_refresh_signatures_clicked(self, button):
-        self.scanner.update_signatures()
-        sig_info = self.scanner.get_signatures_info()
-        self.lbl_h_date.set_text(f"Actualizado: {sig_info['hashes_date']}")
-        self.lbl_h_count.set_text(f"Firmas: {sig_info['hashes_count']} hashes SHA256")
-        self.lbl_y_date.set_text(f"Compilado: {sig_info['yara_date']}")
-        self.lbl_p_date.set_text(f"Auditoría: {sig_info['phish_date']}")
+        button.set_sensitive(False)
+        orig_label = button.get_label()
+        button.set_label("🔄 Sincronizando feeds remotos...")
 
-        now = time.strftime("%H:%M:%S")
-        self.live_scan_store.prepend([now, "Bases de firmas de virus y hashes actualizadas", "✅ V2026.11 OK"])
-        self.notifier.send(
-            "⚔️ Constantine: Firmas Actualizadas",
-            f"Bases de datos actualizadas con éxito a {sig_info['hashes_version']} ({sig_info['hashes_count']} firmas).",
-            urgency="normal",
-            icon="security-high"
-        )
-        msg_text = (
-            "✅ ¡Bases de datos de amenazas actualizadas con éxito!\n\n"
-            + f"• Base de Hashes: {sig_info['hashes_version']} ({sig_info['hashes_count']} firmas activas)\n"
-            + f"• Firmas Heurísticas: {sig_info['yara_version']} ({sig_info['yara_rules_count']} reglas YARA)\n"
-            + f"• Reputación Web: {sig_info['phish_version']} ({sig_info['phish_count']} URLs/dominios)\n\n"
-            + f"Fecha y hora de actualización: {sig_info['hashes_date']}"
-        )
-        self._show_msg("Bases de Virus y Firmas", msg_text, Gtk.MessageType.INFO)
+        def do_sync():
+            try:
+                sync_res = self.scanner.update_signatures(sync_remote=True, timeout=12)
+            except Exception as e:
+                sync_res = {"error": str(e)}
+
+            def on_complete():
+                button.set_sensitive(True)
+                button.set_label(orig_label)
+                sig_info = self.scanner.get_signatures_info()
+                self.lbl_h_date.set_text(f"Actualizado: {sig_info['hashes_date']}")
+                self.lbl_h_count.set_text(f"Firmas: {sig_info['hashes_count']} hashes SHA256")
+                self.lbl_y_date.set_text(f"Compilado: {sig_info['yara_date']}")
+                self.lbl_p_date.set_text(f"Auditoría: {sig_info['phish_date']}")
+
+                feed_sync = sync_res.get("feed_sync") or {}
+                feeds_detail = feed_sync.get("feeds", {})
+                any_success = any(f.get("status") == "SUCCESS" for f in feeds_detail.values())
+
+                feed_lines = []
+                for fname, fres in feeds_detail.items():
+                    if fres.get("status") == "SUCCESS":
+                        feed_lines.append(f"  • {fname}: ✅ Sincronizado (+{fres.get('added', 0)} nuevas firmas)")
+                    else:
+                        feed_lines.append(f"  • {fname}: ⚠️ Sin conexión ({fres.get('error', 'Fallo')[:30]})")
+
+                feeds_report = "\n".join(feed_lines) if feed_lines else "  • Sin fuentes procesadas"
+                now = time.strftime("%H:%M:%S")
+
+                if any_success:
+                    self.live_scan_store.prepend([now, "Feeds de amenazas sincronizados en vivo", "✅ SYNC_OK"])
+                    self.notifier.send(
+                        "⚔️ Constantine: Feeds Sincronizados",
+                        f"Bases de inteligencia de amenazas actualizadas ({sig_info['hashes_count']} firmas).",
+                        urgency="normal",
+                        icon="security-high"
+                    )
+                    title = "Sincronización de Inteligencia de Amenazas"
+                    msg_text = (
+                        "✅ ¡Sincronización remota de fuentes completada con éxito!\n\n"
+                        + f"Estado individual por fuente:\n{feeds_report}\n\n"
+                        + f"• Hashes SHA-256 activos: {sig_info['hashes_count']}\n"
+                        + f"• Reglas YARA activas: {sig_info['yara_rules_count']}\n"
+                        + f"• Reputación URLs/Phishing: {sig_info['phish_count']}\n\n"
+                        + f"Fecha de auditoría confirmada: {sig_info['hashes_date']}"
+                    )
+                    mtype = Gtk.MessageType.INFO
+                else:
+                    title = "Aviso de Sincronización Remota"
+                    msg_text = (
+                        "⚠️ No se pudo contactar a los servidores externos de inteligencia (modo offline activo).\n\n"
+                        + f"Resultado por fuente:\n{feeds_report}\n\n"
+                        + f"• Reglas YARA locales: Recargadas en caliente ({sig_info['yara_rules_count']} reglas)\n"
+                        + f"• Firmas de base local preservadas: {sig_info['hashes_count']} hashes\n\n"
+                        + "Nota: La fecha de actualización remota NO fue alterada para reflejar la realidad del sistema."
+                    )
+                    mtype = Gtk.MessageType.WARNING
+
+                self._show_msg(title, msg_text, mtype)
+
+            GLib.idle_add(on_complete)
+
+        threading.Thread(target=do_sync, daemon=True).start()
     def _open_vault_in_explorer(self):
         storage_path = self.vault.get_storage_location()
         try:

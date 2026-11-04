@@ -16,7 +16,7 @@ import os
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Any
 
 from core.engine.threat_intel import ThreatIntelligence
 from core.engine.yara_manager import YaraRuleManager, YaraMatch
@@ -109,10 +109,22 @@ class Scanner:
         info["heuristic_layers"] = ["ELF_Structure", "Shannon_Entropy", "Script_Behavior", "Packing_Detection"]
         return info
 
-    def update_signatures(self):
-        """Recarga en caliente las firmas YARA y actualiza marcas de Threat Intelligence."""
-        self.yara_manager.reload_rules()
-        self.intel.touch_updates()
+    def update_signatures(self, sync_remote: bool = True, timeout: int = 15) -> Dict[str, Any]:
+        """
+        Recarga en caliente las firmas YARA y ejecuta la sincronización real de feeds
+        de Threat Intelligence. Actualiza la marca temporal únicamente si la operación tiene éxito.
+        """
+        yara_reloaded = self.yara_manager.reload_rules()
+        sync_result = None
+        if sync_remote:
+            sync_result = self.intel.sync_feeds(timeout=timeout)
+        else:
+            self.intel.touch_updates()
+
+        return {
+            "yara_reloaded": yara_reloaded,
+            "feed_sync": sync_result
+        }
 
     def scan_file(self, target_fd: Optional[int] = None, file_path: Optional[str] = None) -> ScanResult:
         """

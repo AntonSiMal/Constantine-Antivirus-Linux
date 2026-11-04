@@ -175,16 +175,17 @@ class SubsystemHealthRegistry:
             diag = ebpf_monitor.get_status_info()
             if diag["is_active"]:
                 e_state = ShieldOperationalState.ACTIVE
-                e_details = "Sondas eBPF de kernel sys_enter_execve y ptrace activas."
-            elif diag["is_operational"]:
+                vectors_str = ", ".join(diag.get("monitored_vectors", []))
+                e_details = f"Sondas eBPF en kernel activas ({vectors_str})."
+            elif diag.get("is_degraded") or diag["is_operational"]:
                 e_state = ShieldOperationalState.DEGRADED
-                e_details = "Operando en modo de respaldo heurístico (/proc) sin sondas en kernel."
+                e_details = "MODO DEGRADADO: Operando mediante inspección periódica de /proc (sin telemetría en kernel ni interceptación síncrona)."
             elif not diag["has_bcc"]:
                 e_state = ShieldOperationalState.MISSING_DEPENDENCY
-                e_details = f"Dependencia 'bpfcc-tools' ausente. Solución: {diag['recommendation']}"
+                e_details = f"Dependencia 'bpfcc-tools' ausente (eBPF inactivo). Solución: {diag['recommendation']}"
             elif diag["status"] == "DISABLED_NO_HEADERS":
                 e_state = ShieldOperationalState.MISSING_DEPENDENCY
-                e_details = f"Faltan cabeceras de kernel linux-headers. Solución: {diag['recommendation']}"
+                e_details = f"Faltan cabeceras de kernel linux-headers (eBPF inactivo). Solución: {diag['recommendation']}"
             else:
                 e_state = ShieldOperationalState.INIT_ERROR
                 e_details = diag.get("error_message") or "Error inicializando sondas eBPF"

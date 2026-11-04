@@ -44,7 +44,7 @@ if [ "$EUID" -ne 0 ]; then
     die "El instalador de Constantine Antivirus debe ejecutarse como root:\n   sudo ./install.sh"
 fi
 
-echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v4.0.0)${NC}"
+echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v4.0.9)${NC}"
 echo "======================================================================"
 
 # --- 2. Verificación y Actualización de Repositorios APT ---
@@ -330,7 +330,7 @@ fi
 
 echo ""
 echo -e "${BOLD}${GREEN}======================================================================"
-echo -e "🎉 ¡INSTALACIÓN COMPLETADA Y VERIFICADA CON ÉXITO (v4.0.0)!"
+echo -e "🎉 ¡INSTALACIÓN COMPLETADA Y VERIFICADA CON ÉXITO (v4.0.9)!"
 echo -e "======================================================================${NC}"
 echo -e "• ${BOLD}Protección en Kernel:${NC} Demonio del sistema configurado y en ejecución."
 echo -e "• ${BOLD}Seguridad Zero-Breach:${NC} Autenticación nativa delegada a PAM/sudo."

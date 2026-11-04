@@ -27,6 +27,7 @@ Interceptación síncrona en kernel mediante fanotify (FAN_OPEN_PERM & FAN_OPEN_
 import os
 import time
 import ctypes
+import fcntl
 import select
 import logging
 import threading
@@ -390,14 +391,34 @@ class FanotifyInterceptor:
 
                             proc_name = self.get_process_name(pid)
 
+                            # Determinar el tipo de operación de archivo mediante banderas del descriptor
+                            is_read_intent = True
+                            is_write_intent = False
+                            try:
+                                fl = fcntl.fcntl(event_fd, fcntl.F_GETFL)
+                                acc = fl & os.O_ACCMODE
+                                is_write_intent = (acc in (os.O_WRONLY, os.O_RDWR)) or bool(fl & (os.O_TRUNC | os.O_APPEND))
+                                is_read_intent = (acc in (os.O_RDONLY, os.O_RDWR))
+                            except Exception:
+                                is_write_intent = True
+
                             # 2. EVALUACIÓN ANTIRANSOMWARE INTEGRADA (Canary Traps, Extensiones y Ráfagas)
                             if self.ransomware and target_path and not target_path.startswith("<fd:"):
-                                if self.ransomware.check_file_path(target_path, pid):
+                                rw_decision = self.ransomware.evaluate_operation(
+                                    file_path=target_path,
+                                    pid=pid,
+                                    is_write=is_write_intent,
+                                    is_read=is_read_intent,
+                                    target_fd=event_fd
+                                )
+                                if rw_decision.is_blocked:
                                     decision = FAN_DENY
-                                    logger.critical("🚨 [BLOQUEO FAN_DENY - RANSOMWARE] Interceptado ataque de ransomware por PID %d (%s) en: %s", pid, proc_name, target_path)
+                                    logger.critical("🚨 [BLOQUEO FAN_DENY - RANSOMWARE] Interceptada actividad sospechosa por PID %d (%s) en: %s (Razón: %s, Terminar: %s)",
+                                                    pid, proc_name, target_path, rw_decision.threat_reason, rw_decision.terminate_process)
                                     if self.firewall:
-                                        self.firewall.isolate_pid(pid, terminate=True)
-                                    # La decisión es denegar y continuar hacia el envío de respuesta
+                                        # Aislar en red; solo terminar el proceso si terminate_process es True (nunca por simple extensión aislada)
+                                        self.firewall.isolate_pid(pid, terminate=rw_decision.terminate_process)
+                                    # Responder inmediatamente FAN_DENY para proteger el archivo
                                     self.respond(event_fd, decision)
                                     try:
                                         os.close(event_fd)

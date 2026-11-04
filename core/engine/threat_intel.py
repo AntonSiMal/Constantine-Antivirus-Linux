@@ -411,7 +411,7 @@ class ThreatIntelligence:
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Constantine-Antivirus-ThreatIntel/4.0.0 (+https://github.com/AntonSiMal/Constantine-Antivirus-Linux)",
+                "User-Agent": "Constantine-Antivirus-ThreatIntel/4.0.9 (+https://github.com/AntonSiMal/Constantine-Antivirus-Linux)",
                 "Accept": "*/*"
             }
         )
@@ -627,6 +627,11 @@ class ThreatIntelligence:
                 except Exception:
                     pass
 
+        # Actualizar fecha y hora únicamente si al menos una fuente se sincronizó exitosamente
+        if any(r.get("status") == "SUCCESS" for r in results.values()):
+            self.set_metadata("last_update_ts", str(int(time.time())))
+            logger.info("Sincronización remota exitosa: Marca temporal actualizada.")
+
         return {
             "total_added": total_added,
             "total_updated": total_updated,
@@ -681,9 +686,9 @@ class ThreatIntelligence:
 
         # Metadatos reales
         self.set_metadata("last_update_ts", str(int(now)))
-        self.set_metadata("hashes_version", "v4.0.0-ThreatIntel")
-        self.set_metadata("yara_version", "v4.0.0-YaraDemons")
-        self.set_metadata("phish_version", "v4.0.0-PhishDB")
+        self.set_metadata("hashes_version", "v4.0.9-ThreatIntel")
+        self.set_metadata("yara_version", "v4.0.9-YaraDemons")
+        self.set_metadata("phish_version", "v4.0.9-PhishDB")
 
     # =========================================================================
     # METADATOS Y ESTADÍSTICAS REALES (CERO CONTADORES ARTIFICIALES)
@@ -791,12 +796,12 @@ class ThreatIntelligence:
         date_formatted = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(update_ts))
 
         return {
-            "hashes_version": self.get_metadata("hashes_version", "v4.0.0-ThreatIntel"),
+            "hashes_version": self.get_metadata("hashes_version", "v4.0.9-ThreatIntel"),
             "hashes_date": date_formatted,
             "hashes_count": self.count_hashes(),
-            "yara_version": self.get_metadata("yara_version", "v4.0.0-YaraDemons"),
+            "yara_version": self.get_metadata("yara_version", "v4.0.9-YaraDemons"),
             "yara_date": date_formatted,
-            "phish_version": self.get_metadata("phish_version", "v4.0.0-PhishDB"),
+            "phish_version": self.get_metadata("phish_version", "v4.0.9-PhishDB"),
             "phish_date": date_formatted,
             "phish_count": self.count_urls(),
             "active_feeds": list(OFFICIAL_FEEDS.keys()),

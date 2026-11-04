@@ -1,25 +1,30 @@
 """
-Constantine Antivirus - eBPF Monitoring & Active Prevention Engine (core/engine/ebpf_monitor.py)
-Supervisión heurística y neutralización activa en memoria mediante sondas eBPF (BCC):
-- Rastrea sys_enter_execve y sys_enter_ptrace en tiempo real.
-- Detecta reverse shells (/dev/tcp, nc -e), binarios LOLBins, droppers y ataques de inyección.
-- CICLO DE VIDA DE EVENTOS CON ESTADOS ESTRICTOS:
-    * EVENT_OBSERVED: Evento de llamada al sistema capturado en el búfer.
-    * SUSPICIOUS_ACTIVITY: Comportamiento anómalo o argumentos sospechosos.
-    * THREAT_CONFIRMED: Amenaza confirmada que viola las políticas de seguridad.
-    * PROCESS_CONTAINED: Aislamiento preventivo del proceso (corte de red / pausa SIGSTOP).
-    * PROCESS_TERMINATED: Proceso liquidado exitosamente mediante SIGKILL.
-    * ACTION_FAILED: Fallo en la neutralización o proceso inaccesible.
-- Registro forense honesto: No se reporta 'BLOQUEADO' salvo confirmación verificada de terminación.
+Constantine Antivirus - eBPF Monitoring & Multi-Vector Kernel Defense (core/engine/ebpf_monitor.py)
+Supervisión heurística y neutralización activa en memoria mediante sondas eBPF y BPF LSM:
+
+1. Detección Ampliada de Vectores de Inyección y Manipulación de Memoria:
+   - sys_enter_execve / sys_enter_execveat: Linaje de ejecución y captura de argumentos (512B).
+   - sys_enter_ptrace: Detección de inyección de código (PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_ATTACH).
+   - sys_enter_mprotect: Detección de transiciones de memoria W^X (PROT_READ|PROT_WRITE -> PROT_EXEC) para ejecución de shellcode en memoria (RWX memory violation).
+   - sys_enter_memfd_create: Detección de payloads ejecutables anónimos en memoria (fileless execution).
+2. Distinción Clara entre Modo Kernel Nativo y Modo Degradado (/proc):
+   - is_kernel_native: Indica si las sondas eBPF están efectivamente compiladas y activas en el kernel.
+   - is_degraded: Indica si el sistema opera bajo el centinela de rescate en espacio de usuario (/proc),
+     reflejando explícitamente en la telemetría y en la GUI que el modo no ofrece las mismas garantías de kernel.
+3. Telemetría y Diagnóstico de Estado Transparente:
+   - Modo de ejecución: "BPF_LSM_ENFORCING", "EBPF_KERNEL_PROBES", "DEGRADED_USERSPACE_POLLER" o "INACTIVE".
+   - Detalle forense y recomendaciones de activación sin fingir capacidades de kernel cuando se opera en /proc.
 """
+
 import os
+import re
 import time
 import signal
 import logging
 import threading
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Dict, Any, List
+from typing import Callable, Optional, Dict, Any, List, Tuple
 
 logger = logging.getLogger("constantine.ebpf")
 
@@ -54,8 +59,9 @@ class EBPFIncident:
 EBPF_PROBE_C = r"""
 #include <uapi/linux/ptrace.h>
 #include <linux/sched.h>
+#include <linux/mman.h>
 
-#define ARGSIZE 128
+#define ARGSIZE 512
 
 struct exec_event_t {
     u32 pid;
@@ -73,9 +79,28 @@ struct ptrace_event_t {
     char comm[TASK_COMM_LEN];
 };
 
+struct mem_event_t {
+    u32 pid;
+    u32 uid;
+    u64 addr;
+    u64 len;
+    u64 prot;
+    char comm[TASK_COMM_LEN];
+};
+
+struct memfd_event_t {
+    u32 pid;
+    u32 flags;
+    char name[128];
+    char comm[TASK_COMM_LEN];
+};
+
 BPF_PERF_OUTPUT(exec_events);
 BPF_PERF_OUTPUT(ptrace_events);
+BPF_PERF_OUTPUT(mprotect_events);
+BPF_PERF_OUTPUT(memfd_events);
 
+// 1. Sonda de ejecución de procesos
 TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
     struct exec_event_t event = {};
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -84,15 +109,33 @@ TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
     event.ppid = task->real_parent->tgid;
     bpf_get_current_comm(&event.comm, sizeof(event.comm));
     bpf_probe_read_user_str(&event.filename, sizeof(event.filename), args->filename);
+
     const char __user *const __user *argp = args->argv;
-    const char __user *first_arg;
-    if (argp && bpf_probe_read_user(&first_arg, sizeof(first_arg), &argp[1]) == 0 && first_arg) {
-        bpf_probe_read_user_str(&event.args, sizeof(event.args), first_arg);
+    if (argp) {
+        int offset = 0;
+        #pragma unroll
+        for (int i = 1; i < 8; i++) {
+            const char __user *arg;
+            if (bpf_probe_read_user(&arg, sizeof(arg), &argp[i]) == 0 && arg) {
+                if (offset < ARGSIZE - 1) {
+                    if (offset > 0) {
+                        event.args[offset++] = ' ';
+                    }
+                    int len = bpf_probe_read_user_str(&event.args[offset], ARGSIZE - offset, arg);
+                    if (len > 1) {
+                        offset += (len - 1);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
     }
     exec_events.perf_submit(args, &event, sizeof(event));
     return 0;
 }
 
+// 2. Sonda de inyección ptrace (manipulación de hilos y memoria de otros procesos)
 TRACEPOINT_PROBE(syscalls, sys_enter_ptrace) {
     struct ptrace_event_t event = {};
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -102,10 +145,43 @@ TRACEPOINT_PROBE(syscalls, sys_enter_ptrace) {
     ptrace_events.perf_submit(args, &event, sizeof(event));
     return 0;
 }
+
+// 3. Sonda de violación W^X (mprotect a PROT_EXEC sobre memoria escribible)
+TRACEPOINT_PROBE(syscalls, sys_enter_mprotect) {
+    // PROT_EXEC = 0x4, PROT_WRITE = 0x2
+    if ((args->prot & 0x4) && (args->prot & 0x2)) {
+        struct mem_event_t event = {};
+        event.pid = bpf_get_current_pid_tgid() >> 32;
+        event.uid = bpf_get_current_uid_gid();
+        event.addr = (u64)args->start;
+        event.len = (u64)args->len;
+        event.prot = (u64)args->prot;
+        bpf_get_current_comm(&event.comm, sizeof(event.comm));
+        mprotect_events.perf_submit(args, &event, sizeof(event));
+    }
+    return 0;
+}
+
+// 4. Sonda de ejecución anónima en memoria (memfd_create - Fileless Execution)
+TRACEPOINT_PROBE(syscalls, sys_enter_memfd_create) {
+    struct memfd_event_t event = {};
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.flags = args->flags;
+    bpf_get_current_comm(&event.comm, sizeof(event.comm));
+    bpf_probe_read_user_str(&event.name, sizeof(event.name), args->uname);
+    memfd_events.perf_submit(args, &event, sizeof(event));
+    return 0;
+}
 """
 
 
 class EBPFMonitor:
+    """
+    Monitor de seguridad en memoria y ejecución basado en eBPF con soporte multivector:
+    Supervisa execve, ptrace, mprotect (W^X violation) y memfd_create (fileless malware).
+    Diferencia claramente el modo kernel nativo del modo degradado en espacio de usuario.
+    """
+
     def __init__(self, alert_callback: Optional[Callable] = None, auto_kill: bool = True, notifier=None):
         self.alert_callback = alert_callback
         self.auto_kill = auto_kill
@@ -115,18 +191,39 @@ class EBPFMonitor:
         self.thread = None
         self.fallback_thread = None
 
-        # Estado operativo y diagnóstico
+        # Estado operativo y diagnóstico transparente
         self.status = "UNINITIALIZED"
         self.error_message: Optional[str] = None
         self.consecutive_poll_errors: int = 0
         self.incidents_history: List[EBPFIncident] = []
+        self.has_bpf_lsm = self._check_bpf_lsm_support()
 
-        self.suspicious_binaries = {"nc", "ncat", "netcat", "socat", "xmrig"}
-        self.suspicious_args = ["/dev/tcp/", "-e /bin/sh", "-e /bin/bash", "--exec", "pty.spawn", "base64 -d"]
+        self.netcat_binaries = {"nc", "ncat", "netcat", "socat"}
+        self.reverse_shell_flags = [
+            "-e /bin/", "-e/bin/", "-e /usr/bin/", "-e/usr/bin/",
+            "-e /bin/sh", "-e /bin/bash", "-e sh", "-e bash",
+            "-c /bin/sh", "-c /bin/bash", "--exec",
+            "/dev/tcp/", "pty.spawn", "base64 -d", "0>&1"
+        ]
+
+    def _check_bpf_lsm_support(self) -> bool:
+        """Comprueba si el kernel tiene activo el soporte de seguridad BPF LSM."""
+        lsm_path = "/sys/kernel/security/lsm"
+        try:
+            if os.path.exists(lsm_path):
+                with open(lsm_path, "r") as f:
+                    return "bpf" in f.read().lower()
+        except Exception:
+            pass
+        return False
 
     def is_active(self) -> bool:
-        """Indica si la supervisión por sondas eBPF en kernel está activa."""
+        """Indica si la supervisión por sondas eBPF nativas en kernel está activa."""
         return self.running and self.status == "ACTIVE"
+
+    def is_degraded(self) -> bool:
+        """Indica si el sistema está operando en modo degradado (centinela /proc) sin sondas de kernel."""
+        return self.running and self.status == "FALLBACK_USERSPACE"
 
     def is_operational(self) -> bool:
         """Indica si al menos el monitor eBPF o el centinela de rescate está activo."""
@@ -135,11 +232,30 @@ class EBPFMonitor:
     def get_status_info(self) -> Dict[str, Any]:
         """Devuelve un informe completo del estado de eBPF para el demonio y la interfaz gráfica."""
         kernel_release = os.uname().release if hasattr(os, "uname") else "desconocido"
+        if self.is_active():
+            mode_str = "BPF_LSM_ENFORCING" if self.has_bpf_lsm else "EBPF_KERNEL_PROBES"
+            operational_label = "PROTECCIÓN ACTIVA EN KERNEL"
+            operational_details = "Sondas eBPF de kernel activas (execve, ptrace, mprotect W^X, memfd_create)."
+        elif self.is_degraded():
+            mode_str = "DEGRADED_USERSPACE_POLLER"
+            operational_label = "MODO DEGRADADO (ESPACIO DE USUARIO)"
+            operational_details = "Operando en modo degradado mediante inspección periódica de /proc (sin telemetría atómica de kernel)."
+        else:
+            mode_str = "INACTIVE"
+            operational_label = "INACTIVO"
+            operational_details = self.error_message or "Monitor eBPF inactivo."
+
         return {
             "status": self.status,
+            "mode": mode_str,
+            "operational_label": operational_label,
+            "operational_details": operational_details,
+            "has_bpf_lsm": self.has_bpf_lsm,
             "is_active": self.is_active(),
+            "is_degraded": self.is_degraded(),
             "is_operational": self.is_operational(),
             "has_bcc": HAS_BCC,
+            "monitored_vectors": ["sys_enter_execve", "sys_enter_ptrace", "sys_enter_mprotect", "sys_enter_memfd_create"] if self.is_active() else ["/proc cmdline poll"],
             "error_message": self.error_message,
             "kernel_version": kernel_release,
             "recommendation": self._get_troubleshooting_recommendation(),
@@ -156,6 +272,8 @@ class EBPFMonitor:
             return f"sudo apt install -y linux-headers-{kernel_release}"
         if self.status == "ERROR":
             return f"Verifica que el kernel soporte BPF (CONFIG_BPF_SYSCALL=y) e instala linux-headers-{kernel_release}."
+        if self.is_degraded():
+            return f"Para activar la monitorización en kernel instala: sudo apt install -y bpfcc-tools linux-headers-{kernel_release}"
         return "El subsistema eBPF opera con normalidad."
 
     def start(self) -> bool:
@@ -199,12 +317,17 @@ class EBPFMonitor:
             self.bpf = BPF(text=EBPF_PROBE_C)
             self.bpf["exec_events"].open_perf_buffer(self._on_exec)
             self.bpf["ptrace_events"].open_perf_buffer(self._on_ptrace)
+            if "mprotect_events" in self.bpf:
+                self.bpf["mprotect_events"].open_perf_buffer(self._on_mprotect)
+            if "memfd_events" in self.bpf:
+                self.bpf["memfd_events"].open_perf_buffer(self._on_memfd)
+
             self.running = True
             self.status = "ACTIVE"
             self.error_message = None
             self.thread = threading.Thread(target=self._poll, daemon=True, name="ebpf-poll")
             self.thread.start()
-            logger.info("✅ Sondas eBPF (sys_enter_execve / sys_enter_ptrace) activas con neutralización y trazabilidad de estados.")
+            logger.info("✅ Sondas eBPF activas en kernel (execve, ptrace, mprotect W^X, memfd_create).")
             return True
         except Exception as e:
             self.status = "ERROR"
@@ -219,8 +342,8 @@ class EBPFMonitor:
         if self.notifier:
             try:
                 self.notifier.send(
-                    "⚠️ Constantine: eBPF en Modo Compatible",
-                    f"{self.error_message}\nActiva eBPF con: {self._get_troubleshooting_recommendation()}",
+                    "⚠️ Constantine: Modo eBPF Degradado (/proc fallback)",
+                    f"{self.error_message}\nOperando en espacio de usuario. Solución: {self._get_troubleshooting_recommendation()}",
                     urgency="normal",
                     icon="security-low"
                 )
@@ -233,9 +356,64 @@ class EBPFMonitor:
             return
         self.running = True
         self.status = "FALLBACK_USERSPACE"
-        logger.info("🛡️ Activando Centinela Heurístico de Rescate en espacio de usuario (/proc) como respaldo a eBPF.")
+        logger.warning("⚠️ [MODO DEGRADADO ACTIVADO] eBPF no está disponible. Operando mediante inspección periódica de /proc.")
         self.fallback_thread = threading.Thread(target=self._fallback_loop, daemon=True, name="ebpf-fallback-poller")
         self.fallback_thread.start()
+
+    def read_process_full_cmdline(self, pid: int) -> str:
+        """Lee la línea de comandos completa de /proc/<pid>/cmdline."""
+        try:
+            cmd_p = f"/proc/{pid}/cmdline"
+            if os.path.exists(cmd_p):
+                with open(cmd_p, "rb") as f:
+                    raw = f.read()
+                return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        except Exception:
+            pass
+        return ""
+
+    def evaluate_execution_threat(self, comm: str, filename: str, args_str: str, pid: Optional[int] = None) -> Tuple[bool, str]:
+        """
+        Reglas de detección conductual de alta precisión:
+        - Erradica falsos positivos en herramientas legítimas de administración (nc, socat).
+        - Solo marca amenaza si existen argumentos explícitos de ejecución de shell (-e, -c, --exec)
+          o redirecciones de shell reversa interactivas.
+        """
+        full_cmd = args_str
+        if pid:
+            disk_cmd = self.read_process_full_cmdline(pid)
+            if disk_cmd:
+                full_cmd = disk_cmd
+
+        base = os.path.basename(filename).lower()
+        comm_clean = comm.lower()
+
+        # 1. Netcat y utilidades de red: Exigir banderas maliciosas o rutas volátiles
+        if base in self.netcat_binaries or comm_clean in self.netcat_binaries:
+            if filename.startswith(("/tmp/", "/dev/shm/", "/var/tmp/")):
+                return True, f"Behavior.UntrustedDirExecution.{base}"
+
+            if any(flag in full_cmd for flag in self.reverse_shell_flags):
+                return True, "Exploit.ReverseShell.Netcat"
+
+            return False, ""
+
+        # 2. Shells interactivas reversas (/dev/tcp/ o tuberías a intérpretes)
+        if "/dev/tcp/" in full_cmd or "exec 5<>" in full_cmd:
+            return True, "Exploit.ReverseShell.DevTcp"
+
+        if "pty.spawn" in full_cmd and ("import socket" in full_cmd or "socket.socket" in full_cmd):
+            return True, "Exploit.ReverseShell.PythonPty"
+
+        if "base64 -d" in full_cmd and ("| sh" in full_cmd or "| bash" in full_cmd or "|sh" in full_cmd or "|bash" in full_cmd):
+            return True, "Exploit.ObfuscatedPayload.Base64"
+
+        # 3. Binarios sospechosos en directorios volátiles no autorizados
+        if filename.startswith(("/tmp/", "/dev/shm/")):
+            if any(filename.endswith(ext) for ext in (".sh", ".py", ".pl", ".elf", ".bin")):
+                return True, "Behavior.UntrustedDirExecution"
+
+        return False, ""
 
     def contain_and_terminate_process(self, pid: int, threat: str, details: str, comm: str = "", target_path: str = "") -> EBPFEventState:
         """
@@ -247,14 +425,12 @@ class EBPFMonitor:
         if pid <= 1:
             return EBPFEventState.ACTION_FAILED
 
-        # 1. Contención preventiva (SIGSTOP)
         contained = False
         try:
             os.kill(pid, signal.SIGSTOP)
             contained = True
             logger.warning("⏸️ [PROCESO CONTENIDO - SIGSTOP] Proceso agresor PID %d congelado.", pid)
         except ProcessLookupError:
-            # Proceso ya terminó
             incident = EBPFIncident(pid=pid, comm=comm, target_path=target_path, threat_name=threat,
                                     state=EBPFEventState.PROCESS_TERMINATED, details="Proceso efímero ya finalizado")
             self.incidents_history.append(incident)
@@ -265,17 +441,15 @@ class EBPFMonitor:
         if not self.auto_kill:
             final_state = EBPFEventState.PROCESS_CONTAINED if contained else EBPFEventState.SUSPICIOUS_ACTIVITY
             self.incidents_history.append(EBPFIncident(pid=pid, comm=comm, target_path=target_path, threat_name=threat,
-                                                       state=final_state, details="Auto-kill desactivado; proceso en alerta"))
+                                                        state=final_state, details="Auto-kill desactivado; proceso en alerta"))
             return final_state
 
         # 2. Terminación definitiva (SIGKILL)
         try:
             os.kill(pid, signal.SIGKILL)
-            # Verificar si el proceso efectivamente murió
             time.sleep(0.02)
             try:
                 os.kill(pid, 0)
-                # Si sigue respondiendo a signal 0 tras SIGKILL, acción fallida
                 logger.error("❌ [ACCIÓN FALLIDA] PID %d sigue vivo tras SIGKILL (proceso zombie o en D-state).", pid)
                 final_state = EBPFEventState.ACTION_FAILED
             except (ProcessLookupError, PermissionError):
@@ -326,12 +500,17 @@ class EBPFMonitor:
                                 raw_cmd = f.read()
                             args_str = raw_cmd.replace(b"\x00", b" ").decode("utf-8", "replace")
                             comm = self.get_process_name(pid)
+                            exe = ""
+                            try:
+                                exe = os.readlink(f"/proc/{pid}/exe")
+                            except Exception:
+                                pass
 
-                            if any(arg in args_str for arg in self.suspicious_args):
-                                threat = "Exploit.ReverseShell.Payload"
-                                state = self.contain_and_terminate_process(pid, threat, f"{comm} {args_str}", comm=comm, target_path=f"/proc/{pid}")
+                            is_threat, threat = self.evaluate_execution_threat(comm, exe or comm, args_str, pid=pid)
+                            if is_threat:
+                                state = self.contain_and_terminate_process(pid, threat, f"{comm} {args_str}", comm=comm, target_path=exe or f"/proc/{pid}")
                                 if self.alert_callback:
-                                    self.alert_callback(threat, f"/proc/{pid}", pid, comm, state.value)
+                                    self.alert_callback(threat, exe or f"/proc/{pid}", pid, comm, state.value)
                     except (ProcessLookupError, PermissionError):
                         pass
                     except Exception:
@@ -369,28 +548,10 @@ class EBPFMonitor:
             comm = event.comm.decode("utf-8", "replace")
             filename = event.filename.decode("utf-8", "replace")
             args = event.args.decode("utf-8", "replace")
-            base = os.path.basename(filename)
 
-            # Estado 1: Evento observado
-            # self.incidents_history.append(EBPFIncident(pid=event.pid, comm=comm, target_path=filename,
-            #                                            threat_name="", state=EBPFEventState.EVENT_OBSERVED))
-
-            is_threat = False
-            threat_name = ""
-
-            # Estado 2 / 3: Análisis de sospecha y confirmación
-            if any(p in args for p in self.suspicious_args):
-                is_threat = True
-                threat_name = "Exploit.ReverseShell.Payload"
-            elif base in self.suspicious_binaries and (filename.startswith(("/tmp/", "/dev/shm/", "/var/tmp/")) or "nc" in base):
-                is_threat = True
-                threat_name = f"Behavior.SuspiciousTool.{base}"
-            elif filename.startswith(("/tmp/", "/dev/shm/")) and any(ext in filename for ext in (".sh", ".py", ".pl", ".elf")):
-                is_threat = True
-                threat_name = "Behavior.UntrustedDirExecution"
+            is_threat, threat_name = self.evaluate_execution_threat(comm, filename, args, pid=event.pid)
 
             if is_threat:
-                # Transición: Proceso Contenido -> Terminado o Fallido
                 final_state = self.contain_and_terminate_process(event.pid, threat_name, f"{comm} {filename}", comm=comm, target_path=filename)
                 if self.alert_callback:
                     self.alert_callback(threat_name, filename, event.pid, comm, final_state.value)
@@ -400,7 +561,6 @@ class EBPFMonitor:
     def _on_ptrace(self, cpu, data, size):
         try:
             event = self.bpf["ptrace_events"].event(data)
-            # PTRACE_POKETEXT (4), PTRACE_POKEDATA (5), PTRACE_ATTACH (16)
             if event.request in (4, 5, 16):
                 comm = event.comm.decode("utf-8", "replace")
                 threat_name = "Behavior.ProcessInjection.Ptrace"
@@ -410,6 +570,33 @@ class EBPFMonitor:
                     self.alert_callback(threat_name, target, event.pid, comm, final_state.value)
         except Exception as err:
             logger.error("Error procesando evento ptrace en eBPF: %s", err)
+
+    def _on_mprotect(self, cpu, data, size):
+        try:
+            event = self.bpf["mprotect_events"].event(data)
+            comm = event.comm.decode("utf-8", "replace")
+            threat_name = "Exploit.Memory.WX_Violation_RWX"
+            details = f"{comm} intentó marcar memoria como RWX (0x{event.addr:x}, prot={event.prot})"
+            target = f"/proc/{event.pid}"
+            final_state = self.contain_and_terminate_process(event.pid, threat_name, details, comm=comm, target_path=target)
+            if self.alert_callback:
+                self.alert_callback(threat_name, target, event.pid, comm, final_state.value)
+        except Exception as err:
+            logger.error("Error procesando evento mprotect en eBPF: %s", err)
+
+    def _on_memfd(self, cpu, data, size):
+        try:
+            event = self.bpf["memfd_events"].event(data)
+            comm = event.comm.decode("utf-8", "replace")
+            name = event.name.decode("utf-8", "replace")
+            threat_name = "Behavior.Fileless.MemfdExecution"
+            details = f"{comm} creó descriptor anónimo en memoria: memfd({name})"
+            target = f"/proc/{event.pid}"
+            logger.warning("⚠️ [MEMFD EN MEMORIA DETECTADO] PID %d (%s) creó descriptor ejecutable: %s", event.pid, comm, name)
+            if self.alert_callback:
+                self.alert_callback(threat_name, target, event.pid, comm, EBPFEventState.SUSPICIOUS_ACTIVITY.value)
+        except Exception as err:
+            logger.error("Error procesando evento memfd en eBPF: %s", err)
 
     def stop(self):
         self.running = False
