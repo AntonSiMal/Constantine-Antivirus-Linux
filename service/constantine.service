@@ -1,5 +1,6 @@
 [Unit]
 Description=Constantine Antivirus - Active Kernel Defense Service
+Documentation=https://github.com/AntonSiMal/Constantine-Antivirus-Linux
 After=network.target local-fs.target
 Before=sysinit.target
 
@@ -7,9 +8,12 @@ Before=sysinit.target
 Type=simple
 User=root
 WorkingDirectory=/opt/constantine
-ExecStart=/usr/bin/python3 /opt/constantine/daemon.py --watch-dir=/tmp --enable-firewall
-Restart=always
-RestartSec=3s
+ExecStart=/usr/bin/python3 /opt/constantine/daemon.py --mode=all-mounts --fail-policy=secure --enable-firewall
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
 ProtectSystem=full
 LimitNOFILE=65536
 

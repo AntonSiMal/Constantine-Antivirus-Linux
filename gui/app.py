@@ -1,3 +1,4 @@
+from core.engine.audit_logger import AuditLogger
 #!/usr/bin/env python3
 """
 Constantine Antivirus - Native GTK 3 Security Center (gui/app.py)
@@ -37,11 +38,13 @@ from core.engine.usb_monitor import USBAutoScanner
 from core.engine.update_guard import SystemUpdateGuard
 from core.engine.memory_scanner import MemoryScanner
 from core.engine.hardware_guard import HardwareGuard
+from core.engine.subsystem_health import SubsystemHealthRegistry, ShieldOperationalState, ShieldStatusInfo
 from core.engine.virustotal_uploader import VirusTotalUploader
 from core.engine.auto_updater import ConstantineUpdater
 from core.engine.i18n import Localization
 from gui.tray import ConstantineTrayIcon
 from core.engine.notifier import DesktopNotifier
+from core.engine.ebpf_monitor import EBPFMonitor
 
 IPC_SOCKET_PATH = f"/tmp/constantine_gui_{os.getuid()}.sock"
 
@@ -83,6 +86,7 @@ class ConstantineGUI:
     def __init__(self):
         self.loc = Localization(default_lang="es")
         self.auth_mgr = AuthManager()
+        self.audit_logger = AuditLogger()
         self.vault = QuarantineVault()
         self.whitelist = SystemWhitelist()
         self.phishing = PhishingShield()
@@ -95,8 +99,11 @@ class ConstantineGUI:
         self.memory_scanner = MemoryScanner(scanner=self.scanner, vault=self.vault)
         self.updater = ConstantineUpdater()
         self.notifier = DesktopNotifier()
+        self.ebpf_monitor = EBPFMonitor()
         self.hardware_guard = HardwareGuard(notifier=None)
         self.vt_uploader = VirusTotalUploader(vault=self.vault)
+        self.health_registry = SubsystemHealthRegistry()
+        self.disabled_shields_overrides = set()
 
         self.sections_meta = {
             "shields": {
@@ -437,7 +444,9 @@ class ConstantineGUI:
         # 3. Barra Inferior de Estado
         statusbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
         statusbar.set_margin_start(15); statusbar.set_margin_end(15); statusbar.set_margin_top(6); statusbar.set_margin_bottom(6)
-        self.lbl_footer = Gtk.Label(label="fanotify I/O: ACTIVO | eBPF: ACTIVO | Anti-Ransomware: ACTIVO | Baúl: Listo")
+        ebpf_diag = self.ebpf_monitor.get_status_info()
+        ebpf_stat = "ACTIVO" if ebpf_diag["is_active"] else ("RESPALDO /PROC" if ebpf_diag["has_bcc"] else "DEGRADADO (Falta bpfcc)")
+        self.lbl_footer = Gtk.Label(label=f"fanotify I/O: ACTIVO | eBPF: {ebpf_stat} | Anti-Ransomware: ACTIVO | Baúl: Listo")
         self.lbl_footer.set_xalign(0)
         statusbar.pack_start(self.lbl_footer, True, True, 0)
         vbox.pack_start(statusbar, False, False, 0)
@@ -745,7 +754,7 @@ class ConstantineGUI:
             row.pack_start(vb, True, True, 0)
             list_box.pack_start(row, False, False, 0)
 
-        add_item("Escudo de Archivos en Kernel (fanotify)", "+20 pts", True, "Bloqueo FAN_OPEN_PERM y FAN_EXEC_PERM activo.")
+        add_item("Escudo de Archivos en Kernel (fanotify)", "+20 pts", True, "Bloqueo FAN_OPEN_PERM y FAN_OPEN_EXEC_PERM activo.")
         add_item("Defensa Anti-Ransomware (Canary Traps)", "+20 pts", True, "Trampas de archivos señuelo y detector de ráfagas activo.")
         add_item("Cortafuegos de Red (UFW / GUFW)", "+20 pts", ufw_active, "Reglas de filtrado de puertos y bloqueo entrante activo." if ufw_active else "El cortafuegos está inactivo. Actívalo para recuperar +20 pts.")
         add_item("Resolución DNS Segura (Mullvad / Quad9)", "+15 pts", True, "Filtro de nombres de dominio maliciosos y anti-rastreo activo.")
@@ -1120,44 +1129,71 @@ class ConstantineGUI:
         s_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         s_vbox.set_margin_start(15); s_vbox.set_margin_end(15); s_vbox.set_margin_top(8); s_vbox.set_margin_bottom(8)
 
-        shields = [
-            ("Escudo de Archivos en Kernel (fanotify)", "Interceptación síncrona FAN_OPEN_PERM / FAN_EXEC_PERM en disco.", True),
-            ("Escudo Heurístico y eBPF en Memoria RAM", "Vigilancia de llamadas sys_enter_execve, ptrace y reverse shells.", True),
-            ("Escudo Anti-Ransomware (Canary Honeypots)", "Vigila ráfagas de cifrado y defiende archivos trampa con SIGKILL.", True),
-            ("Inspección de Memorias USB y Discos (/media)", "Auto-escaneo silencioso de almacenamiento removible al conectar.", True),
-            ("Centinela de Descargas en Vuelo (~/Descargas)", "Auditoría en tiempo real de archivos completados desde navegadores.", True),
-            ("Centinela de Red & Anti-Phishing Proactivo", "Escaneo periódico de conexiones TCP/UDP y dominios maliciosos.", True),
-        ]
+        # Evaluación rigurosa del estado operativo real de cada escudo (sin variables booleanas fijas)
+        daemon_alive = self._is_daemon_service_running()
+        evaluated_shields = self.health_registry.evaluate_live_shields(
+            daemon_running=daemon_alive,
+            ebpf_monitor=self.ebpf_monitor,
+            ransomware=self.ransomware,
+            phishing=self.phishing,
+            scanner=self.scanner,
+            vault=self.vault,
+            disabled_overrides=self.disabled_shields_overrides
+        )
 
         self.shield_switches = {}
-        for i, (title, subtitle, default_state) in enumerate(shields):
+        is_es = (self.loc.current_lang == "es")
+
+        for i, shield in enumerate(evaluated_shields):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
             row.set_hexpand(True)
             ibox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             ibox.set_hexpand(True)
 
+            title = shield.name_es if is_es else shield.name_en
+            subtitle = shield.description_es if is_es else shield.description_en
+
+            # Encabezado con badge de estado operativo verificable
+            header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
             t_lbl = Gtk.Label()
             t_lbl.set_markup(f"<span font='10.5' weight='bold'>{title}</span>")
             t_lbl.set_xalign(0)
-            t_lbl.set_line_wrap(True)
+            header_box.pack_start(t_lbl, False, False, 0)
 
+            # Badge con color contextual exacto según el estado real
+            badge_lbl = Gtk.Label()
+            badge_lbl.set_markup(f"<span font='8.5' weight='bold' background='{shield.badge_color}' foreground='#ffffff'>  {shield.badge_label}  </span>")
+            header_box.pack_start(badge_lbl, False, False, 0)
+            ibox.pack_start(header_box, False, False, 0)
+
+            # Subtítulo explicativo
             s_lbl = Gtk.Label(label=subtitle)
             s_lbl.set_xalign(0)
             s_lbl.set_line_wrap(True)
             s_lbl.get_style_context().add_class("subtitle-text")
-
-            ibox.pack_start(t_lbl, False, False, 0)
             ibox.pack_start(s_lbl, False, False, 0)
+
+            # Detalles técnicos forenses si existen advertencias o degradación
+            if shield.details:
+                d_lbl = Gtk.Label()
+                d_color = "#8e8e93" if shield.state == ShieldOperationalState.ACTIVE else ("#ff9500" if shield.state == ShieldOperationalState.DEGRADED else "#ff3b30")
+                d_lbl.set_markup(f"<span font='8.5' foreground='{d_color}'>↳ {self._esc(shield.details)}</span>")
+                d_lbl.set_xalign(0)
+                d_lbl.set_line_wrap(True)
+                ibox.pack_start(d_lbl, False, False, 0)
+
             row.pack_start(ibox, True, True, 0)
 
+            # Interruptor de control
             sw = Gtk.Switch()
-            sw.set_active(default_state)
+            sw.set_active(shield.is_active)
             sw.set_valign(Gtk.Align.CENTER)
-            sw.connect("state-set", self._on_shield_toggled, title)
+            sw.connect("state-set", self._on_shield_toggled, shield.id)
             row.pack_start(sw, False, False, 0)
-            self.shield_switches[title] = sw
-            s_vbox.pack_start(row, False, False, 4)
-            if i < len(shields) - 1:
+            self.shield_switches[shield.id] = sw
+            s_vbox.pack_start(row, False, False, 6)
+
+            if i < len(evaluated_shields) - 1:
                 s_vbox.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
         shields_card.add(s_vbox)
@@ -1166,63 +1202,65 @@ class ConstantineGUI:
         return box
 
     def _seed_live_scan_events(self):
-        now = time.strftime("%H:%M:%S")
-        initial_events = [
-            (now, "Kernel fanotify: Interceptación síncrona de E/S activa", "● PERMITIDO (Zero-Nag)"),
-            (now, "Centinela RAM eBPF: Vigilando sys_enter_execve & ptrace", "● VIGILANCIA ACTIVA"),
-            (now, "Centinela Anti-Ransomware: Honeypots señuelo en /var/lib/constantine/canaries", "● PROTEGIDO"),
-            (now, "Centinela Descargas: Observando ~/Descargas y ~/Downloads", "● EN VUELO"),
-            (now, "Centinela Red: Auditoría proactiva de sockets de red y phishing", "● LIMPIO (0 amenazas)"),
-            (now, "Centinela USB: Escucha activa de eventos udisks2 en /media", "● PREVENTIVO ACTIVO"),
-        ]
-        for t, op, res in initial_events:
-            self.live_scan_store.append([t, op, res])
+        """Carga exclusivamente eventos históricos reales registrados por el demonio en AuditLogger."""
+        incidents = self.audit_logger.get_incidents()
+        if incidents:
+            for inc in incidents[:15]:
+                t = inc.get("time_str", "")
+                threat = inc.get("threat", "Evento")
+                target = inc.get("target", "")
+                action = inc.get("action", "AUDIT")
+                self.live_scan_store.append([t, f"{threat}: {target}", f"● {action}"])
+        else:
+            now = time.strftime("%H:%M:%S")
+            if self._is_daemon_service_running():
+                self.live_scan_store.append([now, "Servicio en kernel activo. Esperando actividad de E/S...", "● ESCUCHANDO"])
+            else:
+                self.live_scan_store.append([now, "Demonio constantine.service inactivo. Sin eventos en tiempo real.", "⚠️ DETENIDO"])
 
     def _update_live_scan_ticker(self):
-        now = time.strftime("%H:%M:%S")
+        """
+        Lee exclusivamente registros y telemetría real del demonio y del registro forense (AuditLogger).
+        Eliminada completamente cualquier simulación aleatoria de procesos.
+        """
+        daemon_active = self._is_daemon_service_running()
+        if not daemon_active:
+            self.lbl_live_scan_current.set_markup("<span font='8.5' color='#ff3b30'>● Demonio en segundo plano inactivo (constantine.service detenido)</span>")
+            return True
+
+        self.lbl_live_scan_current.set_markup("<span font='8.5' color='#30d158'>● Vigilancia activa en kernel (fanotify E/S, eBPF & Inotify)</span>")
+
+        # 1. Leer incidentes reales del registro forense
+        incidents = self.audit_logger.get_incidents()
+        if incidents:
+            latest_inc = incidents[0]
+            inc_id = f"{latest_inc.get('timestamp')}_{latest_inc.get('threat')}_{latest_inc.get('target')}"
+            if getattr(self, "_last_seen_incident_id", "") != inc_id:
+                self._last_seen_incident_id = inc_id
+                t = latest_inc.get("time_str", time.strftime("%H:%M:%S"))
+                threat = latest_inc.get("threat", "Evento")
+                target = latest_inc.get("target", "")
+                action = latest_inc.get("action", "AUDITADO")
+                self.live_scan_store.prepend([t, f"{threat}: {target}", f"● {action}"])
+                if len(self.live_scan_store) > 40:
+                    it = self.live_scan_store.get_iter(Gtk.TreePath.new_from_string("39"))
+                    if it: self.live_scan_store.remove(it)
+
+        # 2. Leer bitácora real de auditoría en disco si existe
         log_file = "/var/log/constantine/defense.log"
-        added = False
         if os.path.exists(log_file):
             try:
                 with open(log_file, "r", encoding="utf-8") as f:
                     lines = f.readlines()[-3:]
                     for line in lines:
                         line = line.strip()
-                        if line and not getattr(self, "_last_log_line", "") == line:
+                        if line and getattr(self, "_last_log_line", "") != line:
                             self._last_log_line = line
-                            self.live_scan_store.prepend([now, line[:70], "● AUDITADO"])
-                            added = True
-            except Exception:
-                pass
-
-        if not added:
-            try:
-                procs = [p for p in os.listdir("/proc") if p.isdigit()]
-                if procs:
-                    import random
-                    sample_pid = random.choice(procs[:15])
-                    exe_link = os.readlink(f"/proc/{sample_pid}/exe") if os.path.exists(f"/proc/{sample_pid}/exe") else f"PID {sample_pid}"
-                    cur_text = f"Auditando en tiempo real: {exe_link} [Proceso del sistema - Firma Oficial OK]"
-                    self.lbl_live_scan_current.set_markup(f"<span font='8.5' color='#30d158'>● {GLib.markup_escape_text(cur_text)}</span>")
-
-                    if not hasattr(self, "_ticker_counter"): self._ticker_counter = 0
-                    self._ticker_counter += 1
-                    if self._ticker_counter % 2 == 0:
-                        self.live_scan_store.prepend([now, f"Kernel EDR: {exe_link}", "● PERMITIDO (Zero-Nag)"])
-                        if len(self.live_scan_store) > 30:
-                            it = self.live_scan_store.get_iter(Gtk.TreePath.new_from_string("29"))
-                            if it: self.live_scan_store.remove(it)
-            except Exception:
-                pass
-
-        alert_file = "/tmp/constantine_latest_alert.txt"
-        if os.path.exists(alert_file):
-            try:
-                with open(alert_file, "r", encoding="utf-8") as f:
-                    alert_content = f.read().strip()
-                if alert_content and getattr(self, "_last_shown_alert", "") != alert_content:
-                    self._last_shown_alert = alert_content
-                    self.live_scan_store.prepend([now, f"🚨 ALERTA: {alert_content.splitlines()[0]}", "⛔ AMENAZA AISLADA"])
+                            now = time.strftime("%H:%M:%S")
+                            self.live_scan_store.prepend([now, line[:80], "● KERNEL_LOG"])
+                            if len(self.live_scan_store) > 40:
+                                it = self.live_scan_store.get_iter(Gtk.TreePath.new_from_string("39"))
+                                if it: self.live_scan_store.remove(it)
             except Exception:
                 pass
 
@@ -2270,7 +2308,31 @@ class ConstantineGUI:
             self.lbl_system_status.set_markup(f"<span font='8.5' weight='bold' foreground='#ff453a'>{'⚠️ PAUSADO' if is_es else '⚠️ PAUSED'}</span>")
         return False
 
-    def _on_shield_toggled(self, switch, state, title):
+    def _is_daemon_service_running(self) -> bool:
+        """Comprueba si el demonio constantine.service está activo en systemd o como proceso de fondo."""
+        try:
+            res = subprocess.run(["systemctl", "is-active", "constantine.service"],
+                                 capture_output=True, text=True, timeout=1)
+            if res.returncode == 0 and "active" in res.stdout:
+                return True
+        except Exception:
+            pass
+
+        # Fallback de proceso en /proc
+        try:
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    cmd_p = f"/proc/{entry}/cmdline"
+                    if os.path.exists(cmd_p):
+                        with open(cmd_p, "rb") as f:
+                            cmd = f.read()
+                        if b"daemon.py" in cmd and b"constantine" in cmd:
+                            return True
+        except Exception:
+            pass
+        return False
+
+    def _on_shield_toggled(self, switch, state, shield_id):
         if getattr(self, '_ignoring_switch_signals', False):
             return False
 
@@ -2281,7 +2343,28 @@ class ConstantineGUI:
             finally:
                 self._ignoring_switch_signals = False
             return True
+
+        # Actualizar conjunto de escudos desactivados por el usuario
+        if state:
+            self.disabled_shields_overrides.discard(shield_id)
+            logger.info("🛡️ Escudo reactivado por el usuario: %s", shield_id)
+        else:
+            self.disabled_shields_overrides.add(shield_id)
+            logger.warning("⚠️ Escudo desactivado manualmente por el usuario: %s", shield_id)
+
+        # Refrescar interfaz de escudos para actualizar badges de inmediato
+        self._refresh_shields_tab()
         return False
+
+    def _refresh_shields_tab(self):
+        """Reconstruye dinámicamente la pestaña de escudos con los estados actualizados."""
+        if hasattr(self, 'stack') and hasattr(self, 'page_shields'):
+            new_tab = self._create_shields_tab()
+            # Reemplazar hijos de la página de escudos
+            for child in self.page_shields.get_children():
+                self.page_shields.remove(child)
+            self.page_shields.pack_start(new_tab, True, True, 0)
+            self.page_shields.show_all()
 
     def _on_power_button_clicked(self, button):
         self._on_request_shutdown()
