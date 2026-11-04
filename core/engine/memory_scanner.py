@@ -49,17 +49,33 @@ class MemoryScanner:
             except Exception:
                 pass
 
+            # Excluir procesos propios de Constantine y procesos del kernel
+            if pid <= 2 or "constantine" in proc_name.lower() or proc_name in ("python3", "python"):
+                cmdline = ""
+                try:
+                    with open(f"/proc/{pid}/cmdline", "r") as f:
+                        cmdline = f.read().lower()
+                except Exception:
+                    pass
+                if "constantine" in cmdline:
+                    continue
+
             is_malicious = False
             reason = ""
 
-            # 1. Comprobar si el binario fue eliminado del disco mientras sigue corriendo en RAM
+            # 1. Comprobar ejecutable en disco
             exe_link = f"/proc/{pid}/exe"
             try:
                 if os.path.exists(exe_link):
                     target = os.readlink(exe_link)
+                    # Autoprotección: no analizar ejecutables propios de Constantine
+                    if "constantine" in target.lower() or "/opt/constantine" in target.lower():
+                        continue
                     if " (deleted)" in target:
-                        is_malicious = True
-                        reason = f"Ejecutable borrado en disco pero activo en RAM ({target})"
+                        # Excluir binarios oficiales de actualización de paquetes
+                        if not target.startswith("/usr/") and not target.startswith("/var/lib/flatpak"):
+                            is_malicious = True
+                            reason = f"Ejecutable borrado en disco pero activo en RAM ({target})"
                     elif self.scanner and os.path.isfile(target):
                         res = self.scanner.scan_file(file_path=target)
                         if res.is_malicious:
@@ -94,7 +110,8 @@ class MemoryScanner:
                 })
 
             if progress_callback:
-                progress_callback(pid, proc_name, scanned_count, total, len(threats_found))
+                last_thr = threats_found[-1] if is_malicious else None
+                progress_callback(pid, proc_name, scanned_count, total, len(threats_found), last_thr)
 
         return {
             "total_pids": total,

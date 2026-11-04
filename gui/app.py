@@ -203,7 +203,7 @@ class ConstantineGUI:
         self.lbl_title = Gtk.Label()
         self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v2.7 </span>")
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v2.8 </span>")
         title_box.pack_start(self.lbl_title, False, False, 0)
         title_box.pack_start(lbl_badge, False, False, 0)
         self.headerbar.pack_start(title_box)
@@ -628,7 +628,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v2.7)" if is_es else "EDR Security Posture Diagnosis (v2.7)",
+            title="Diagnóstico de Salud de Seguridad EDR (v2.8)" if is_es else "EDR Security Posture Diagnosis (v2.8)",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -1120,15 +1120,23 @@ class ConstantineGUI:
         threats_count = 0
 
         if mode == "ram":
-            def ram_cb(pid, comm, current, total, threats):
+            def ram_cb(pid, comm, current, total, threats, last_threat=None):
                 if self.abort_scan:
                     return
                 frac = float(current) / float(total) if total > 0 else 0.0
                 GLib.idle_add(self._update_scan_ui, frac, f"/proc/{pid} ({comm})", current, threats)
+                if last_threat:
+                    proc_info = f"/proc/{last_threat['pid']} ({last_threat['comm']})"
+                    GLib.idle_add(self._add_threat_to_results, proc_info, last_threat["reason"])
 
             res = self.memory_scanner.scan_ram(progress_callback=ram_cb)
             scanned_count = res["scanned"]
             threats_count = res["threats_count"]
+
+            # Mostrar todas las amenazas de memoria detectadas en la tabla
+            for thr in res.get("threats", []):
+                proc_info = f"/proc/{thr['pid']} ({thr['comm']})"
+                GLib.idle_add(self._add_threat_to_results, proc_info, thr["reason"])
 
         else:
             files_to_scan = []
@@ -1230,21 +1238,31 @@ class ConstantineGUI:
         card_loc.add(cbox_loc)
         box.pack_start(card_loc, False, False, 0)
 
-        # Tabla del Baúl con Selección Múltiple y Fecha/Hora Exacta
-        self.vault_store = Gtk.ListStore(str, str, str, str, str) # ID, Amenaza, Ruta Original, Fecha/Hora, Hash
+        # Tabla del Baúl: 1. Fecha y Hora | 2. Tipo de Amenaza | 3. Nombre | 4. Ruta Original | 5. Hash
+        self.vault_store = Gtk.ListStore(str, str, str, str, str, str) # 0:ID, 1:Fecha/Hora, 2:Tipo, 3:Nombre, 4:Ruta, 5:Hash
         self.vault_tree = Gtk.TreeView(model=self.vault_store)
-        # Habilitar selección múltiple (Ctrl / Shift o selección arrastrada)
         self.vault_tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
 
         renderer = Gtk.CellRendererText()
-        col_threat = Gtk.TreeViewColumn("Amenaza", renderer, text=1); col_threat.set_resizable(True)
-        col_path = Gtk.TreeViewColumn("Ruta Original", renderer, text=2); col_path.set_resizable(True)
-        col_date = Gtk.TreeViewColumn("Fecha y Hora de Neutralización", renderer, text=3); col_date.set_resizable(True)
-        col_hash = Gtk.TreeViewColumn("Hash SHA-256", renderer, text=4); col_hash.set_resizable(True)
+        col_date = Gtk.TreeViewColumn("Fecha y Hora", renderer, text=1)
+        col_date.set_min_width(160); col_date.set_resizable(True); col_date.set_sort_column_id(1)
 
-        self.vault_tree.append_column(col_threat)
-        self.vault_tree.append_column(col_path)
+        col_threat = Gtk.TreeViewColumn("Tipo de Amenaza", renderer, text=2)
+        col_threat.set_min_width(170); col_threat.set_resizable(True)
+
+        col_name = Gtk.TreeViewColumn("Nombre de Archivo", renderer, text=3)
+        col_name.set_min_width(180); col_name.set_resizable(True)
+
+        col_path = Gtk.TreeViewColumn("Ruta Original", renderer, text=4)
+        col_path.set_min_width(260); col_path.set_resizable(True)
+
+        col_hash = Gtk.TreeViewColumn("Hash SHA-256", renderer, text=5)
+        col_hash.set_min_width(130); col_hash.set_resizable(True)
+
         self.vault_tree.append_column(col_date)
+        self.vault_tree.append_column(col_threat)
+        self.vault_tree.append_column(col_name)
+        self.vault_tree.append_column(col_path)
         self.vault_tree.append_column(col_hash)
 
         scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.vault_tree)
@@ -1256,6 +1274,11 @@ class ConstantineGUI:
         self.btn_select_all = Gtk.Button(label="Seleccionar Todos")
         self.btn_select_all.connect("clicked", lambda b: self.vault_tree.get_selection().select_all())
         btn_box.pack_start(self.btn_select_all, False, False, 0)
+
+        self.btn_restore_self = Gtk.Button(label="🛡️ Autocura (Restaurar Constantine)")
+        self.btn_restore_self.set_tooltip_text("Restaura automáticamente cualquier archivo de Constantine que haya sido aislado por falso positivo")
+        self.btn_restore_self.connect("clicked", self._restore_constantine_self_files)
+        btn_box.pack_start(self.btn_restore_self, False, False, 0)
 
         self.btn_restore = Gtk.Button(label="Restaurar Seleccionados (+ Whitelist)")
         self.btn_restore.connect("clicked", self._on_restore_vault_item)
@@ -1550,9 +1573,10 @@ class ConstantineGUI:
 
         it = model.get_iter(paths[0])
         vid = model.get_value(it, 0)
-        threat_name = model.get_value(it, 1)
-        original_path = model.get_value(it, 2)
-        file_name = os.path.basename(original_path)
+        t_time = model.get_value(it, 1)
+        threat_name = model.get_value(it, 2)
+        file_name = model.get_value(it, 3)
+        original_path = model.get_value(it, 4)
 
         # Buscar hash completo en el manifiesto
         full_hash = ""
@@ -1791,6 +1815,20 @@ class ConstantineGUI:
                 t,
                 short_h
             ])
+
+    def _restore_constantine_self_files(self, button=None):
+        restored = 0
+        for it in self.vault.list_items():
+            orig = it.get("original_path", "").lower()
+            if "constantine" in orig or "demons.yar" in orig or orig.endswith(".yar"):
+                vid = it.get("vault_id")
+                if self.vault.restore_file(vid, whitelist_manager=self.whitelist):
+                    restored += 1
+        self._refresh_vault_list()
+        if restored > 0:
+            self._show_msg("Autocura de Constantine", f"Se han restaurado {restored} archivo(s) del propio antivirus y se han protegido en la Lista Blanca (Whitelist).", Gtk.MessageType.INFO)
+        else:
+            self._show_msg("Autocura de Constantine", "No se encontraron archivos propios de Constantine en el Baúl.", Gtk.MessageType.INFO)
 
     def _on_restore_vault_item(self, button):
         if not self._check_auth_required(): return

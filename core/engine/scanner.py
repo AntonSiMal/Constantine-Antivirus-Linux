@@ -27,15 +27,29 @@ class Scanner:
         self.intel = ThreatIntelligence()
         self.intel.load_seed_data()
         self.fallback_signatures = [
-            ("Demons_EICAR", b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"),
-            ("Demons_Reverse_Shell_Netcat", b"nc -e /bin/sh"),
-            ("Demons_Reverse_Shell_Netcat", b"nc -e /bin/bash"),
-            ("Demons_Reverse_Shell_Netcat", b"mkfifo /tmp/"),
-            ("Demons_Reverse_Shell_DevTcp", b"/dev/tcp/"),
-            ("Demons_Reverse_Shell_Python", b"socket.socket(socket.AF_INET"),
-            ("Demons_Cryptominer", b"stratum+tcp://"),
-            ("Demons_Cryptominer", b"xmrig"),
+            ("Demons_EICAR", [b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"]),
+            ("Demons_Reverse_Shell_Netcat", [b"nc", b"-e", b"/bin/"]),
+            ("Demons_Reverse_Shell_DevTcp", [b"/dev/tcp/", b"0>&1"]),
+            ("Demons_Reverse_Shell_DevTcp_Bash", [b"bash", b"-i", b"/dev/tcp/"]),
+            ("Demons_Reverse_Shell_Python", [b"socket.socket", b"os.dup2"]),
+            ("Demons_Reverse_Shell_Python_Pty", [b"socket.socket", b"pty.spawn"]),
+            ("Demons_Cryptominer", [b"stratum+tcp://"]),
+            ("Demons_Cryptominer_Binary", [b"xmrig"]),
         ]
+
+    def is_self_or_excluded(self, path: str) -> bool:
+        if not path:
+            return False
+        norm = os.path.abspath(path).lower()
+        if "/opt/constantine" in norm or "/var/lib/constantine" in norm or "/etc/constantine" in norm:
+            return True
+        if "constantine" in norm:
+            return True
+        if norm.endswith(".yar") or norm.endswith(".yara") or norm.endswith(".quar"):
+            return True
+        if "site-packages/urllib3" in norm or "site-packages/pip" in norm or "/usr/lib/python" in norm:
+            return True
+        return False
 
     def compute_sha256(self, file_path_or_fd) -> Optional[str]:
         sha = hashlib.sha256()

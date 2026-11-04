@@ -88,6 +88,16 @@ class SystemWhitelist:
                 return True
         return False
 
+    def is_self_file(self, file_path: str) -> bool:
+        if not file_path:
+            return False
+        p = os.path.abspath(file_path).lower()
+        if "/opt/constantine" in p or "/var/lib/constantine" in p or "/etc/constantine" in p:
+            return True
+        if "constantine" in p or "demons.yar" in p or p.endswith(".yar") or p.endswith(".yara") or p.endswith(".quar"):
+            return True
+        return False
+
     def is_whitelisted(self, file_path: str, file_hash: Optional[str] = None) -> bool:
         """
         Determina si un archivo debe ser autorizado de inmediato:
@@ -99,6 +109,10 @@ class SystemWhitelist:
             return False
 
         norm_path = os.path.abspath(file_path)
+
+        # 0. Autoprotección: archivos propios del antivirus
+        if self.is_self_file(norm_path):
+            return True
 
         # 1. Comprobar exclusiones explícitas de usuario (archivo exacto o carpeta padre)
         for wpath in self.user_whitelisted_paths:
