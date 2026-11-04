@@ -192,29 +192,25 @@ class ConstantineGUI:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.window.add(vbox)
 
-        # 1. Cabecera Superior con Estilo Dark Cyber EDR
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        header.get_style_context().add_class("header-box")
+        # 1. Barra de Título Unificada estilo Apple macOS (Gtk.HeaderBar con Semáforos)
+        self.headerbar = Gtk.HeaderBar()
+        self.headerbar.set_show_close_button(True)
+        self.headerbar.get_style_context().add_class("macos-headerbar")
+        self.window.set_titlebar(self.headerbar)
 
-        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        top_title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        # Izquierda: Logo y Versión
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.lbl_title = Gtk.Label()
-        self.lbl_title.set_markup("<span font='14' weight='heavy' foreground='#f8fafc'>⚔️ CONSTANTINE</span>")
-        self.lbl_title.set_xalign(0)
+        self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#450a0a' foreground='#f87171'> EDR KERNEL v2.5 </span>")
-        top_title_row.pack_start(self.lbl_title, False, False, 0)
-        top_title_row.pack_start(lbl_badge, False, False, 0)
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v2.7 </span>")
+        title_box.pack_start(self.lbl_title, False, False, 0)
+        title_box.pack_start(lbl_badge, False, False, 0)
+        self.headerbar.pack_start(title_box)
 
-        self.lbl_sub = Gtk.Label(label="Escudo Kernel • Anti-Ransomware • USB Auto-Scan • GUFW & Proton VPN")
-        self.lbl_sub.set_xalign(0)
-        self.lbl_sub.get_style_context().add_class("subtitle-text")
-        title_box.pack_start(top_title_row, False, False, 0)
-        title_box.pack_start(self.lbl_sub, False, False, 0)
-        header.pack_start(title_box, True, True, 0)
-
-        # Selector de Idioma (ES / EN)
-        lang_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        # Segmented Control de Idioma [ ES | EN ]
+        lang_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        lang_box.get_style_context().add_class("lang-segmented")
         self.btn_lang_es = Gtk.Button(label="ES")
         self.btn_lang_es.get_style_context().add_class("suggested-action")
         self.btn_lang_es.connect("clicked", lambda b: self._change_language("es"))
@@ -222,9 +218,38 @@ class ConstantineGUI:
         self.btn_lang_en.connect("clicked", lambda b: self._change_language("en"))
         lang_box.pack_start(self.btn_lang_es, False, False, 0)
         lang_box.pack_start(self.btn_lang_en, False, False, 0)
-        header.pack_start(lang_box, False, False, 4)
+        self.headerbar.pack_start(lang_box)
 
-        # Interruptor Maestro ON / OFF
+        # Derecha: Controles estilo macOS (pack_end)
+        self.btn_lock = Gtk.Button()
+        self.btn_lock.set_label("🔒 Desbloquear")
+        self.btn_lock.connect("clicked", self._on_lock_clicked)
+        self.headerbar.pack_end(self.btn_lock)
+
+        self.status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.status_box.get_style_context().add_class("status-badge")
+        self.lbl_system_status = Gtk.Label()
+        self.lbl_system_status.set_markup("<span font='8.5' weight='bold' foreground='#30d158'>● PROTEGIDO</span>")
+        self.status_box.pack_start(self.lbl_system_status, False, False, 0)
+        self.headerbar.pack_end(self.status_box)
+
+        # Puntuación Apple Health Pill
+        health_btn = Gtk.Button()
+        health_btn.get_style_context().add_class("health-box-btn")
+        health_btn.set_tooltip_text("Salud: 98% - Haz clic para ver qué falta para llegar a 100%")
+        health_btn.connect("clicked", self._show_health_score_dialog)
+        health_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        health_box.get_style_context().add_class("health-box")
+        lbl_health_tag = Gtk.Label(label="Salud:")
+        lbl_health_tag.get_style_context().add_class("subtitle-text")
+        self.lbl_health_score = Gtk.Label()
+        self.lbl_health_score.set_markup("<span weight='bold' foreground='#30d158'>98% ℹ️</span>")
+        health_box.pack_start(lbl_health_tag, False, False, 0)
+        health_box.pack_start(self.lbl_health_score, False, False, 0)
+        health_btn.add(health_box)
+        self.headerbar.pack_end(health_btn)
+
+        # Master Switch AV: ON
         master_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.lbl_master_state = Gtk.Label()
         self.lbl_master_state.set_markup("<span weight='bold' foreground='#cbd5e1'>AV: ON</span>")
@@ -233,45 +258,7 @@ class ConstantineGUI:
         self.switch_master.connect("state-set", self._on_master_switch_toggled)
         master_box.pack_start(self.lbl_master_state, False, False, 0)
         master_box.pack_start(self.switch_master, False, False, 0)
-        header.pack_start(master_box, False, False, 4)
-
-        # Puntuación de Salud de Seguridad (Clicable con Diagnóstico para 100/100)
-        health_btn = Gtk.Button()
-        health_btn.get_style_context().add_class("health-box-btn")
-        health_btn.set_tooltip_text("Salud: 98/100 - Haz clic para ver qué falta para llegar a 100/100")
-        health_btn.connect("clicked", self._show_health_score_dialog)
-
-        health_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        health_box.get_style_context().add_class("health-box")
-        lbl_health_tag = Gtk.Label(label="Salud:")
-        lbl_health_tag.get_style_context().add_class("subtitle-text")
-        self.lbl_health_score = Gtk.Label()
-        self.lbl_health_score.set_markup("<span weight='bold' foreground='#34d399'>98/100 ℹ️</span>")
-        health_pbar = Gtk.ProgressBar()
-        health_pbar.set_fraction(0.98)
-        health_pbar.set_size_request(45, 6)
-        health_box.pack_start(lbl_health_tag, False, False, 0)
-        health_box.pack_start(self.lbl_health_score, False, False, 0)
-        health_box.pack_start(health_pbar, False, False, 0)
-        health_btn.add(health_box)
-        header.pack_start(health_btn, False, False, 4)
-
-        # Estado del Sistema Badge
-        self.status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.status_box.get_style_context().add_class("status-badge")
-        self.lbl_system_status = Gtk.Label()
-        self.lbl_system_status.set_markup("<span font='9' weight='bold' foreground='#34d399'>🛡️ SISTEMA PROTEGIDO</span>")
-        self.status_box.pack_start(self.lbl_system_status, False, False, 0)
-        header.pack_start(self.status_box, False, False, 4)
-
-        # Candado de Seguridad
-        self.btn_lock = Gtk.Button()
-        self.btn_lock.set_label("🔒 Desbloquear")
-        self.btn_lock.connect("clicked", self._on_lock_clicked)
-        header.pack_start(self.btn_lock, False, False, 0)
-
-        vbox.pack_start(header, False, False, 0)
-        vbox.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+        self.headerbar.pack_end(master_box)
 
         # Contenedor Principal en 2 Columnas Responsivas
         main_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -404,11 +391,26 @@ class ConstantineGUI:
         btn.get_style_context().add_class("nav-btn")
         
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        lbl_icon = Gtk.Label(label=icon)
-        lbl_icon.get_style_context().add_class("nav-icon")
+        icon_colors = {
+            "shields": "#0071e3",
+            "usb": "#636366",
+            "firewall": "#ff9500",
+            "vault": "#5856d6",
+            "scanner": "#0a84ff",
+            "dns": "#00c7be",
+            "phishing": "#ff9f0a",
+            "audit": "#af52de",
+            "hardware": "#34c759",
+            "whitelist": "#8e8e93",
+            "settings": "#48484a",
+        }
+        bg_color = icon_colors.get(page_id, "#0071e3")
+        lbl_icon = Gtk.Label()
+        lbl_icon.set_markup(f"<span font='9.5' background='{bg_color}' foreground='#ffffff'>  {icon}  </span>")
+        lbl_icon.get_style_context().add_class("apple-icon")
         
         lbl_text = Gtk.Label()
-        lbl_text.set_markup(f"<span weight='normal' foreground='#94a3b8'>{self._esc(label_text)}</span>")
+        lbl_text.set_markup(f"<span weight='normal' foreground='#f5f5f7'>{self._esc(label_text)}</span>")
         lbl_text.set_xalign(0)
         lbl_text.get_style_context().add_class("nav-label")
         
@@ -446,10 +448,10 @@ class ConstantineGUI:
         for pid, btn in self.nav_buttons.items():
             if pid == page_id:
                 btn.get_style_context().add_class("nav-btn-active")
-                btn._label_widget.set_markup(f"<span weight='heavy' foreground='#ffffff'>● {self._esc(btn._raw_text)}</span>")
+                btn._label_widget.set_markup(f"<span weight='bold' foreground='#ffffff'>{self._esc(btn._raw_text)}</span>")
             else:
                 btn.get_style_context().remove_class("nav-btn-active")
-                btn._label_widget.set_markup(f"<span weight='normal' foreground='#94a3b8'>{self._esc(btn._raw_text)}</span>")
+                btn._label_widget.set_markup(f"<span weight='normal' foreground='#e5e5ea'>{self._esc(btn._raw_text)}</span>")
 
         # Actualizar cabecera superior de la sección
         if hasattr(self, 'lbl_section_title') and hasattr(self, 'sections_meta') and page_id in self.sections_meta:
@@ -626,7 +628,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v2.5)" if is_es else "EDR Security Posture Diagnosis (v2.5)",
+            title="Diagnóstico de Salud de Seguridad EDR (v2.7)" if is_es else "EDR Security Posture Diagnosis (v2.7)",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -1323,7 +1325,6 @@ class ConstantineGUI:
         box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Cortafuegos GUFW &amp; Proton VPN</b>\nControl del firewall UFW e invocación en 1 clic de la aplicación Proton VPN.")
         lbl.set_xalign(0)
         box.pack_start(lbl, False, False, 0)
 

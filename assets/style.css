@@ -1,358 +1,122 @@
-/* Constantine Antivirus - Modern Dark Cyber EDR GTK3 Theme */
+/* Constantine Antivirus - Apple macOS Cupertino Theme (v2.7) */
 
+/* Tipografía y Ventana estilo macOS */
 window, .background {
-    background-color: #0b0f19;
-    color: #f1f5f9;
-    font-family: 'Inter', 'Ubuntu', 'Cantarell', 'Segoe UI', sans-serif;
+    background-color: #1c1c1e;
+    color: #f5f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', 'Ubuntu', 'Cantarell', sans-serif;
+    letter-spacing: -0.2px;
 }
 
-/* Header superior */
-.header-box {
-    background-color: #0f172a;
-    border-bottom: 1px solid #1e293b;
-    padding: 10px 18px;
+/* HeaderBar Unificada estilo macOS (Unified Titlebar) */
+headerbar.macos-headerbar, .titlebar {
+    background-image: none !important;
+    background-color: #1a1a1c !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    min-height: 48px !important;
+    padding: 0 12px !important;
+    box-shadow: none !important;
+}
+
+/* Botones Semáforo Apple (Traffic Lights: Close, Minimize, Maximize) */
+button.titlebutton.close, .titlebutton.close {
+    background-image: none !important;
+    background-color: #ff5f56 !important;
+    border: 1px solid #e0443e !important;
+    border-radius: 50% !important;
+    min-width: 12px !important;
+    min-height: 12px !important;
+    margin: 4px 3px !important;
+    padding: 0 !important;
+    color: transparent !important;
+}
+
+button.titlebutton.minimize, .titlebutton.minimize {
+    background-image: none !important;
+    background-color: #ffbd2e !important;
+    border: 1px solid #dea123 !important;
+    border-radius: 50% !important;
+    min-width: 12px !important;
+    min-height: 12px !important;
+    margin: 4px 3px !important;
+    padding: 0 !important;
+    color: transparent !important;
+}
+
+button.titlebutton.maximize, .titlebutton.maximize {
+    background-image: none !important;
+    background-color: #27c93f !important;
+    border: 1px solid #1aab29 !important;
+    border-radius: 50% !important;
+    min-width: 12px !important;
+    min-height: 12px !important;
+    margin: 4px 3px !important;
+    padding: 0 !important;
+    color: transparent !important;
 }
 
 .title-text {
-    font-size: 15pt;
-    font-weight: 800;
-    color: #f8fafc;
-    letter-spacing: 1px;
+    font-size: 13.5pt;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.3px;
 }
 
 .subtitle-text {
-    font-size: 9pt;
-    color: #94a3b8;
+    font-size: 8.5pt;
+    color: #86868b;
 }
 
 .badge-version {
-    background-color: #450a0a;
-    color: #f87171;
-    border: 1px solid #7f1d1d;
-    border-radius: 4px;
-    padding: 2px 6px;
+    background-color: rgba(0, 113, 227, 0.2);
+    color: #0a84ff;
+    border: 1px solid rgba(0, 113, 227, 0.35);
+    border-radius: 6px;
+    padding: 2px 7px;
     font-size: 7.5pt;
-    font-weight: bold;
+    font-weight: 700;
 }
 
-/* Salud de Seguridad */
-.health-box {
-    background-color: #0b0f19;
-    border: 1px solid #1e293b;
+/* Segmented Control de Idioma [ ES | EN ] */
+.lang-segmented {
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 8px;
-    padding: 4px 10px;
+    padding: 2px;
+}
+
+.lang-segmented button {
+    background-image: none !important;
+    background-color: transparent !important;
+    color: #86868b !important;
+    border: none !important;
+    border-radius: 6px !important;
+    padding: 3px 8px !important;
+    font-size: 8pt !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+}
+
+.lang-segmented button.suggested-action {
+    background-color: #0071e3 !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25) !important;
+}
+
+/* Control de Salud (Apple Health Pill) */
+.health-box {
+    background-color: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.3);
+    border-radius: 9999px;
+    padding: 4px 12px;
 }
 
 .health-score {
-    color: #34d399;
-    font-weight: 800;
-    font-size: 11pt;
-    font-family: 'JetBrains Mono', monospace, sans-serif;
-}
-
-/* Estado del Sistema */
-.status-badge {
-    background-color: #064e3b;
-    border: 1px solid #059669;
-    border-radius: 8px;
-    padding: 4px 10px;
-    color: #6ee7b7;
+    color: #30d158;
     font-weight: 700;
-    font-size: 9pt;
+    font-size: 10pt;
 }
 
-.status-badge.danger {
-    background-color: #450a0a;
-    border: 1px solid #dc2626;
-    color: #fca5a5;
-}
-
-/* Barra lateral de navegación (Sidebar) estilo EDR */
-.sidebar-box {
-    background-color: #080d1a;
-    border-right: 1px solid #1e293b;
-    min-width: 240px;
-    max-width: 250px;
-}
-
-/* Botones de Navegación */
-button.nav-btn {
-    background-image: none !important;
-    background-color: transparent !important;
-    color: #94a3b8 !important;
-    border: 1px solid transparent !important;
-    border-radius: 8px !important;
-    padding: 9px 12px !important;
-    margin: 2px 4px !important;
-    font-weight: 500 !important;
-    box-shadow: none !important;
-    transition: all 120ms ease-in-out;
-}
-
-button.nav-btn:hover {
-    background-color: #162032 !important;
-    color: #ffffff !important;
-    border-color: #334155 !important;
-}
-
-/* PESTAÑA ACTIVA: Rojo carmesí sólido con acento blanco y brillo */
-button.nav-btn.nav-btn-active {
-    background-image: none !important;
-    background-color: #b91c1c !important;
-    color: #ffffff !important;
-    border: 1px solid #ef4444 !important;
-    border-left: 6px solid #ffffff !important;
-    box-shadow: 0 0 12px rgba(239, 68, 68, 0.45) !important;
-}
-
-button.nav-btn.nav-btn-active label {
-    color: #ffffff !important;
-    font-weight: 800 !important;
-}
-
-.nav-icon {
-    font-size: 12pt;
-    margin-right: 6px;
-}
-
-.nav-label {
-    font-size: 9.5pt;
-    font-weight: 600;
-}
-
-/* Badges en la barra lateral */
-.nav-badge {
-    font-size: 7.5pt;
-    font-weight: 800;
-    border-radius: 4px;
-    padding: 2px 6px;
-}
-
-.badge-emerald {
-    background-color: #022c22;
-    color: #34d399;
-    border: 1px solid #065f46;
-}
-
-.badge-purple {
-    background-color: #2e1065;
-    color: #d8b4fe;
-    border: 1px solid #581c87;
-}
-
-.badge-red {
-    background-color: #450a0a;
-    color: #fca5a5;
-    border: 1px solid #7f1d1d;
-}
-
-.badge-blue {
-    background-color: #082f49;
-    color: #38bdf8;
-    border: 1px solid #0369a1;
-}
-
-/* Barra superior de sección actual (Breadcrumb) */
-.section-header-bar {
-    background-color: #0c1322;
-    border-bottom: 1px solid #1e293b;
-    padding: 12px 24px;
-}
-
-/* Mini Tarjeta de Estado */
-.mini-status-card {
-    background-color: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 10px;
-    padding: 12px 14px;
-    margin: 10px;
-}
-
-.mini-row-title {
-    font-size: 8pt;
-    color: #64748b;
-    font-weight: 500;
-}
-
-.mini-row-status-ok {
-    font-size: 8pt;
-    color: #10b981;
-    font-weight: 700;
-}
-
-.mini-row-status-warn {
-    font-size: 8pt;
-    color: #f59e0b;
-    font-weight: 700;
-}
-
-/* Tarjetas y Marcos en el Área de Contenido */
-frame > border {
-    border: 1px solid #1e293b;
-    border-radius: 10px;
-    background-color: #0f172a;
-}
-
-.card {
-    background-color: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 10px;
-    padding: 14px;
-}
-
-/* Botones Generales */
-button {
-    background-image: none;
-    background-color: #1e293b;
-    color: #f8fafc;
-    border: 1px solid #334155;
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-weight: 600;
-    transition: background-color 150ms ease;
-}
-
-button:hover {
-    background-color: #334155;
-    border-color: #475569;
-    color: #ffffff;
-}
-
-button:active {
-    background-color: #0f172a;
-}
-
-button.suggested-action {
-    background-image: none;
-    background-color: #dc2626;
-    border: 1px solid #b91c1c;
-    color: #ffffff;
-}
-
-button.suggested-action:hover {
-    background-color: #ef4444;
-    border-color: #dc2626;
-}
-
-button.destructive-action {
-    background-image: none;
-    background-color: #7f1d1d;
-    border: 1px solid #991b1b;
-    color: #fecaca;
-}
-
-button.destructive-action:hover {
-    background-color: #991b1b;
-    color: #ffffff;
-}
-
-button.primary-cyber {
-    background-image: none;
-    background-color: #0284c7;
-    border: 1px solid #0369a1;
-    color: #ffffff;
-}
-
-button.primary-cyber:hover {
-    background-color: #0ea5e9;
-}
-
-/* Interruptores (Switches) */
-switch {
-    background-color: #334155;
-    border-radius: 14px;
-    border: 1px solid #475569;
-    min-width: 44px;
-    min-height: 22px;
-}
-
-switch:checked {
-    background-color: #dc2626;
-    border-color: #ef4444;
-}
-
-switch slider {
-    background-color: #ffffff;
-    border-radius: 50%;
-    min-width: 18px;
-    min-height: 18px;
-    margin: 2px;
-}
-
-/* Barras de Progreso */
-progressbar trough {
-    background-color: #1e293b;
-    border-radius: 6px;
-    border: 1px solid #334155;
-    min-height: 10px;
-}
-
-progressbar progress {
-    background-image: none;
-    background-color: #10b981;
-    border-radius: 5px;
-}
-
-progressbar.scanning progress {
-    background-color: #ef4444;
-}
-
-/* Tablas y Listas (TreeViews) */
-treeview {
-    background-color: #0f172a;
-    color: #e2e8f0;
-    border: 1px solid #1e293b;
-    border-radius: 6px;
-}
-
-treeview:selected {
-    background-color: #1e293b;
-    color: #38bdf8;
-}
-
-treeview header button {
-    background-color: #1e293b;
-    color: #94a3b8;
-    border: none;
-    font-weight: 700;
-    border-bottom: 1px solid #334155;
-    padding: 6px 10px;
-}
-
-scrolledwindow {
-    border: 1px solid #1e293b;
-    border-radius: 8px;
-    background-color: #0f172a;
-}
-
-/* Entradas de Texto (Entries) */
-entry {
-    background-color: #0f172a;
-    color: #f8fafc;
-    border: 1px solid #334155;
-    border-radius: 6px;
-    padding: 6px 10px;
-}
-
-entry:focus {
-    border-color: #ef4444;
-    box-shadow: 0 0 0 1px #ef4444;
-}
-
-/* Barra de Estado Inferior */
-.statusbar-box {
-    background-color: #0f172a;
-    border-top: 1px solid #1e293b;
-    padding: 6px 16px;
-}
-
-.statusbar-text {
-    font-size: 8.5pt;
-    font-family: 'JetBrains Mono', monospace, sans-serif;
-    color: #94a3b8;
-}
-
-/* Botón de Salud de Seguridad Clicable */
 button.health-box-btn {
     background-image: none !important;
     background-color: transparent !important;
@@ -363,7 +127,332 @@ button.health-box-btn {
 }
 
 button.health-box-btn:hover .health-box {
-    border-color: #34d399 !important;
-    background-color: #111e2e !important;
-    box-shadow: 0 0 10px rgba(52, 211, 153, 0.35) !important;
+    background-color: rgba(48, 209, 88, 0.2) !important;
+    border-color: #30d158 !important;
+}
+
+/* Estado del Sistema (Píldora Apple) */
+.status-badge {
+    background-color: rgba(48, 209, 88, 0.15);
+    border: 1px solid rgba(48, 209, 88, 0.35);
+    border-radius: 9999px;
+    padding: 4px 12px;
+    color: #30d158;
+    font-weight: 600;
+    font-size: 8.5pt;
+}
+
+.status-badge.danger {
+    background-color: rgba(255, 69, 58, 0.15);
+    border: 1px solid rgba(255, 69, 58, 0.4);
+    color: #ff453a;
+}
+
+/* Barra Lateral estilo macOS System Settings */
+.sidebar-box {
+    background-color: #141416;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    min-width: 240px;
+    max-width: 255px;
+}
+
+/* Botones de Navegación del Sidebar */
+button.nav-btn {
+    background-image: none !important;
+    background-color: transparent !important;
+    color: #e5e5ea !important;
+    border: none !important;
+    border-radius: 7px !important;
+    padding: 7px 10px !important;
+    margin: 1px 6px !important;
+    font-weight: 500 !important;
+    box-shadow: none !important;
+    transition: all 120ms ease;
+}
+
+button.nav-btn:hover {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+    color: #ffffff !important;
+}
+
+/* PESTAÑA ACTIVA: Píldora Apple Blue Oficial (#0071e3) */
+button.nav-btn.nav-btn-active {
+    background-image: none !important;
+    background-color: #0071e3 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 7px !important;
+    box-shadow: 0 1px 4px rgba(0, 113, 227, 0.4) !important;
+}
+
+button.nav-btn.nav-btn-active label {
+    color: #ffffff !important;
+    font-weight: 600 !important;
+}
+
+/* Squircles Apple para iconos del sidebar */
+.apple-icon {
+    border-radius: 6px;
+    padding: 2px 4px;
+    font-size: 10pt;
+    margin-right: 8px;
+}
+
+.nav-label {
+    font-size: 9.5pt;
+    font-weight: 500;
+}
+
+/* Badges estilo macOS */
+.nav-badge {
+    font-size: 7.5pt;
+    font-weight: 700;
+    border-radius: 9999px;
+    padding: 1px 7px;
+}
+
+.badge-emerald {
+    background-color: rgba(48, 209, 88, 0.2);
+    color: #30d158;
+    border: 1px solid rgba(48, 209, 88, 0.3);
+}
+
+.badge-purple {
+    background-color: rgba(191, 90, 242, 0.2);
+    color: #bf5af2;
+    border: 1px solid rgba(191, 90, 242, 0.3);
+}
+
+.badge-red {
+    background-color: rgba(255, 69, 58, 0.2);
+    color: #ff453a;
+    border: 1px solid rgba(255, 69, 58, 0.3);
+}
+
+.badge-blue {
+    background-color: rgba(10, 132, 255, 0.2);
+    color: #0a84ff;
+    border: 1px solid rgba(10, 132, 255, 0.3);
+}
+
+/* Cabecera de Sección Actual (Breadcrumb estilo macOS) */
+.section-header-bar {
+    background-color: #18181a;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 14px 24px;
+}
+
+/* Mini Tarjeta de Estado en Sidebar */
+.mini-status-card {
+    background-color: #1e1e20;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 10px 10px 14px 10px;
+}
+
+.mini-row-title {
+    font-size: 8pt;
+    color: #86868b;
+    font-weight: 500;
+}
+
+.mini-row-status-ok {
+    font-size: 8pt;
+    color: #30d158;
+    font-weight: 600;
+}
+
+.mini-row-status-warn {
+    font-size: 8pt;
+    color: #ff9f0a;
+    font-weight: 600;
+}
+
+/* TRANSFORMACIÓN DE GTK.FRAME A TARJETAS INSET ESTILO APPLE */
+frame {
+    border: none !important;
+    background-color: transparent !important;
+    padding: 0 !important;
+    margin-bottom: 8px !important;
+}
+
+frame > border {
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 12px !important;
+    background-color: #242426 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+    margin-top: 6px !important;
+    padding: 12px 16px !important;
+}
+
+frame > label {
+    font-size: 8pt !important;
+    font-weight: 700 !important;
+    color: #86868b !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.6px !important;
+    margin-bottom: 2px !important;
+    margin-left: 6px !important;
+    background-color: transparent !important;
+}
+
+/* Tarjetas Inset Manuales (.macos-card) */
+.macos-card {
+    background-color: #242426;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Botones estilo Apple (Cupertino UI) */
+button {
+    background-image: none;
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #f5f5f7;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-weight: 500;
+    font-size: 9.5pt;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    transition: all 120ms ease;
+}
+
+button:hover {
+    background-color: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: #ffffff;
+}
+
+button:active {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Botón Primario Apple Blue */
+button.suggested-action, button.primary-cyber {
+    background-image: none !important;
+    background-color: #0071e3 !important;
+    border: 1px solid #0a84ff !important;
+    color: #ffffff !important;
+    font-weight: 600;
+}
+
+button.suggested-action:hover, button.primary-cyber:hover {
+    background-color: #0077ed !important;
+    border-color: #388bfd !important;
+}
+
+/* Botón Destructivo Apple Red */
+button.destructive-action {
+    background-image: none !important;
+    background-color: rgba(255, 69, 58, 0.15) !important;
+    border: 1px solid rgba(255, 69, 58, 0.35) !important;
+    color: #ff453a !important;
+}
+
+button.destructive-action:hover {
+    background-color: #ff453a !important;
+    color: #ffffff !important;
+}
+
+/* Interruptores estilo Apple (iOS / macOS Green Switch) */
+switch {
+    background-image: none !important;
+    background-color: #39393d !important;
+    border-radius: 14px !important;
+    border: none !important;
+    min-width: 44px !important;
+    min-height: 24px !important;
+    transition: background-color 150ms ease;
+}
+
+switch:checked {
+    background-image: none !important;
+    background-color: #34c759 !important;
+}
+
+switch slider {
+    background-image: none !important;
+    background-color: #ffffff !important;
+    border-radius: 50% !important;
+    min-width: 20px !important;
+    min-height: 20px !important;
+    margin: 2px !important;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Barras de Progreso estilo Apple */
+progressbar trough {
+    background-color: #2c2c2e;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    min-height: 8px;
+}
+
+progressbar progress {
+    background-image: none;
+    background-color: #34c759;
+    border-radius: 5px;
+}
+
+progressbar.scanning progress {
+    background-color: #0a84ff;
+}
+
+/* Tablas y Listas estilo macOS (TreeViews) */
+treeview {
+    background-color: #1e1e20;
+    color: #f5f5f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+}
+
+treeview:selected {
+    background-color: #0071e3;
+    color: #ffffff;
+}
+
+treeview header button {
+    background-color: #242426;
+    color: #86868b;
+    border: none;
+    font-weight: 600;
+    font-size: 8.5pt;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 6px 10px;
+}
+
+scrolledwindow {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    background-color: #1c1c1e;
+}
+
+/* Entradas de Texto estilo Apple */
+entry {
+    background-color: #2c2c2e;
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    padding: 6px 12px;
+}
+
+entry:focus {
+    border-color: #0a84ff;
+    box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.3);
+}
+
+/* Barra de Estado Inferior estilo macOS */
+.statusbar-box {
+    background-color: #141416;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 6px 16px;
+}
+
+.statusbar-text {
+    font-size: 8pt;
+    font-family: -apple-system, 'SF Mono', 'JetBrains Mono', monospace, sans-serif;
+    color: #86868b;
 }
