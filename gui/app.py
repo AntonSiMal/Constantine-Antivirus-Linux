@@ -252,7 +252,7 @@ class ConstantineGUI:
         self.lbl_title = Gtk.Label()
         self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.3 </span>")
+        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.4 </span>")
         title_box.pack_start(self.lbl_title, False, False, 0)
         title_box.pack_start(lbl_badge, False, False, 0)
         self.headerbar.pack_start(title_box)
@@ -685,7 +685,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v3.3)" if is_es else "EDR Security Posture Diagnosis (v3.3)",
+            title="Diagnóstico de Salud de Seguridad EDR (v3.4)" if is_es else "EDR Security Posture Diagnosis (v3.4)",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -1193,70 +1193,75 @@ class ConstantineGUI:
     def _scan_worker(self, mode, target):
         scanned_count = 0
         threats_count = 0
+        try:
+            if mode == "ram":
+                def ram_cb(pid, comm, current, total, threats, last_threat=None):
+                    if self.abort_scan:
+                        return
+                    frac = float(current) / float(total) if total > 0 else 0.0
+                    if current % 3 == 0 or current == total:
+                        GLib.idle_add(self._update_scan_ui, frac, f"/proc/{pid} ({comm})", current, threats)
+                    if last_threat:
+                        proc_info = f"/proc/{last_threat['pid']} ({last_threat['comm']})"
+                        GLib.idle_add(self._add_threat_to_results, proc_info, last_threat["reason"], "Detectado en RAM")
 
-        if mode == "ram":
-            def ram_cb(pid, comm, current, total, threats, last_threat=None):
-                if self.abort_scan:
-                    return
-                frac = float(current) / float(total) if total > 0 else 0.0
-                GLib.idle_add(self._update_scan_ui, frac, f"/proc/{pid} ({comm})", current, threats)
-                if last_threat:
-                    proc_info = f"/proc/{last_threat['pid']} ({last_threat['comm']})"
-                    GLib.idle_add(self._add_threat_to_results, proc_info, last_threat["reason"])
+                res = self.memory_scanner.scan_ram(progress_callback=ram_cb, abort_check=lambda: self.abort_scan)
+                scanned_count = res.get("scanned", 0)
+                threats_count = res.get("threats_count", 0)
 
-            res = self.memory_scanner.scan_ram(progress_callback=ram_cb)
-            scanned_count = res["scanned"]
-            threats_count = res["threats_count"]
+                # Mostrar todas las amenazas de memoria detectadas en la tabla
+                for thr in res.get("threats", []):
+                    proc_info = f"/proc/{thr['pid']} ({thr['comm']})"
+                    GLib.idle_add(self._add_threat_to_results, proc_info, thr["reason"], "Detectado en RAM")
 
-            # Mostrar todas las amenazas de memoria detectadas en la tabla
-            for thr in res.get("threats", []):
-                proc_info = f"/proc/{thr['pid']} ({thr['comm']})"
-                GLib.idle_add(self._add_threat_to_results, proc_info, thr["reason"])
-
-        else:
-            files_to_scan = []
-            # Recolectar archivos rápidamente
-            if os.path.isfile(target):
-                files_to_scan.append(target)
             else:
-                for root, dirs, files in os.walk(target):
+                files_to_scan = []
+                if os.path.isfile(target):
+                    files_to_scan.append(target)
+                else:
+                    for root, dirs, files in os.walk(target):
+                        if self.abort_scan:
+                            break
+                        if target == "/" and (root.startswith("/proc") or root.startswith("/sys") or root.startswith("/dev")):
+                            continue
+                        for f in files:
+                            files_to_scan.append(os.path.join(root, f))
+                            if len(files_to_scan) >= 10000:
+                                break
+                        if len(files_to_scan) >= 10000:
+                            break
+
+                total_files = len(files_to_scan)
+                for idx, fpath in enumerate(files_to_scan):
                     if self.abort_scan:
                         break
-                    # Evitar bucles infinitos en /proc y /sys durante escaneo raíz /
-                    if target == "/" and (root.startswith("/proc") or root.startswith("/sys") or root.startswith("/dev")):
-                        continue
-                    for f in files:
-                        files_to_scan.append(os.path.join(root, f))
-                        if len(files_to_scan) >= 10000: # Límite de lote para respuesta visual
-                            break
-                    if len(files_to_scan) >= 10000:
-                        break
+                    scanned_count += 1
+                    try:
+                        res = self.scanner.scan_file(file_path=fpath)
+                        if res.is_malicious:
+                            threats_count += 1
+                            t_name = res.threat_name or "Malware.Generic"
+                            f_hash = res.sha256 or "Calculando..."
+                            self.vault.quarantine_file(fpath, t_name)
+                            GLib.idle_add(self._add_threat_to_results, fpath, t_name, "Neutralizado y en Baúl", f_hash[:16] + "...")
+                    except Exception:
+                        pass
 
-            total_files = len(files_to_scan)
-            for idx, fpath in enumerate(files_to_scan):
-                if self.abort_scan:
-                    break
-                scanned_count += 1
-                try:
-                    res = self.scanner.scan_file(file_path=fpath)
-                    if res.is_malicious:
-                        threats_count += 1
-                        t_name = res.threat_name or "Malware.Generic"
-                        f_hash = res.sha256 or "Calculando..."
-                        self.vault.quarantine_file(fpath, t_name)
-                        GLib.idle_add(self._add_detected_threat_row, t_name, fpath, "Neutralizado y en Baúl", f_hash[:16] + "...")
-                except Exception:
-                    pass
+                    if idx % 5 == 0 or idx == total_files - 1:
+                        frac = float(idx + 1) / float(total_files) if total_files > 0 else 1.0
+                        GLib.idle_add(self._update_scan_ui, frac, fpath, scanned_count, threats_count)
 
-                # Actualizar barra cada 5 archivos para máxima fluidez
-                if idx % 5 == 0 or idx == total_files - 1:
-                    frac = float(idx + 1) / float(total_files) if total_files > 0 else 1.0
-                    GLib.idle_add(self._update_scan_ui, frac, fpath, scanned_count, threats_count)
+        except Exception as e:
+            logger.error("Error en hilo de escaneo (%s): %s", mode, e)
+        finally:
+            GLib.idle_add(self._finish_scan_ui, scanned_count, threats_count, self.abort_scan)
 
-        GLib.idle_add(self._finish_scan_ui, scanned_count, threats_count, self.abort_scan)
-
-    def _add_detected_threat_row(self, threat, path, status, fhash):
+    def _add_detected_threat_row(self, threat, path, status="Detectado", fhash="N/A"):
         self.threats_store.append([threat, path, status, fhash])
+        return False
+
+    def _add_threat_to_results(self, path_or_info, threat_name, status="Detectado en RAM", fhash="N/A"):
+        self.threats_store.append([threat_name, path_or_info, status, fhash])
         return False
 
     def _update_scan_ui(self, frac, current_name, count, threats):
@@ -1537,6 +1542,35 @@ class ConstantineGUI:
 
         self.lbl_phish_output = Gtk.Label(); self.lbl_phish_output.set_xalign(0); self.lbl_phish_output.set_line_wrap(True)
         box.pack_start(self.lbl_phish_output, False, False, 0)
+
+        # Tarjeta Inset Apple: Escudo Proactivo de Phishing
+        p_card = Gtk.Frame(label=" Escudo Proactivo de Red y Phishing en Vuelo ")
+        p_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        p_box.set_margin_start(15); p_box.set_margin_end(15); p_box.set_margin_top(10); p_box.set_margin_bottom(10)
+
+        p_status = Gtk.Label()
+        p_status.set_markup("<b>Estado del Centinela Proactivo:</b> <span foreground='#30d158'>● Activo y Vigilando</span>")
+        p_status.set_xalign(0)
+        p_box.pack_start(p_status, False, False, 0)
+
+        p_desc = Gtk.Label(label="Audita en segundo plano /etc/hosts (envenenamiento DNS), conexiones TCP activas contra OpenPhish/URLhaus y accesos directos fraudulentos en el escritorio.")
+        p_desc.set_xalign(0); p_desc.set_line_wrap(True)
+        p_desc.get_style_context().add_class("subtitle-text")
+        p_box.pack_start(p_desc, False, False, 0)
+
+        p_btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.btn_run_phish_scan = Gtk.Button(label="🔍 Ejecutar Auditoría Proactiva de Phishing y Red")
+        self.btn_run_phish_scan.get_style_context().add_class("suggested-action")
+        self.btn_run_phish_scan.connect("clicked", self._on_run_proactive_phishing_scan)
+        p_btn_row.pack_start(self.btn_run_phish_scan, False, False, 0)
+        p_box.pack_start(p_btn_row, False, False, 0)
+
+        self.lbl_proactive_phish_results = Gtk.Label()
+        self.lbl_proactive_phish_results.set_xalign(0); self.lbl_proactive_phish_results.set_line_wrap(True)
+        p_box.pack_start(self.lbl_proactive_phish_results, False, False, 0)
+
+        p_card.add(p_box)
+        box.pack_start(p_card, False, False, 0)
         return box
 
 
@@ -2018,6 +2052,31 @@ class ConstantineGUI:
         current = self.firewall.get_ufw_status()
         self.firewall.toggle_ufw(not current)
         self.lbl_ufw_state.set_markup(f"<b>Estado de UFW:</b> {'Activo' if not current else 'Inactivo'}")
+
+    def _on_run_proactive_phishing_scan(self, button):
+        self.btn_run_phish_scan.set_sensitive(False)
+        self.lbl_proactive_phish_results.set_markup("<span foreground='#0a84ff'>⏳ Auditando /etc/hosts, conexiones salientes y enlaces del escritorio...</span>")
+
+        def worker():
+            res = self.phishing.run_proactive_audit()
+            def done():
+                self.btn_run_phish_scan.set_sensitive(True)
+                total = res.get("total_threats", 0)
+                if total > 0:
+                    details = []
+                    for h in res.get("hosts_hijacks", []):
+                        details.append(f"• /etc/hosts secuestrado: {h['domain']} -> {h['ip']}")
+                    for c in res.get("conn_alerts", []):
+                        details.append(f"• Conexión maliciosa detectada: {c['target']} ({c['threat']})")
+                    for s in res.get("shortcuts_phish", []):
+                        details.append(f"• Enlace falso: {s['url']} ({s['brand']})")
+                    detail_str = ' | '.join(details)
+                    self.lbl_proactive_phish_results.set_markup(f"<span foreground='#ff453a' weight='bold'>⚠️ Se detectaron {total} anomalía(s) de phishing: </span>" + self._esc(detail_str))
+                else:
+                    self.lbl_proactive_phish_results.set_markup("<span foreground='#30d158' weight='bold'>✅ Auditoría proactiva finalizada: Cero secuestros DNS, conexiones de red limpias y cero enlaces de phishing.</span>")
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_check_url_clicked(self, button):
         url = self.entry_url.get_text().strip()

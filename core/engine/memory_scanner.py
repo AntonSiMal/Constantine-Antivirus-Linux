@@ -28,17 +28,20 @@ class MemoryScanner:
                     pass
         return sorted(pids)
 
-    def scan_ram(self, progress_callback: Optional[Callable] = None) -> Dict:
+    def scan_ram(self, progress_callback: Optional[Callable] = None, abort_check: Optional[Callable] = None) -> Dict:
         """
         Escanea la memoria RAM auditando todos los procesos activos en /proc.
-        Envía eventos de progreso a progress_callback(pid, proc_name, scanned_count, total_count, threats_count).
+        Optimizado para rendimiento ultrarrápido con caché de binarios repetidos.
         """
         pids = self.get_running_pids()
         total = len(pids)
         threats_found = []
         scanned_count = 0
+        scanned_binaries_cache: Dict[str, Dict] = {}
 
         for pid in pids:
+            if abort_check and abort_check():
+                break
             scanned_count += 1
             proc_name = "proceso"
             try:
@@ -77,10 +80,19 @@ class MemoryScanner:
                             is_malicious = True
                             reason = f"Ejecutable borrado en disco pero activo en RAM ({target})"
                     elif self.scanner and os.path.isfile(target):
-                        res = self.scanner.scan_file(file_path=target)
-                        if res.is_malicious:
-                            is_malicious = True
-                            reason = res.threat_name or "Malware en RAM"
+                        if target in scanned_binaries_cache:
+                            cached = scanned_binaries_cache[target]
+                            if cached.get("is_malicious"):
+                                is_malicious = True
+                                reason = cached.get("reason", "Malware en RAM")
+                        else:
+                            res = self.scanner.scan_file(file_path=target)
+                            is_m = res.is_malicious
+                            r_text = res.threat_name or "Malware en RAM"
+                            scanned_binaries_cache[target] = {"is_malicious": is_m, "reason": r_text}
+                            if is_m:
+                                is_malicious = True
+                                reason = r_text
             except Exception:
                 pass
 
@@ -90,7 +102,11 @@ class MemoryScanner:
                 try:
                     if os.path.exists(maps_path):
                         with open(maps_path, "r") as f:
+                            lines_checked = 0
                             for line in f:
+                                lines_checked += 1
+                                if lines_checked > 200: # Límite de seguridad para evitar bloqueos
+                                    break
                                 parts = line.split()
                                 if len(parts) >= 2:
                                     perms = parts[1]

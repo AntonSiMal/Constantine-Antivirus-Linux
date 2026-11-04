@@ -65,6 +65,8 @@ def main():
     hardware_guard = HardwareGuard(notifier=notifier)
     hardware_guard.start()
 
+    phishing.start_proactive_monitoring(notifier=notifier, audit_logger=audit_logger)
+
     ebpf = EBPFMonitor(alert_callback=lambda threat, path, pid, comm: [
         notifier.alert_threat_blocked(threat, path, pid, comm),
         audit_logger.record_incident(threat, path, "EBPF_BLOCKED", f"PID {pid} / {comm}")

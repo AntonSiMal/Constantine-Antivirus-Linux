@@ -125,3 +125,91 @@ class PhishingShield:
         except Exception:
             pass
         return hijacked
+
+    def scan_active_network_connections(self) -> List[Dict[str, str]]:
+        """Inspecciona proactivamente las conexiones de red salientes activas contra feeds de inteligencia."""
+        alerts = []
+        try:
+            import subprocess
+            cmd = ["ss", "-tupn", "state", "established"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+            for line in res.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    remote_addr = parts[4]
+                    remote_ip = remote_addr.rsplit(":", 1)[0].strip("[]")
+                    hit = self.intel.lookup_url(remote_ip)
+                    if hit:
+                        alerts.append({
+                            "type": "Conexión a Host Malicioso",
+                            "target": remote_ip,
+                            "threat": f"{hit.get('source')} ({hit.get('threat_type')})",
+                            "status": "Interceptado"
+                        })
+        except Exception:
+            pass
+        return alerts
+
+    def scan_user_shortcuts_and_bookmarks(self) -> List[Dict[str, str]]:
+        """Escanea proactivamente archivos de escritorio (.desktop) en busca de enlaces fraudulentos."""
+        detected = []
+        search_dirs = [
+            os.path.expanduser("~/Escritorio"),
+            os.path.expanduser("~/Desktop"),
+            os.path.expanduser("~/.local/share/applications")
+        ]
+        for sdir in search_dirs:
+            if not os.path.exists(sdir):
+                continue
+            for root, dirs, files in os.walk(sdir):
+                for f in files:
+                    if f.endswith(".desktop") or f.endswith(".url"):
+                        fpath = os.path.join(root, f)
+                        try:
+                            with open(fpath, "r", errors="ignore") as fl:
+                                content = fl.read()
+                                urls = [w for w in content.split() if w.startswith(("http://", "https://"))]
+                                for u in urls:
+                                    res = self.analyze_url(u)
+                                    if res.is_phishing:
+                                        detected.append({
+                                            "file": fpath,
+                                            "url": u,
+                                            "brand": res.matched_brand or "Desconocida",
+                                            "score": res.risk_score
+                                        })
+                        except Exception:
+                            pass
+        return detected
+
+    def run_proactive_audit(self) -> Dict:
+        """Ejecuta una auditoría proactiva completa de phishing en el sistema."""
+        hosts_hijacks = self.audit_hosts_file()
+        conn_alerts = self.scan_active_network_connections()
+        shortcuts_phish = self.scan_user_shortcuts_and_bookmarks()
+        total_threats = len(hosts_hijacks) + len(conn_alerts) + len(shortcuts_phish)
+        return {
+            "total_threats": total_threats,
+            "hosts_hijacks": hosts_hijacks,
+            "conn_alerts": conn_alerts,
+            "shortcuts_phish": shortcuts_phish
+        }
+
+    def start_proactive_monitoring(self, notifier=None, audit_logger=None):
+        """Inicia el hilo centinela proactivo de phishing en segundo plano."""
+        import threading, time
+        def loop():
+            while True:
+                try:
+                    time.sleep(15.0)
+                    res = self.run_proactive_audit()
+                    if res["total_threats"] > 0 and notifier:
+                        notifier.send(
+                            title="🎣 Alerta Proactiva Anti-Phishing",
+                            body=f"Se detectaron {res['total_threats']} anomalía(s) de phishing o secuestro DNS en el sistema.",
+                            urgency="critical",
+                            icon="security-high"
+                        )
+                except Exception:
+                    pass
+        threading.Thread(target=loop, daemon=True).start()
