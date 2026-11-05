@@ -1,10 +1,6 @@
 """
-Constantine Antivirus - Root Import Wrapper for Wazuh (wazuh.py)
-Permite 'import wazuh' directamente cuando Constantine está en PYTHONPATH.
+Fachada nativa de integración con Wazuh para Constantine Antivirus.
 """
-from core.engine.wazuh import *
-import core.engine.wazuh as _mod
-import sys
+from core.engine.wazuh_detector import WazuhDetector, WazuhRule
 
-if "wazuh" not in sys.modules:
-    sys.modules["wazuh"] = _mod
+__all__ = ["WazuhDetector", "WazuhRule"]

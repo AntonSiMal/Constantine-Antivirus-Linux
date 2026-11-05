@@ -1,10 +1,6 @@
 """
-Constantine Antivirus - Root Import Wrapper for Falco (falco.py)
-Permite 'import falco' directamente cuando Constantine está en PYTHONPATH.
+Fachada nativa de integración con Falco para Constantine Antivirus.
 """
-from core.engine.falco import *
-import core.engine.falco as _mod
-import sys
+from core.engine.falco_monitor import FalcoMonitor, FalcoRule, FalcoAlert
 
-if "falco" not in sys.modules:
-    sys.modules["falco"] = _mod
+__all__ = ["FalcoMonitor", "FalcoRule", "FalcoAlert"]

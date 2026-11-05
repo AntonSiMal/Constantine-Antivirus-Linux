@@ -1,10 +1,6 @@
 """
-Constantine Antivirus - Root Import Wrapper for Sigma (sigma.py)
-Permite 'import sigma' directamente cuando Constantine está en PYTHONPATH.
+Fachada nativa de integración con Sigma para Constantine Antivirus.
 """
-from core.engine.sigma_engine import *
-import core.engine.sigma_engine as _mod
-import sys
+from core.engine.sigma_engine import SigmaEngine, SigmaRule, SigmaMatch
 
-if "sigma" not in sys.modules:
-    sys.modules["sigma"] = _mod
+__all__ = ["SigmaEngine", "SigmaRule", "SigmaMatch"]

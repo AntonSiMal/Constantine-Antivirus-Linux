@@ -1,10 +1,6 @@
 """
-Constantine Antivirus - Root Import Wrapper for Tetragon (tetragon.py)
-Permite 'import tetragon' directamente cuando Constantine está en PYTHONPATH.
+Fachada nativa de integración con Tetragon para Constantine Antivirus.
 """
-from core.engine.tetragon import *
-import core.engine.tetragon as _mod
-import sys
+from core.engine.tetragon_monitor import TetragonMonitor
 
-if "tetragon" not in sys.modules:
-    sys.modules["tetragon"] = _mod
+__all__ = ["TetragonMonitor"]

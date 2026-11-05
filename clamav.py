@@ -1,10 +1,6 @@
 """
-Constantine Antivirus - Root Import Wrapper for ClamAV (clamav.py)
-Permite 'import clamav' directamente cuando /opt/constantine está en PYTHONPATH.
+Fachada pública de integración con ClamAV para Constantine Antivirus.
 """
-from core.engine.clamav import *
-import core.engine.clamav as _mod
-import sys
+from core.engine.clamav_manager import ClamAVManager, ClamdBridgeClient
 
-if "clamav" not in sys.modules:
-    sys.modules["clamav"] = _mod
+__all__ = ["ClamAVManager", "ClamdBridgeClient"]

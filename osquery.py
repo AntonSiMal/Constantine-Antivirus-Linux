@@ -1,10 +1,6 @@
 """
-Constantine Antivirus - Root Import Wrapper for osquery (osquery.py)
-Permite 'import osquery' directamente cuando Constantine está en PYTHONPATH.
+Fachada nativa de integración con osquery para Constantine Antivirus.
 """
-from core.engine.osquery import *
-import core.engine.osquery as _mod
-import sys
+from core.engine.osquery_diagnostics import OSQueryDiagnostics
 
-if "osquery" not in sys.modules:
-    sys.modules["osquery"] = _mod
+__all__ = ["OSQueryDiagnostics"]

@@ -1,12 +1,11 @@
 """
-Constantine Antivirus - Root Import Wrapper for YARA-X (yara_x.py)
-Permite 'import yara_x' directamente cuando /opt/constantine está en PYTHONPATH.
+Fachada nativa de integración con YARA-X para Constantine Antivirus.
 """
-from core.engine.yara_x import *
-import core.engine.yara_x as _mod
-import sys
+from core.engine.yarax_engine import YaraXEngine, YaraXRuleMatch
 
-if "yara_x" not in sys.modules:
-    sys.modules["yara_x"] = _mod
-if "yarax" not in sys.modules:
-    sys.modules["yarax"] = _mod
+def compile(source: str):
+    """Fachada de compilación de reglas para compatibilidad directa."""
+    engine = YaraXEngine()
+    return engine
+
+__all__ = ["YaraXEngine", "YaraXRuleMatch", "compile"]

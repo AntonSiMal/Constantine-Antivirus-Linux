@@ -1,10 +1,7 @@
 """
-Constantine Antivirus - Root Import Wrapper for MISP (misp.py)
-Permite 'import misp' directamente cuando Constantine está en PYTHONPATH.
+Fachada nativa de integración con MISP para Constantine Antivirus.
 """
-from core.engine.misp import *
-import core.engine.misp as _mod
-import sys
+from core.engine.misp_feed_manager import MISPFeedManager
+from core.engine.threat_intel import ThreatIntelligence
 
-if "misp" not in sys.modules:
-    sys.modules["misp"] = _mod
+__all__ = ["MISPFeedManager", "ThreatIntelligence"]
