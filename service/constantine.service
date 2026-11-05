@@ -1,112 +1,95 @@
 [Unit]
-Description=Constantine Antivirus - Active Kernel Defense Service
-Documentation=https://github.com/AntonSiMal/Constantine-Antivirus-Linux https://www.freedesktop.org/software/systemd/man/systemd.exec.html
+Description=Constantine Antivirus & Security Observability Daemon
+Documentation=https://github.com/AntonSiMal/Constantine-Antivirus-Linux
 After=network.target local-fs.target
+Wants=network.target
 
 [Service]
 Type=simple
+ExecStart=/usr/bin/python3 /opt/constantine/daemon.py --service
+Restart=always
+RestartSec=5s
+
+# 1. Identidad del proceso y aislamiento de privilegios
 User=root
 Group=root
-WorkingDirectory=/opt/constantine
-ExecStart=/usr/bin/python3 /opt/constantine/daemon.py --mode=all-mounts --fail-policy=secure --enable-firewall
-Restart=on-failure
-RestartSec=5s
-RestartPreventExitStatus=2
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
-# =========================================================================
-# AISLAMIENTO Y HARDENING DEL SERVICIO SYSTEMD (Principio de Mínimo Privilegio)
-# Basado en la documentación oficial de seguridad de systemd y systemd-analyze
-# =========================================================================
-
-# 1. Prevención estricta de escalada de privilegios y suplantación de bits SUID
-# Impide que el proceso y sus descendientes obtengan nuevos privilegios mediante execve().
+# 2. NoNewPrivileges: Impide que el servicio y sus hijos ganen nuevos privilegios vía setuid/setgid
 NoNewPrivileges=true
 
-# 2. Protección Estricta del Sistema de Archivos Base
-# Monta toda la jerarquía de archivos (/usr, /boot, /etc) en modo de solo lectura estricto.
+# 3. Aislamiento del Sistema de Archivos
+# Protege /usr, /boot y /etc contra escritura no autorizada
 ProtectSystem=strict
 
 # Protege los directorios de usuario (/home, /root, /run/user) en modo solo lectura de base.
+# Se garantiza que ningún componente del servicio pueda escribir arbitrariamente en /home.
 ProtectHome=read-only
 
-# Directorios de escritura explícitamente delimitados requeridos para operación del antivirus y cuarentena:
-# - Infraestructura interna: /var/lib/constantine (Baúl y señuelos), /var/log/constantine (Logs), /run/constantine (IPC), /etc/constantine (Claves)
-# - Vectores de ataque supervisados para desinfección y traslado seguro de muestras a cuarentena: /home, /tmp, /var/tmp, /dev/shm, /media, /mnt
-ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine /home /tmp /var/tmp /dev/shm -/media -/mnt
+# Directorios de escritura estrictamente delimitados a la infraestructura interna del servicio:
+# - Infraestructura interna: /var/lib/constantine (Baúl y metadatos), /var/log/constantine (Logs), /run/constantine (Socket IPC), /etc/constantine (Claves)
+# - Se EXCLUYE expresamente /home para impedir que el demonio o componentes potencialmente
+#   comprometidos dispongan de permisos de escritura arbitrarios sobre archivos personales.
+# - ProtectHome=read-only permanece inalterado y efectivo sobre toda la jerarquía de usuarios.
+ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine
 
 # Directorios del programa protegidos en modo solo lectura
 ReadOnlyPaths=/opt/constantine /usr /etc /boot
 
-# Gestión estandarizada de directorios efímeros y persistentes gestionados por systemd
-RuntimeDirectory=constantine
-RuntimeDirectoryMode=0755
-StateDirectory=constantine
-StateDirectoryMode=0700
-LogsDirectory=constantine
-LogsDirectoryMode=0750
-ConfigurationDirectory=constantine
-ConfigurationDirectoryMode=0750
-
-# Máscara de creación de archivos restrictiva por defecto (0750 directorios / 0640 archivos)
-UMask=0027
-
-# 3. Aislamiento de Espacio de Nombres, Hostname y Reloj
-# Crea un espacio de nombres privado /tmp y /var/tmp aislado de otros servicios del sistema
+# 4. Sandboxing y Protección de Kernel
 PrivateTmp=true
-ProtectHostname=true
-ProtectClock=true
-
-# 4. Protección de Memoria del Kernel, Módulos y Control Groups
 ProtectKernelTunables=true
 ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
-KeyringMode=private
-
-# Restricción de planificación en tiempo real y bloqueo de cambio de personalidad
+ProtectHostname=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
-RestrictNamespaces=true
+
+# 5. Restricción de Familias de Direcciones y Dispositivos
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-
-# Compatibilidad con compilación de sondas eBPF y JIT en memoria (W^X gestionado en código)
-MemoryDenyWriteExecute=false
-
-# 5. Restricción Estricta de Dispositivos de Hardware (DevicePolicy)
-# Deniega el acceso a dispositivos físicos no declarados explícitamente
 DevicePolicy=closed
 DeviceAllow=/dev/null rw
 DeviceAllow=/dev/zero rw
-DeviceAllow=/dev/urandom r
+DeviceAllow=/dev/full rw
 DeviceAllow=/dev/random r
+DeviceAllow=/dev/urandom r
 DeviceAllow=/dev/net/tun rw
 DeviceAllow=char-video4linux r
 DeviceAllow=char-alsa r
 DeviceAllow=block-* r
 
-# 6. Restricción Estricta de Capacidades Linux (Capability Bounding Set)
+# 6. Restricción Estricta de Capacidades Linux (Capability Bounding Set & AmbientCapabilities)
 # Solo conserva las capacidades estrictamente requeridas por el motor de kernel, eBPF y red:
 # - CAP_SYS_ADMIN: Requerido por fanotify (FAN_CLASS_CONTENT) y attach de sondas eBPF
-# - CAP_NET_ADMIN / CAP_NET_RAW: Requerido para aislamiento de red y corte de sockets
-# - CAP_KILL: Requerido para contención inmediata SIGKILL de ransomware y reverse shells
-# - CAP_DAC_OVERRIDE / CAP_DAC_READ_SEARCH: Inspección forense y traslado seguro al baúl
+# - CAP_NET_ADMIN: Requerido para aislamiento de red y corte de sockets mediante nftables/ss
+# - CAP_KILL: Requerido para contención inmediata SIGKILL de ransomware y procesos hostiles
+# - CAP_DAC_READ_SEARCH: Inspección forense y lectura de muestras (SIN CAP_DAC_OVERRIDE)
 # - CAP_BPF / CAP_PERFMON: Sondas eBPF de kernel y buffers de rendimiento
 # - CAP_SYS_PTRACE: Inspección de mapas de memoria (/proc/<pid>/maps)
 # - CAP_SYS_RESOURCE: Ajuste de límites de memoria bloqueada en kernel para mapas eBPF
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE
-AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE
+# ELIMINADAS EXPRESAMENTE:
+# - CAP_DAC_OVERRIDE: Impide que el servicio eluda los permisos de escritura del sistema de archivos
+# - CAP_NET_RAW: Impide la creación arbitraria de sockets raw
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE
 
 # 7. Filtrado Restrictivo de Llamadas al Sistema (SystemCallFilter)
 # Bloquea grupos de llamadas al sistema innecesarias o peligrosas y restringe arquitectura
-SystemCallFilter=@system-service @file-system @network-io @process @basic-io @signal bpf ptrace fanotify_init fanotify_mark
-SystemCallErrorNumber=EPERM
+SystemCallFilter=@system-service
+SystemCallFilter=~@obsolete @privileged @reboot @swap
 SystemCallArchitectures=native
 
-# 8. Descriptores y Límites Operativos
+# 8. Directorios de Estado y Ejecución
+StateDirectory=constantine
+RuntimeDirectory=constantine
+LogsDirectory=constantine
+ConfigurationDirectory=constantine
+
+# Límites de Recursos para el Servicio
 LimitNOFILE=65536
+LimitMEMLOCK=infinity
+MemoryMax=1G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target

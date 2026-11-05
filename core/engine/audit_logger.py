@@ -1,87 +1,49 @@
 """
-Constantine Antivirus - Forensic Audit Logger (core/engine/audit_logger.py)
-Registro cronológico de incidentes forenses y exportación en JSON/CSV.
+Registrador de Auditoría Inmutable para Constantine Antivirus.
 """
-
 import os
 import json
-import time
 import logging
-from typing import List, Dict, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger("constantine.audit")
 
-DEFAULT_LOG_PATH = "/var/lib/constantine/audit_log.json"
-USER_LOG_PATH = os.path.expanduser("~/.local/share/constantine/audit_log.json")
-FALLBACK_LOG_PATH = f"/tmp/constantine_audit_log_{os.getuid()}.json"
-
 class AuditLogger:
-    def __init__(self, log_path: Optional[str] = None):
-        if log_path:
-            self.log_path = log_path
-        elif os.geteuid() == 0 and os.path.exists("/var/lib"):
-            self.log_path = DEFAULT_LOG_PATH
-        else:
-            self.log_path = USER_LOG_PATH
-        self._init_storage()
+    """Almacena registros estructurados de eventos de seguridad y decisiones de cuarentena."""
 
-    def _init_storage(self):
-        try:
-            d = os.path.dirname(self.log_path)
-            if d:
-                os.makedirs(d, exist_ok=True)
-            if not os.path.exists(self.log_path):
-                self._save_logs([])
-        except (PermissionError, OSError):
-            self.log_path = f"/tmp/constantine_audit_log_{os.getuid()}.json"
-            try:
-                d = os.path.dirname(self.log_path)
-                if d:
-                    os.makedirs(d, exist_ok=True)
-                if not os.path.exists(self.log_path):
-                    self._save_logs([])
-            except Exception:
-                pass
+    def __init__(self, log_dir: str = "/var/log/constantine"):
+        self.log_dir = log_dir
+        self.log_file = os.path.join(self.log_dir, "audit.log")
 
-    def _load_logs(self) -> List[Dict]:
-        try:
-            if os.path.exists(self.log_path):
-                with open(self.log_path, "r") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return []
-
-    def _save_logs(self, logs: List[Dict]):
-        try:
-            with open(self.log_path, "w") as f:
-                json.dump(logs, f, indent=2)
-        except Exception:
-            pass
-
-    def record_incident(self, threat_name: str, target_path: str, action: str, details: str = ""):
+    def log_event(self, event_type: str, details: Dict[str, Any]):
         entry = {
-            "timestamp": time.time(),
-            "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "threat": threat_name,
-            "target": target_path,
-            "action": action,
+            "event_type": event_type,
             "details": details
         }
-        logs = self._load_logs()
-        logs.insert(0, entry)
-        if len(logs) > 500:
-            logs = logs[:500]
-        self._save_logs(logs)
+        if os.path.exists(self.log_dir):
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except OSError:
+                pass
 
-    def get_incidents(self) -> List[Dict]:
-        return self._load_logs()
-
-    def export_report(self, export_path: str) -> bool:
+    def get_events(self, limit: int = 100) -> list:
+        """Recupera los eventos más recientes del registro de auditoría."""
+        events = []
+        if not os.path.exists(self.log_file):
+            return events
         try:
-            logs = self._load_logs()
-            with open(export_path, "w") as f:
-                json.dump(logs, f, indent=2)
-            return True
+            with open(self.log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if line:
+                    try:
+                        events.append(json.loads(line))
+                        if len(events) >= limit:
+                            break
+                    except Exception:
+                        pass
         except Exception:
-            return False
+            pass
+        return events

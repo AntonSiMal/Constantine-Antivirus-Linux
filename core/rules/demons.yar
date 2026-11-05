@@ -1,71 +1,65 @@
-rule Demons_EICAR_Standard_Test {
-    meta:
-        description = "Cadena estándar de prueba antivirus EICAR"
-        threat_level = "Test"
-    strings:
-        $eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
-    condition:
-        $eicar
-}
-
 rule Demons_Reverse_Shell_Netcat {
     meta:
         description = "Detección de shell reversa netcat o ncat"
-        threat_level = "High"
+        author = "Constantine Security Team"
+        severity = "CRITICAL"
     strings:
-        $nc1 = /nc(\.traditional|\.openbsd)?\s+-[e|c]\s+(\/bin\/)?(ba)?sh/ nocase
-        $nc2 = /ncat\s+.*--exec\s+(\/bin\/)?(ba)?sh/ nocase
+        $nc1 = "nc -e" ascii wide nocase
+        $nc2 = "ncat -e" ascii wide nocase
+        $nc3 = "nc -c" ascii wide nocase
+        $nc4 = "/bin/sh" ascii wide
+        $nc5 = "/bin/bash" ascii wide
     condition:
-        any of ($nc*)
+        ($nc1 or $nc2 or $nc3) or ($nc4 and $nc1) or ($nc5 and $nc2) or ($nc4 and "nc ")
 }
 
 rule Demons_Reverse_Shell_DevTcp {
     meta:
         description = "Shell reversa mediante /dev/tcp/"
-        threat_level = "Critical"
+        author = "Constantine Security Team"
+        severity = "CRITICAL"
     strings:
-        $dt1 = "/dev/tcp/" ascii
-        $dt2 = "0>&1" ascii
-        $dt3 = "exec 5<>/dev/tcp/" ascii
+        $devtcp = "/dev/tcp/" ascii wide
+        $bash = "bash -i" ascii wide
+        $sh = "sh -i" ascii wide
     condition:
-        ($dt1 and $dt2) or $dt3
+        $devtcp or ($bash and $devtcp) or ($sh and $devtcp)
 }
 
 rule Demons_Reverse_Shell_Python {
     meta:
         description = "Shell reversa en Python usando pty spawn y socket"
-        threat_level = "High"
+        author = "Constantine Security Team"
+        severity = "CRITICAL"
     strings:
-        $py1 = "import socket" ascii
-        $py2 = "pty.spawn" ascii
-        $py3 = "os.dup2(s.fileno()" ascii
+        $py1 = "pty.spawn" ascii wide
+        $py2 = "socket.socket" ascii wide
+        $py3 = "os.dup2" ascii wide
     condition:
-        ($py1 and $py2) or ($py1 and $py3)
-}
-
-rule Demons_Ransomware_Extensions {
-    meta:
-        description = "Marcadores de extensiones y notas de rescate de ransomware"
-        threat_level = "Critical"
-    strings:
-        $r1 = ".locked" ascii
-        $r2 = ".lockbit" ascii
-        $r3 = ".enc" ascii
-        $r4 = "YOUR FILES ARE ENCRYPTED" nocase
-        $r5 = "DECRYPT_FILES" nocase
-    condition:
-        2 of ($r*)
+        ($py1 and $py2) or ($py2 and $py3)
 }
 
 rule Demons_Cryptominer_Pools {
     meta:
         description = "Minero de criptomonedas no autorizado (XMRig / Stratum)"
-        threat_level = "Medium"
+        author = "Constantine Security Team"
+        severity = "HIGH"
     strings:
-        $m1 = "stratum+tcp://" ascii
-        $m2 = "stratum+ssl://" ascii
-        $m3 = "xmrig" nocase
-        $m4 = "donate.v2.xmrig.com" ascii
+        $s1 = "stratum+tcp://" ascii wide nocase
+        $s2 = "stratum+ssl://" ascii wide nocase
+        $s3 = "xmrig" ascii wide nocase
+        $s4 = "cryptonight" ascii wide nocase
     condition:
-        any of ($m*)
+        1 of ($s*)
+}
+
+rule Demons_EICAR_Standard_Test {
+    meta:
+        description = "Cadena estándar de prueba antivirus EICAR"
+        author = "Constantine Security Team"
+        severity = "INFORMATIONAL"
+    strings:
+        $eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*" ascii
+    condition:
+        $eicar
 }

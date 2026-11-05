@@ -1,0 +1,148 @@
+- title: Suspicious Reverse Shell Execution
+  id: sigma-linux-001
+  status: stable
+  description: Detects command-line execution patterns indicative of reverse shells
+  references:
+    - https://attack.mitre.org/techniques/T1059/004/
+  tags:
+    - attack.execution
+    - attack.t1059.004
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "nc -e"
+        - "ncat -e"
+        - "/dev/tcp/"
+    condition: selection
+  level: high
+
+- title: Persistence via Systemd Service Installation
+  id: sigma-linux-002
+  status: stable
+  description: Detects creation or modification of systemd service files
+  tags:
+    - attack.persistence
+    - attack.t1543.002
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "/etc/systemd/system/"
+        - "/usr/lib/systemd/system/"
+    condition: selection
+  level: high
+
+- title: Suspicious Permission Modification via Chmod
+  id: sigma-linux-003
+  status: stable
+  description: Detects dangerous permission modifications like chmod 777 or +s
+  tags:
+    - attack.defense_evasion
+    - attack.t1222.002
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "chmod 777"
+        - "chmod +s"
+        - "chmod u+s"
+    condition: selection
+  level: medium
+
+- title: Unauthorized SSH Activity or Key Injection
+  id: sigma-linux-004
+  status: stable
+  description: Detects modification of authorized_keys
+  tags:
+    - attack.persistence
+    - attack.t1098.004
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - ".ssh/authorized_keys"
+    condition: selection
+  level: high
+
+- title: Execution from Temporary Directories
+  id: sigma-linux-005
+  status: stable
+  description: Detects process execution originating from /tmp or /var/tmp
+  tags:
+    - attack.execution
+    - attack.t1059
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "/tmp/"
+        - "/var/tmp/"
+        - "/dev/shm/"
+    condition: selection
+  level: medium
+
+- title: Sudoers Tampering Activity
+  id: sigma-linux-006
+  status: stable
+  description: Detects changes to sudoers configuration
+  tags:
+    - attack.privilege_escalation
+    - attack.t1548.003
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "/etc/sudoers"
+        - "visudo"
+    condition: selection
+  level: critical
+
+- title: Suspicious Reconnaissance via Netstat or SS
+  id: sigma-linux-007
+  status: stable
+  description: Detects automated network discovery and socket enumeration
+  tags:
+    - attack.discovery
+    - attack.t1049
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "netstat -tulpn"
+        - "ss -tulpn"
+        - "lsof -i"
+    condition: selection
+  level: low
+
+- title: In-Memory Script Execution via Curl Pipe to Shell
+  id: sigma-linux-008
+  status: stable
+  description: Detects fileless execution via curl or wget piped directly to bash/sh
+  tags:
+    - attack.execution
+    - attack.t1059.004
+  logsource:
+    category: process_creation
+    product: linux
+  detection:
+    selection:
+      CommandLine|contains:
+        - "curl"
+        - "wget"
+    condition: selection
+  level: high
