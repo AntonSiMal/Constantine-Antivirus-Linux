@@ -6,7 +6,7 @@ Canal de comunicación interprocesos (IPC) seguro entre la GUI de usuario no pri
      * Verifica UID, GID y PID del proceso emisor antes de procesar cualquier comando.
      * Rechaza conexiones no autorizadas o de usuarios ajenos sin privilegios.
 2. Formato de Mensajes Estructurado y Serialización JSON con HMAC-SHA256:
-   - Esquema estricto: {"version": "4.1.9", "command": "...", "params": {...}, "token": "..."}.
+   - Esquema estricto: {"version": "4.3.2", "command": "...", "params": {...}, "token": "..."}.
    - Respuestas atómicas: {"status": "OK"|"ERROR", "data": {...}, "error": "..."}.
 3. Separación Estricta de Privilegios (Least Privilege Architecture):
    - La GUI se ejecuta como usuario estándar sin privilegios de root.
@@ -34,12 +34,29 @@ FALLBACK_DAEMON_SOCKET = "/tmp/constantine_daemon.sock"
 SESSION_TOKEN_FILE = "/var/lib/constantine/.ipc_token"
 FALLBACK_TOKEN_FILE = "/tmp/constantine_ipc_token"
 
+def _detect_ipc_version() -> str:
+    for p in [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "VERSION"),
+        "/opt/constantine/VERSION"
+    ]:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    ver = f.read().strip()
+                    if ver:
+                        return ver
+            except Exception:
+                pass
+    return "4.3.2"
+
+IPC_PROTOCOL_VERSION = _detect_ipc_version()
+
 
 class SecureIPCMessage:
     @staticmethod
     def pack(command: str, params: Optional[Dict[str, Any]] = None, token: str = "") -> bytes:
         payload = {
-            "version": "4.1.9",
+            "version": IPC_PROTOCOL_VERSION,
             "timestamp": time.time(),
             "command": command,
             "params": params or {},
@@ -68,6 +85,10 @@ ROLE_PERMISSIONS: Dict[str, Set[IPCRole]] = {
     "GET_SHIELDS_HEALTH": {IPCRole.USER, IPCRole.ADMIN},
     "GET_AUDIT_LOGS": {IPCRole.USER, IPCRole.ADMIN},
     "REQUEST_SCAN": {IPCRole.USER, IPCRole.ADMIN},
+    "TRIGGER_SWEEP": {IPCRole.USER, IPCRole.ADMIN},
+    "UPDATE_CLAMAV_SIGNATURES": {IPCRole.ADMIN},
+    "GET_CLAMAV_STATUS": {IPCRole.USER, IPCRole.ADMIN},
+    "GET_SYSTEMD_SECURITY": {IPCRole.USER, IPCRole.ADMIN},
     "ADD_WHITELIST": {IPCRole.ADMIN},
     "REMOVE_WHITELIST": {IPCRole.ADMIN},
     "TOGGLE_SHIELD": {IPCRole.ADMIN},
@@ -77,6 +98,33 @@ ROLE_PERMISSIONS: Dict[str, Set[IPCRole]] = {
     "ISOLATE_NETWORK": {IPCRole.ADMIN},
     "UNINSTALL": {IPCRole.ADMIN},
 }
+
+
+def validate_ipc_path(path: Any) -> Tuple[bool, str]:
+    """
+    Valida estrictamente que una ruta recibida por IPC sea segura:
+    - Debe ser cadena de texto no vacía.
+    - No debe contener bytes nulos (\x00) ni caracteres de control.
+    - Debe ser una ruta absoluta y normalizada.
+    - Longitud acotada (máx 4096 caracteres).
+    """
+    if not isinstance(path, str) or not path.strip():
+        return False, "Ruta vacía o tipo inválido"
+    if "\x00" in path or "\r" in path or "\n" in path:
+        return False, "Ruta contiene caracteres nulos o de control no permitidos"
+    if len(path) > 4096:
+        return False, "Ruta excede la longitud máxima permitida (4096 caracteres)"
+    norm = os.path.normpath(path)
+    if not os.path.isabs(norm):
+        return False, "Se requiere una ruta absoluta"
+    return True, norm
+
+def validate_ipc_vault_id(vault_id: Any) -> bool:
+    """Valida que un ID de cuarentena sea estrictamente hexadecimal de longitud segura (16-64 chars)."""
+    if not isinstance(vault_id, str):
+        return False
+    import re
+    return bool(re.match(r"^[0-9a-fA-F]{16,64}$", vault_id.strip()))
 
 def is_operation_permitted(command: str, is_admin: bool) -> bool:
     """Verifica si un comando está autorizado para el rol del usuario según la política RBAC."""
@@ -122,8 +170,21 @@ class SecureIPCDaemonServer:
         return token
 
     def start(self, background: bool = True):
-        """Inicializa el socket de dominio Unix con permisos restrictivos 0660 y lanza el bucle de escucha."""
-        if os.path.exists(self.socket_path):
+        """Inicializa el socket de dominio Unix con permisos restrictivos 0660, protección contra symlinks y lanza escucha."""
+        socket_dir = os.path.dirname(self.socket_path)
+        if socket_dir:
+            try:
+                os.makedirs(socket_dir, mode=0o750, exist_ok=True)
+            except Exception:
+                pass
+
+        # Protección estricta contra enlaces simbólicos en la ruta del socket
+        if os.path.islink(self.socket_path):
+            try:
+                os.unlink(self.socket_path)
+            except Exception:
+                pass
+        elif os.path.exists(self.socket_path):
             try:
                 os.remove(self.socket_path)
             except Exception:
@@ -208,6 +269,40 @@ class SecureIPCDaemonServer:
                 conn.sendall(self._pack_response("FORBIDDEN", error=f"Operación '{cmd}' requiere autorización administrativa."))
                 conn.close()
                 return
+
+            # Validación estricta de parámetros y rutas según el comando
+            if cmd == "REQUEST_SCAN":
+                path_param = params.get("path")
+                valid, msg = validate_ipc_path(path_param)
+                if not valid:
+                    conn.sendall(self._pack_response("ERROR", error=f"Parámetro 'path' inválido: {msg}"))
+                    conn.close()
+                    return
+                params["path"] = msg
+
+            elif cmd in ("ADD_WHITELIST", "REMOVE_WHITELIST"):
+                path_param = params.get("path")
+                valid, msg = validate_ipc_path(path_param)
+                if not valid:
+                    conn.sendall(self._pack_response("ERROR", error=f"Parámetro 'path' inválido: {msg}"))
+                    conn.close()
+                    return
+                params["path"] = msg
+
+            elif cmd == "RESTORE_QUARANTINE":
+                vid = params.get("vault_id")
+                if not validate_ipc_vault_id(vid):
+                    conn.sendall(self._pack_response("ERROR", error="Parámetro 'vault_id' inválido o malformado"))
+                    conn.close()
+                    return
+                dest = params.get("destination")
+                if dest:
+                    valid, msg = validate_ipc_path(dest)
+                    if not valid:
+                        conn.sendall(self._pack_response("ERROR", error=f"Parámetro 'destination' inválido: {msg}"))
+                        conn.close()
+                        return
+                    params["destination"] = msg
 
             if self.command_handler:
                 try:

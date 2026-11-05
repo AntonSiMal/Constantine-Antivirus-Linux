@@ -19,6 +19,23 @@ Integración verificable con feeds de Inteligencia de Amenazas y repositorio com
 
 import os
 import re
+
+def _detect_ti_version() -> str:
+    for p in [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "VERSION"),
+        "/opt/constantine/VERSION"
+    ]:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    ver = f.read().strip()
+                    if ver:
+                        return ver
+            except Exception:
+                pass
+    return "4.3.2"
+
+THREAT_INTEL_VERSION = _detect_ti_version()
 import csv
 import json
 import time
@@ -411,7 +428,7 @@ class ThreatIntelligence:
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Constantine-Antivirus-ThreatIntel/4.1.9 (+https://github.com/AntonSiMal/Constantine-Antivirus-Linux)",
+                "User-Agent": f"Constantine-Antivirus-ThreatIntel/{THREAT_INTEL_VERSION} (+https://github.com/AntonSiMal/Constantine-Antivirus-Linux)",
                 "Accept": "*/*"
             }
         )
@@ -686,9 +703,9 @@ class ThreatIntelligence:
 
         # Metadatos reales
         self.set_metadata("last_update_ts", str(int(now)))
-        self.set_metadata("hashes_version", "v4.1.9-ThreatIntel")
-        self.set_metadata("yara_version", "v4.1.9-YaraDemons")
-        self.set_metadata("phish_version", "v4.1.9-PhishDB")
+        self.set_metadata("hashes_version", f"v{THREAT_INTEL_VERSION}-ThreatIntel")
+        self.set_metadata("yara_version", f"v{THREAT_INTEL_VERSION}-YaraDemons")
+        self.set_metadata("phish_version", f"v{THREAT_INTEL_VERSION}-PhishDB")
 
     # =========================================================================
     # METADATOS Y ESTADÍSTICAS REALES (CERO CONTADORES ARTIFICIALES)
@@ -796,12 +813,12 @@ class ThreatIntelligence:
         date_formatted = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(update_ts))
 
         return {
-            "hashes_version": self.get_metadata("hashes_version", "v4.1.9-ThreatIntel"),
+            "hashes_version": self.get_metadata("hashes_version", f"v{THREAT_INTEL_VERSION}-ThreatIntel"),
             "hashes_date": date_formatted,
             "hashes_count": self.count_hashes(),
-            "yara_version": self.get_metadata("yara_version", "v4.1.9-YaraDemons"),
+            "yara_version": self.get_metadata("yara_version", f"v{THREAT_INTEL_VERSION}-YaraDemons"),
             "yara_date": date_formatted,
-            "phish_version": self.get_metadata("phish_version", "v4.1.9-PhishDB"),
+            "phish_version": self.get_metadata("phish_version", f"v{THREAT_INTEL_VERSION}-PhishDB"),
             "phish_date": date_formatted,
             "phish_count": self.count_urls(),
             "active_feeds": list(OFFICIAL_FEEDS.keys()),

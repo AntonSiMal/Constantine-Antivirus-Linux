@@ -44,7 +44,33 @@ if [ "$EUID" -ne 0 ]; then
     die "El instalador de Constantine Antivirus debe ejecutarse como root:\n   sudo ./install.sh"
 fi
 
-echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v4.1.9)${NC}"
+# 0. Normalización del directorio de trabajo y resolución canónica de rutas
+# Protege contra errores de 'getcwd' cuando el instalador se ejecuta desde un directorio eliminado/reemplazado
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT_SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    [[ $SCRIPT_SOURCE != /* ]] && SCRIPT_SOURCE="$DIR/$SCRIPT_SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# Moverse inmediatamente al directorio real de los fuentes para sanear getcwd()
+if [ -d "$SCRIPT_DIR" ]; then
+    cd "$SCRIPT_DIR" 2>/dev/null || cd /tmp
+else
+    cd /tmp
+fi
+
+# Resolución dinámica de versión canónica para trazabilidad total
+if [ -f "$SCRIPT_DIR/VERSION" ]; then
+    VERSION=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")
+elif [ -f "/opt/constantine/VERSION" ]; then
+    VERSION=$(tr -d '[:space:]' < "/opt/constantine/VERSION")
+else
+    VERSION="4.3.2"
+fi
+
+echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v${VERSION})${NC}"
 echo "======================================================================"
 
 # --- 2. Verificación y Actualización de Repositorios APT ---
@@ -75,6 +101,9 @@ OPTIONAL_PACKAGES=(
     gir1.2-appindicator3-0.1
     gir1.2-ayatanaappindicator3-0.1
     gufw
+    clamav
+    clamav-daemon
+    clamav-freshclam
 )
 
 step "2. Instalando dependencias críticas del sistema..."
@@ -125,18 +154,26 @@ fi
 
 # --- 4. Instalación de Librerías Python de Requisitos ---
 step "5. Verificando librerías de Python requeridas..."
-if [ -f "requirements.txt" ]; then
-    # Intentar con pip con bandera break-system-packages para distribuciones modernas (PEP 668)
-    if ! pip3 install -r requirements.txt --break-system-packages >/dev/null 2>&1; then
-        if ! pip3 install -r requirements.txt >/dev/null 2>&1; then
+REQ_FILE="$SCRIPT_DIR/requirements.txt"
+[ ! -f "$REQ_FILE" ] && [ -f "requirements.txt" ] && REQ_FILE="requirements.txt"
+
+if [ -f "$REQ_FILE" ]; then
+    if ! pip3 install -r "$REQ_FILE" --break-system-packages >/dev/null 2>&1; then
+        if ! pip3 install -r "$REQ_FILE" >/dev/null 2>&1; then
             log_warn "Instalación de requirements.txt vía pip devolvió advertencias. Validando paquetes críticos instalados por APT..."
         fi
     fi
 fi
 
-# Validación estricta de las librerías críticas en Python
-if ! python3 -c "import gi, cryptography" >/dev/null 2>&1; then
-    die "Las librerías críticas de Python (PyGObject / cryptography) no se encuentran accesibles para python3."
+# Validación estricta de las librerías críticas en Python con aislamiento de cwd para evitar fallos de getcwd
+if ! (cd "$SCRIPT_DIR" 2>/dev/null || cd /tmp; python3 -c "import gi, cryptography") >/dev/null 2>&1; then
+    log_warn "Las librerías críticas no cargaron en el primer intento. Reinstalando paquetes APT correspondientes..."
+    apt-get install -y -qq python3-gi python3-gi-cairo python3-cryptography >/dev/null 2>&1 || true
+    if ! (cd /tmp; python3 -c "import gi, cryptography") >/dev/null 2>&1; then
+        ERROR_DETAIL=$(cd /tmp; python3 -c "import gi, cryptography" 2>&1 || true)
+        die "Las librerías críticas de Python (PyGObject / cryptography) no se encuentran accesibles para python3.
+Detalle del error: $ERROR_DETAIL"
+    fi
 fi
 log_success "Entorno de ejecución de Python validado correctamente."
 
@@ -283,14 +320,47 @@ ln -sf /usr/local/bin/constantine-gui /usr/local/bin/constantine 2>/dev/null || 
 ln -sf /usr/local/bin/constantine-gui /usr/bin/constantine 2>/dev/null || true
 log_success "Comandos 'constantine-gui' y 'constantine' disponibles en la terminal."
 
-# --- 11. Activación de Servicio Systemd y Política Polkit ---
-step "12. Configurando servicio de kernel de inicio temprano (systemd)..."
+# Configuración e integración del motor antivirus ClamAV (clamd y freshclam)
+step "12a. Configurando e integrando motor antivirus ClamAV (clamd & freshclam)..."
+if dpkg -s clamav-daemon >/dev/null 2>&1 || command -v clamd >/dev/null 2>&1; then
+    mkdir -p /run/clamav /var/log/clamav /var/lib/clamav
+    chown -R clamav:clamav /run/clamav /var/log/clamav /var/lib/clamav 2>/dev/null || true
+    chmod 755 /run/clamav 2>/dev/null || true
+    systemctl enable clamav-daemon 2>/dev/null || true
+    systemctl enable clamav-freshclam 2>/dev/null || true
+    systemctl start clamav-daemon 2>/dev/null || true
+    log_success "Motor antivirus ClamAV (clamd & freshclam) integrado y habilitado."
+else
+    log_info "ClamAV no detectado; Constantine operará en modo híbrido nativo con YARA y heurística 5 capas."
+fi
+
+# --- 12. Activación de Servicio Systemd, Polkit, D-Bus y Separación de Privilegios ---
+step "12b. Configurando usuario de servicio no privilegiado, Systemd, Polkit y D-Bus..."
+# Crear usuario de servicio para aislamiento del motor de escaneo (Least Privilege)
+id -u constantine-scanner &>/dev/null || useradd -r -s /usr/sbin/nologin -d /nonexistent constantine-scanner 2>/dev/null || true
+
+# Configurar helper administrativo restringido
+if [ -f "/opt/constantine/service/constantine-helper" ]; then
+    chmod 755 /opt/constantine/service/constantine-helper
+fi
+
+# Configurar directiva y reglas de Polkit
 if [ -f "/opt/constantine/service/org.constantine.antivirus.policy" ]; then
     mkdir -p /usr/share/polkit-1/actions
     cp /opt/constantine/service/org.constantine.antivirus.policy /usr/share/polkit-1/actions/ || log_warn "No se pudo copiar la directiva Polkit."
 fi
+if [ -f "/opt/constantine/service/90-constantine.rules" ] && [ -d "/etc/polkit-1/rules.d" ]; then
+    cp /opt/constantine/service/90-constantine.rules /etc/polkit-1/rules.d/ 2>/dev/null || true
+fi
+
+# Configurar política de seguridad D-Bus de sistema
+if [ -f "/opt/constantine/service/org.constantine.antivirus.conf" ] && [ -d "/etc/dbus-1/system.d" ]; then
+    cp /opt/constantine/service/org.constantine.antivirus.conf /etc/dbus-1/system.d/ 2>/dev/null || true
+fi
 
 if [ -f "/opt/constantine/service/constantine.service" ]; then
+    # Limpiar enlaces simbólicos heredados que generaban bucles de ordenación en systemd
+    rm -f /etc/systemd/system/sysinit.target.wants/constantine.service 2>/dev/null || true
     cp /opt/constantine/service/constantine.service /etc/systemd/system/ || die "No se pudo instalar /etc/systemd/system/constantine.service"
     
     # Comprobar si el entorno soporta systemd activo (evitar fallos en contenedores chroot/docker)
@@ -326,8 +396,19 @@ if [ ! -x "/usr/local/bin/constantine-gui" ]; then
     CHECK_FAILURES=$((CHECK_FAILURES + 1))
 fi
 
-if ! python3 -c "import gi, cryptography; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk" >/dev/null 2>&1; then
+if ! (cd /tmp && python3 -c "import gi, cryptography; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk") >/dev/null 2>&1; then
     log_error "Error al cargar librerías GTK 3 y Cryptography desde Python."
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+fi
+
+if [ -f "/opt/constantine/VERSION" ]; then
+    INSTALLED_VER=$(tr -d '[:space:]' < "/opt/constantine/VERSION")
+    if [ "$INSTALLED_VER" != "$VERSION" ]; then
+        log_error "Inconsistencia de versión detectada: instalador=$VERSION vs instalado=$INSTALLED_VER"
+        CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    fi
+else
+    log_error "El archivo /opt/constantine/VERSION no se instaló correctamente."
     CHECK_FAILURES=$((CHECK_FAILURES + 1))
 fi
 
@@ -337,7 +418,7 @@ fi
 
 echo ""
 echo -e "${BOLD}${GREEN}======================================================================"
-echo -e "🎉 ¡INSTALACIÓN COMPLETADA Y VERIFICADA CON ÉXITO (v4.1.9)!"
+echo -e "🎉 ¡INSTALACIÓN COMPLETADA Y VERIFICADA CON ÉXITO (v${VERSION})!"
 echo -e "======================================================================${NC}"
 echo -e "• ${BOLD}Protección en Kernel:${NC} Demonio del sistema configurado y en ejecución."
 echo -e "• ${BOLD}Seguridad Zero-Breach:${NC} Autenticación nativa delegada a PAM/sudo."

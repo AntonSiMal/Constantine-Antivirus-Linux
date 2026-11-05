@@ -189,9 +189,15 @@ class DesktopNotifier:
             except Exception:
                 # Intentar vía su como alternativa
                 try:
-                    clean_body = body.replace('"', '\\"').replace('$', '\\$')
-                    clean_title = title.replace('"', '\\"')
-                    shell_cmd = f'DISPLAY={sess["display"]} DBUS_SESSION_BUS_ADDRESS="unix:path={sess["bus_path"]}" notify-send --app-name="{self.app_name}" --urgency={urgency} --icon={icon} "{clean_title}" "{clean_body}"'
-                    subprocess.run(["su", "-", username, "-c", shell_cmd], timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    safe_su_cmd = [
+                        "su", "-", username, "-s", "/bin/sh", "-c",
+                        'exec notify-send "$@"', "--",
+                        f"--app-name={self.app_name}",
+                        f"--urgency={urgency}",
+                        f"--icon={icon}",
+                        title,
+                        body
+                    ]
+                    subprocess.run(safe_su_cmd, env=env, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False)
                 except Exception:
                     pass

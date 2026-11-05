@@ -18,7 +18,22 @@ from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("constantine.updater")
 
-CURRENT_VERSION = "4.1.9"
+def _detect_current_version() -> str:
+    for p in [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "VERSION"),
+        "/opt/constantine/VERSION"
+    ]:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    ver = f.read().strip()
+                    if ver:
+                        return ver
+            except Exception:
+                pass
+    return "4.3.2"
+
+CURRENT_VERSION = _detect_current_version()
 GITHUB_REPO = "AntonSiMal/Constantine-Antivirus-Linux"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"

@@ -5,7 +5,7 @@
 [![CLA: Protected](https://img.shields.io/badge/CLA-Protected-purple.svg)](CONTRIBUTING.md)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu%20%7C%20Linux%20Mint-orange.svg)](https://www.debian.org)
 [![Kernel: fanotify & eBPF](https://img.shields.io/badge/Kernel-fanotify%20%26%20eBPF-red.svg)](https://ebpf.io)
-[![Version: v4.1.9](https://img.shields.io/badge/Version-v4.1.9-blue.svg)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
+[![Version: v4.2.2](https://img.shields.io/badge/Version-v4.3.2-blue.svg)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
 [![GitHub Repository](https://img.shields.io/badge/GitHub-AntonSiMal%2FConstantine--Antivirus--Linux-blue?logo=github)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
 
 **Constantine Antivirus** es una suite de seguridad activa, preventiva y no intrusiva (*Zero-Nag*) para distribuciones Linux basadas en Debian (Ubuntu, Linux Mint, Debian) compatible con entornos gráficos **X11** y **Wayland**.
@@ -125,7 +125,7 @@ Constantine-Antivirus-Linux/
 ├── install.sh                    # Instalador desatendido del sistema
 ├── uninstall.sh                  # Desinstalador seguro con soporte de argumentos (-y)
 ├── requirements.txt              # Dependencias de Python
-├── VERSION                       # Versión actual del sistema (4.1.9)
+├── VERSION                       # Versión actual del sistema (4.3.2)
 ├── CONTRIBUTING.md               # Guía de contribución y acuerdo CLA
 ├── LICENSE-COMMERCIAL.md         # Términos de licenciamiento comercial y corporativo
 ├── LICENSE                       # Licencia GNU General Public License v3.0

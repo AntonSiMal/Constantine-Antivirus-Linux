@@ -3,14 +3,109 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>Constantine Antivirus</vendor>
-  <action id="org.constantine.antivirus.manage">
-    <description>Administrar el motor activo de Constantine</description>
-    <message>Se requiere autenticación para modificar Constantine Antivirus</message>
+  <vendor_url>https://github.com/AntonSiMal/Constantine-Antivirus-Linux</vendor_url>
+
+  <!-- 1. Desbloqueo de administración general en interfaz gráfica -->
+  <action id="org.constantine.antivirus.admin.unlock">
+    <description>Desbloquear panel de administración de Constantine Antivirus</description>
+    <message>Se requiere autenticación de administrador para autorizar operaciones sensibles en Constantine</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/systemctl</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">admin-unlock</annotate>
+  </action>
+
+  <!-- 2. Gestión del servicio activo de protección (reinicio controlado) -->
+  <action id="org.constantine.antivirus.service.manage">
+    <description>Gestionar el servicio de Constantine Antivirus</description>
+    <message>Se requiere autenticación para reiniciar o modificar el servicio de Constantine</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">service-manage</annotate>
+  </action>
+
+  <!-- 3. Gestión del baúl de cuarentena (restauración y vaciado) -->
+  <action id="org.constantine.antivirus.quarantine.manage">
+    <description>Gestionar el baúl de cuarentena de Constantine</description>
+    <message>Se requiere autenticación administrativa para restaurar o purgar elementos del baúl</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">quarantine-manage</annotate>
+  </action>
+
+  <!-- 4. Modificación de lista blanca y exclusiones -->
+  <action id="org.constantine.antivirus.whitelist.manage">
+    <description>Modificar exclusiones de seguridad de Constantine</description>
+    <message>Se requiere autenticación para añadir o eliminar exclusiones del sistema</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">whitelist-manage</annotate>
+  </action>
+
+  <!-- 5. Conmutación de escudos de protección activa -->
+  <action id="org.constantine.antivirus.shield.toggle">
+    <description>Activar o desactivar escudos de protección</description>
+    <message>Se requiere autenticación de administrador para modificar el estado de los escudos en tiempo real</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">shield-toggle</annotate>
+  </action>
+
+  <!-- 6. Aplicación de perfiles de DNS y configuración de red -->
+  <action id="org.constantine.antivirus.dns.apply">
+    <description>Aplicar configuración de red y DNS seguro</description>
+    <message>Se requiere autenticación para modificar la configuración de resolvedor DNS del sistema</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">dns-apply</annotate>
+  </action>
+
+  <!-- 7. Aplicación de actualizaciones de software -->
+  <action id="org.constantine.antivirus.update.apply">
+    <description>Aplicar actualizaciones del motor Constantine</description>
+    <message>Se requiere autenticación para instalar actualizaciones de Constantine</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">update-apply</annotate>
+  </action>
+
+  <!-- 8. Desinstalación del software -->
+  <action id="org.constantine.antivirus.uninstall">
+    <description>Desinstalar Constantine Antivirus</description>
+    <message>Se requiere autorización de administrador para desinstalar la protección de Constantine</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/constantine/service/constantine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">uninstall</annotate>
   </action>
 </policyconfig>

@@ -24,6 +24,20 @@ ROOT_DIR = os.path.dirname(CURRENT_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+def _load_app_version() -> str:
+    for p in [os.path.join(ROOT_DIR, "VERSION"), "/opt/constantine/VERSION", os.path.join(CURRENT_DIR, "..", "VERSION")]:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as vf:
+                    ver = vf.read().strip()
+                    if ver:
+                        return ver
+            except Exception:
+                pass
+    return "4.3.2"
+
+APP_VERSION = _load_app_version()
+
 from core.auth.auth_manager import AuthManager
 from core.engine.vault import QuarantineVault
 from core.engine.phishing import PhishingShield
@@ -262,7 +276,7 @@ class ConstantineGUI:
         self.lbl_title = Gtk.Label()
         self.lbl_title.set_markup("<span font='13' weight='heavy' foreground='#ffffff'>Constantine</span>")
         lbl_badge = Gtk.Label()
-        lbl_badge.set_markup("<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v3.6 </span>")
+        lbl_badge.set_markup(f"<span font='7.5' weight='bold' background='#0071e3' foreground='#ffffff'> EDR v{APP_VERSION} </span>")
         title_box.pack_start(self.lbl_title, False, False, 0)
         title_box.pack_start(lbl_badge, False, False, 0)
         self.headerbar.pack_start(title_box)
@@ -698,7 +712,7 @@ class ConstantineGUI:
         score += 2 if vpn_connected else 0 # Proton VPN (+2)
 
         dialog = Gtk.Dialog(
-            title="Diagnóstico de Salud de Seguridad EDR (v3.6)" if is_es else "EDR Security Posture Diagnosis (v3.6)",
+            title=f"Diagnóstico de Salud de Seguridad EDR (v{APP_VERSION})" if is_es else f"EDR Security Posture Diagnosis (v{APP_VERSION})",
             parent=self.window,
             flags=Gtk.DialogFlags.MODAL
         )
@@ -1076,12 +1090,32 @@ class ConstantineGUI:
         p_box.pack_start(self.lbl_p_count, False, False, 0)
         db_grid.attach(p_box, 2, 0, 1, 1)
 
+        # Columna 4: Motor Antivirus ClamAV (Cisco Talos)
+        c_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl_c_title = Gtk.Label(); lbl_c_title.set_markup("<b>🛡️ Motor ClamAV (Cisco)</b>"); lbl_c_title.set_xalign(0)
+        clam_status = "Activo (clamd)" if sig_info.get("clamd_available") else "Híbrido (En espera)"
+        self.lbl_c_ver = Gtk.Label(label=f"Estado: {clam_status}"); self.lbl_c_ver.set_xalign(0)
+        self.lbl_c_ver.get_style_context().add_class("subtitle-text")
+        self.lbl_c_date = Gtk.Label(label="Firmas: FreshClam CDIFF"); self.lbl_c_date.set_xalign(0)
+        self.lbl_c_date.get_style_context().add_class("subtitle-text")
+        self.lbl_c_count = Gtk.Label(label="Protección: On-Access coordinada"); self.lbl_c_count.set_xalign(0)
+        self.lbl_c_count.get_style_context().add_class("subtitle-text")
+        c_box.pack_start(lbl_c_title, False, False, 0)
+        c_box.pack_start(self.lbl_c_ver, False, False, 0)
+        c_box.pack_start(self.lbl_c_date, False, False, 0)
+        c_box.pack_start(self.lbl_c_count, False, False, 0)
+        db_grid.attach(c_box, 3, 0, 1, 1)
+
         db_vbox.pack_start(db_grid, True, True, 0)
 
         db_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         btn_refresh_sigs = Gtk.Button(label="🔄 Comprobar y Actualizar Bases de Virus y Firmas")
         btn_refresh_sigs.connect("clicked", self._on_refresh_signatures_clicked)
         db_btn_box.pack_start(btn_refresh_sigs, False, False, 0)
+
+        btn_clam_update = Gtk.Button(label="🛡️ Actualizar Firmas ClamAV (freshclam)")
+        btn_clam_update.connect("clicked", self._on_clamav_update_clicked)
+        db_btn_box.pack_start(btn_clam_update, False, False, 0)
         db_vbox.pack_start(db_btn_box, False, False, 4)
 
         db_card.add(db_vbox)
@@ -1275,6 +1309,28 @@ class ConstantineGUI:
                 pass
 
         return True
+
+    def _on_clamav_update_clicked(self, button):
+        def _bg_update():
+            res = self.scanner.clamav_manager.update_signatures(timeout=45) if hasattr(self.scanner, "clamav_manager") else {"success": False, "message": "Gestor ClamAV no disponible"}
+            def _ui_done():
+                sig = self.scanner.get_signatures_info()
+                clam_status = "Activo (clamd)" if sig.get("clamd_available") else "Híbrido (En espera)"
+                if hasattr(self, "lbl_c_ver"):
+                    self.lbl_c_ver.set_text(f"Estado: {clam_status}")
+                msg = res.get("message", "Actualización finalizada")
+                dialog = Gtk.MessageDialog(
+                    transient_for=self.window,
+                    flags=0,
+                    message_type=Gtk.MessageType.INFO if res.get("success") else Gtk.MessageType.WARNING,
+                    buttons=Gtk.ButtonsType.OK,
+                    text="Actualización de Firmas ClamAV"
+                )
+                dialog.format_secondary_text(msg)
+                dialog.run()
+                dialog.destroy()
+            GLib.idle_add(_ui_done)
+        threading.Thread(target=_bg_update, daemon=True).start()
 
     def _on_refresh_signatures_clicked(self, button):
         button.set_sensitive(False)
@@ -2507,6 +2563,16 @@ class ConstantineGUI:
 
     def _check_auth_required(self) -> bool:
         if not self.is_unlocked:
+            # 1. Intentar autorización nativa mediante Polkit (agente de escritorio del sistema operativo)
+            if hasattr(self.auth_mgr, "is_polkit_available") and self.auth_mgr.is_polkit_available():
+                ok, tok = self.auth_mgr.request_polkit_authorization("org.constantine.antivirus.admin.unlock")
+                if ok and tok:
+                    self.session_token = tok
+                    self.is_unlocked = True
+                    self._update_lock_ui()
+                    return True
+
+            # 2. Respaldo a diálogo gráfico PAM/sudo si Polkit no está disponible
             self._show_login_dialog()
             return self.is_unlocked
         return True

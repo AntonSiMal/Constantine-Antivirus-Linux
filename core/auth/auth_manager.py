@@ -14,7 +14,7 @@ import time
 import secrets
 import subprocess
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 logger = logging.getLogger("constantine.auth")
 
@@ -48,6 +48,63 @@ class AuthManager:
         except Exception as e:
             logger.debug("Error comprobando grupos para %s: %s", username, e)
             return False
+
+    def is_polkit_available(self) -> bool:
+        """Determina si las herramientas de Polkit (pkcheck / pkexec) están presentes en el sistema."""
+        import shutil
+        return shutil.which("pkcheck") is not None
+
+    def request_polkit_authorization(self, action_id: str = "org.constantine.antivirus.admin.unlock", timeout: int = 35) -> Tuple[bool, Optional[str]]:
+        """
+        Solicita autorización interactiva a través de Polkit (https://github.com/polkit-org/polkit).
+        Invoca el agente de autenticación nativo del escritorio (GNOME/KDE/Polkit) para que el
+        usuario ingrese su contraseña en el diálogo seguro del sistema operativo,
+        evitando que la GUI de Constantine maneje contraseñas en memoria de proceso.
+        """
+        if not self.is_polkit_available():
+            return False, None
+
+        cmd = [
+            "pkcheck",
+            f"--action-id={action_id}",
+            f"--process={os.getpid()}",
+            "--allow-user-interaction"
+        ]
+
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            if res.returncode == 0:
+                token = secrets.token_hex(24)
+                self.active_sessions[token] = time.time() + self.session_timeout
+                logger.info("Autorización Polkit exitosa para acción: %s", action_id)
+                return True, token
+            else:
+                logger.warning("Autorización Polkit denegada o cancelada: %s", res.stderr.decode("utf-8", errors="ignore"))
+                return False, None
+        except Exception as e:
+            logger.debug("Error invocando pkcheck para %s: %s", action_id, e)
+            return False, None
+
+    def execute_privileged_helper(self, action: str, *args, timeout: int = 40) -> Tuple[bool, str]:
+        """
+        Ejecuta una acción administrativa privilegiada a través de pkexec y constantine-helper.
+        """
+        helper_candidates = [
+            "/opt/constantine/service/constantine-helper",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "service", "constantine-helper")
+        ]
+        helper_path = next((p for p in helper_candidates if os.path.exists(p)), None)
+        if not helper_path:
+            return False, "constantine-helper no encontrado"
+
+        cmd = ["pkexec", helper_path, action] + list(args)
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            out = res.stdout.decode("utf-8", errors="ignore").strip()
+            err = res.stderr.decode("utf-8", errors="ignore").strip()
+            return res.returncode == 0, out or err
+        except Exception as e:
+            return False, str(e)
 
     def authenticate_system(self, password: str, username: Optional[str] = None) -> Optional[str]:
         """

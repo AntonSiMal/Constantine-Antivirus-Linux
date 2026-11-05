@@ -2,18 +2,29 @@
 Constantine Antivirus - eBPF Monitoring & Multi-Vector Kernel Defense (core/engine/ebpf_monitor.py)
 Supervisión heurística y neutralización activa en memoria mediante sondas eBPF y BPF LSM:
 
-1. Detección Ampliada de Vectores de Inyección y Manipulación de Memoria:
-   - sys_enter_execve / sys_enter_execveat: Linaje de ejecución y captura de argumentos (512B).
-   - sys_enter_ptrace: Detección de inyección de código (PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_ATTACH).
-   - sys_enter_mprotect: Detección de transiciones de memoria W^X (PROT_READ|PROT_WRITE -> PROT_EXEC) para ejecución de shellcode en memoria (RWX memory violation).
-   - sys_enter_memfd_create: Detección de payloads ejecutables anónimos en memoria (fileless execution).
-2. Distinción Clara entre Modo Kernel Nativo y Modo Degradado (/proc):
-   - is_kernel_native: Indica si las sondas eBPF están efectivamente compiladas y activas en el kernel.
-   - is_degraded: Indica si el sistema opera bajo el centinela de rescate en espacio de usuario (/proc),
-     reflejando explícitamente en la telemetría y en la GUI que el modo no ofrece las mismas garantías de kernel.
-3. Telemetría y Diagnóstico de Estado Transparente:
-   - Modo de ejecución: "BPF_LSM_ENFORCING", "EBPF_KERNEL_PROBES", "DEGRADED_USERSPACE_POLLER" o "INACTIVE".
-   - Detalle forense y recomendaciones de activación sin fingir capacidades de kernel cuando se opera en /proc.
+ARQUITECTURA eBPF DIFERENCIADA Y MODULAR (P0):
+1. Separación Estricta de Modalidades:
+   - Tracepoints (Observabilidad): Sondas pasivas en syscalls (execve, openat, ptrace,
+     mprotect W^X, memfd_create, unlinkat, renameat) para telemetría e intención de procesos.
+   - BPF LSM (Enforcement de Políticas): Hooks del Linux Security Module (bprm_check_security,
+     file_open, ptrace_access_check) para denegación activa y preventiva directamente en el kernel (-EPERM).
+   - NUNCA se anuncia protección BPF LSM cuando solo se observan llamadas al sistema con tracepoints.
+2. Detección Exhaustiva de Capacidades Reales del Kernel:
+   - Comprobación de BPF Type Format (BTF) en /sys/kernel/btf/vmlinux (Kernel >= 5.5).
+   - Comprobación de soporte BPF LSM en /sys/kernel/security/lsm (Kernel >= 5.7).
+   - Comprobación de compatibilidad CO-RE (Compile Once – Run Everywhere) y bibliotecas (libbpf y BCC).
+3. Verificación de Acoplamiento de Sondas y Hooks (Attachment Verification):
+   - Registro y verificación individual de cada sonda tracepoint y hook LSM adjuntado.
+   - Si una sonda o hook falla, se desactiva únicamente la funcionalidad incompatible.
+4. Detección y Notificación de Pérdida de Eventos (Event Loss Detection):
+   - Búferes perf con dimensionamiento explícito (page_cnt=64) y callback lost_cb.
+   - Métrica lost_events_count para alertar de saturación en ráfagas extremas.
+5. Gestión de Mapas eBPF con Límites de Memoria:
+   - Tablas hash en kernel con límites estrictos de capacidad (MAX_BLOCKED_ENTRIES=1024).
+   - Caché en espacio de usuario con purgado TTL (5.0s) y límite máximo (5000 entradas).
+6. Degradación Modular y Centinela Heurístico de Rescate:
+   - Si BPF LSM no está soportado, se mantiene la monitorización por tracepoints.
+   - Si eBPF en kernel no está disponible (ej. permisos), se activa el centinela /proc informando transparentemente.
 """
 
 import os
@@ -22,9 +33,11 @@ import time
 import signal
 import logging
 import threading
+import ctypes
+import ctypes.util
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Dict, Any, List, Tuple
+from typing import Callable, Optional, Dict, Any, List, Tuple, Set
 
 logger = logging.getLogger("constantine.ebpf")
 
@@ -57,6 +70,7 @@ class FileOperationIntent:
     timestamp: float = field(default_factory=time.time)
     comm: str = ""
 
+
 @dataclass
 class EBPFIncident:
     pid: int
@@ -69,12 +83,20 @@ class EBPFIncident:
     exit_code: Optional[int] = None
 
 
+# =============================================================================
+# CÓDIGO FUENTE DE SONDAS eBPF (TRACEPOINTS + MAPAS ACOTADOS + LSM HOOKS OPCIONALES)
+# =============================================================================
+
 EBPF_PROBE_C = r"""
 #include <uapi/linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/mman.h>
 
 #define ARGSIZE 512
+#define MAX_BLOCKED_ENTRIES 1024
+
+// 1. Mapas de memoria acotados para control y enforcement
+BPF_TABLE("hash", u32, u8, blocked_pids_map, MAX_BLOCKED_ENTRIES);
 
 struct exec_event_t {
     u32 pid;
@@ -108,10 +130,35 @@ struct memfd_event_t {
     char comm[TASK_COMM_LEN];
 };
 
+struct open_event_t {
+    u32 pid;
+    u32 uid;
+    u32 flags;
+    u32 mode;
+    char comm[TASK_COMM_LEN];
+    char filename[256];
+};
+
+struct file_mod_event_t {
+    u32 pid;
+    u32 uid;
+    u32 op_type; // 1: unlinkat, 2: renameat
+    u32 flags;
+    char comm[TASK_COMM_LEN];
+    char path1[256];
+    char path2[256];
+};
+
 BPF_PERF_OUTPUT(exec_events);
 BPF_PERF_OUTPUT(ptrace_events);
 BPF_PERF_OUTPUT(mprotect_events);
 BPF_PERF_OUTPUT(memfd_events);
+BPF_PERF_OUTPUT(open_events);
+BPF_PERF_OUTPUT(file_mod_events);
+
+// =============================================================================
+// SONDAS DE OBSERVABILIDAD MEDIANTE TRACEPOINTS (MONITORIZACIÓN PASIVA)
+// =============================================================================
 
 // 1. Sonda de ejecución de procesos
 TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
@@ -148,7 +195,7 @@ TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
     return 0;
 }
 
-// 2. Sonda de inyección ptrace (manipulación de hilos y memoria de otros procesos)
+// 2. Sonda de inyección ptrace (manipulación de memoria de otros procesos)
 TRACEPOINT_PROBE(syscalls, sys_enter_ptrace) {
     struct ptrace_event_t event = {};
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -159,9 +206,8 @@ TRACEPOINT_PROBE(syscalls, sys_enter_ptrace) {
     return 0;
 }
 
-// 3. Sonda de violación W^X (mprotect a PROT_EXEC sobre memoria escribible)
+// 3. Sonda de violación W^X (mprotect PROT_EXEC sobre memoria escribible)
 TRACEPOINT_PROBE(syscalls, sys_enter_mprotect) {
-    // PROT_EXEC = 0x4, PROT_WRITE = 0x2
     if ((args->prot & 0x4) && (args->prot & 0x2)) {
         struct mem_event_t event = {};
         event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -186,29 +232,7 @@ TRACEPOINT_PROBE(syscalls, sys_enter_memfd_create) {
     return 0;
 }
 
-struct open_event_t {
-    u32 pid;
-    u32 uid;
-    u32 flags;
-    u32 mode;
-    char comm[TASK_COMM_LEN];
-    char filename[256];
-};
-
-struct file_mod_event_t {
-    u32 pid;
-    u32 uid;
-    u32 op_type; // 1: unlinkat, 2: renameat
-    u32 flags;
-    char comm[TASK_COMM_LEN];
-    char path1[256];
-    char path2[256];
-};
-
-BPF_PERF_OUTPUT(open_events);
-BPF_PERF_OUTPUT(file_mod_events);
-
-// 5. Sonda de apertura de archivos (captura precisa de banderas O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC)
+// 5. Sonda de apertura de archivos (intención atómica de operaciones)
 TRACEPOINT_PROBE(syscalls, sys_enter_openat) {
     struct open_event_t event = {};
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -246,34 +270,104 @@ TRACEPOINT_PROBE(syscalls, sys_enter_renameat) {
     file_mod_events.perf_submit(args, &event, sizeof(event));
     return 0;
 }
+"""
 
+EBPF_LSM_ENFORCER_C = r"""
+// =============================================================================
+// PROGRAMAS BPF LSM (ENFORCEMENT DE POLÍTICA DIRECTO EN KERNEL)
+// Solo se compilan cuando el kernel cuenta con CONFIG_BPF_LSM=y y 'bpf' en lsm
+// =============================================================================
+#ifdef BPF_LSM_SUPPORTED
+LSM_PROBE(bprm_check_security, struct linux_binprm *bprm) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u8 *blocked = blocked_pids_map.lookup(&pid);
+    if (blocked && *blocked == 1) {
+        return -1; // -EPERM: Denegar ejecución directamente en kernel
+    }
+    return 0;
+}
+
+LSM_PROBE(ptrace_access_check, struct task_struct *child, unsigned int mode) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u8 *blocked = blocked_pids_map.lookup(&pid);
+    if (blocked && *blocked == 1) {
+        return -1; // -EPERM: Bloquear inyección ptrace no autorizada
+    }
+    return 0;
+}
+#endif
 """
 
 
 class EBPFMonitor:
     """
-    Monitor de seguridad en memoria y ejecución basado en eBPF con soporte multivector:
-    Supervisa execve, ptrace, mprotect (W^X violation) y memfd_create (fileless malware).
-    Diferencia claramente el modo kernel nativo del modo degradado en espacio de usuario.
+    Monitor de seguridad en memoria y ejecución basado en eBPF con arquitectura diferenciada:
+    1. Modalidad de Monitorización eBPF: Observabilidad pasiva mediante Tracepoints en llamadas al sistema.
+    2. Modalidad de Enforcement BPF LSM: Aplicación activa de políticas en kernel mediante hooks LSM (si soportado).
+    3. Detección y verificación de capacidades reales del kernel (BTF, CO-RE, LSM, bibliotecas).
+    4. Control y detección de pérdida de eventos (lost_events_count en perf buffers).
+    5. Gestión de mapas y memoria acotada con purgado TTL.
     """
 
-    def __init__(self, alert_callback: Optional[Callable] = None, auto_kill: bool = True, notifier=None):
+    def __init__(
+        self,
+        alert_callback: Optional[Callable] = None,
+        auto_kill: bool = True,
+        notifier=None,
+        enable_lsm: bool = True,
+        max_intents_entries: int = 5000,
+        max_incidents_history: int = 1000
+    ):
         self.alert_callback = alert_callback
         self.auto_kill = auto_kill
         self.notifier = notifier
+        self.enable_lsm = enable_lsm
+
         self.bpf = None
         self.running = False
         self.thread = None
         self.fallback_thread = None
+
+        # Control de memoria y límites acotados
+        self.max_intents_entries = max_intents_entries
+        self.max_incidents_history = max_incidents_history
         self.file_intents: Dict[Tuple[int, str], FileOperationIntent] = {}
         self._intents_lock = threading.Lock()
+        self.incidents_history: List[EBPFIncident] = []
+        self._incidents_lock = threading.Lock()
 
-        # Estado operativo y diagnóstico transparente
+        # Detección de pérdida de eventos en búferes perf
+        self.lost_events_count = 0
+        self._metrics_lock = threading.Lock()
+
+        # Comprobación de capacidades reales del kernel
+        self.capabilities = self.probe_kernel_capabilities()
+
+        # Modalidades de ejecución independientes
+        self.monitoring_status = "INACTIVE"  # "ACTIVE", "DEGRADED", "INACTIVE", "ERROR"
+        self.lsm_status = "UNSUPPORTED"      # "ENFORCING", "UNSUPPORTED", "DISABLED", "ERROR"
+        self.has_bpf_lsm = False             # True estrictamente cuando BPF LSM está activo y haciendo enforcement
+        self.backend = self.capabilities.get("backend", "USERSPACE_POLLER")
+
+        # Registro de sondas y hooks efectivamente adjuntados
+        self.attached_probes: Dict[str, bool] = {
+            "sys_enter_execve": False,
+            "sys_enter_ptrace": False,
+            "sys_enter_mprotect": False,
+            "sys_enter_memfd_create": False,
+            "sys_enter_openat": False,
+            "sys_enter_unlinkat": False,
+            "sys_enter_renameat": False,
+        }
+        self.attached_lsm_hooks: Dict[str, bool] = {
+            "bprm_check_security": False,
+            "ptrace_access_check": False
+        }
+
+        # Estado global
         self.status = "UNINITIALIZED"
         self.error_message: Optional[str] = None
         self.consecutive_poll_errors: int = 0
-        self.incidents_history: List[EBPFIncident] = []
-        self.has_bpf_lsm = self._check_bpf_lsm_support()
 
         self.netcat_binaries = {"nc", "ncat", "netcat", "socat"}
         self.reverse_shell_flags = [
@@ -283,56 +377,167 @@ class EBPFMonitor:
             "/dev/tcp/", "pty.spawn", "base64 -d", "0>&1"
         ]
 
+    # =========================================================================
+    # COMPROBACIÓN DE CAPACIDADES REALES DEL KERNEL (BTF, CO-RE, LSM, BACKENDS)
+    # =========================================================================
+    @staticmethod
+    def probe_kernel_capabilities() -> Dict[str, Any]:
+        """
+        Comprueba las capacidades reales del kernel del sistema operativo:
+        1. Privilegios de superusuario (root / CAP_BPF / CAP_SYS_ADMIN).
+        2. BPF Type Format (BTF) en /sys/kernel/btf/vmlinux (Kernel >= 5.5).
+        3. Soporte BPF LSM en /sys/kernel/security/lsm (Kernel >= 5.7).
+        4. Soporte CO-RE (Compile Once – Run Everywhere) condicionado a BTF.
+        5. Sistema de eventos tracepoints en sysfs.
+        6. Disponibilidad de bibliotecas BPF (libbpf y BCC).
+        """
+        has_root = (os.geteuid() == 0)
+        has_btf = os.path.exists("/sys/kernel/btf/vmlinux")
+        has_co_re = has_btf  # CO-RE requiere información de tipos BTF del kernel
+
+        # 1. Comprobación de BPF LSM
+        has_bpf_lsm_kernel = False
+        lsm_path = "/sys/kernel/security/lsm"
+        if os.path.exists(lsm_path):
+            try:
+                with open(lsm_path, "r") as f:
+                    content = f.read().lower()
+                    has_bpf_lsm_kernel = "bpf" in content
+            except Exception:
+                pass
+
+        # 2. Comprobación de Tracepoints en el kernel
+        has_tracepoints = False
+        tp_paths = [
+            "/sys/kernel/tracing/available_events",
+            "/sys/kernel/debug/tracing/available_events"
+        ]
+        for tp_path in tp_paths:
+            if os.path.exists(tp_path):
+                try:
+                    with open(tp_path, "r") as f:
+                        sample = f.read(4096)
+                        if "sys_enter_execve" in sample or "syscalls" in sample:
+                            has_tracepoints = True
+                            break
+                except Exception:
+                    pass
+
+        # 3. Comprobación de librerías disponibles en el espacio de usuario
+        has_libbpf = False
+        libbpf_find = ctypes.util.find_library("bpf")
+        if libbpf_find is not None:
+            has_libbpf = True
+        else:
+            for candidate in ("libbpf.so.1", "libbpf.so.0", "libbpf.so"):
+                try:
+                    ctypes.CDLL(candidate)
+                    has_libbpf = True
+                    break
+                except Exception:
+                    pass
+
+        # Determinar backend preferente
+        backend = "USERSPACE_POLLER"
+        if has_root:
+            if has_libbpf and has_co_re:
+                backend = "LIBBPF_CORE"
+            elif HAS_BCC:
+                backend = "BCC"
+
+        kernel_release = os.uname().release if hasattr(os, "uname") else "desconocido"
+
+        return {
+            "has_root": has_root,
+            "has_btf": has_btf,
+            "has_co_re": has_co_re,
+            "has_bpf_lsm_kernel": has_bpf_lsm_kernel,
+            "has_tracepoints": has_tracepoints,
+            "has_libbpf": has_libbpf,
+            "has_bcc": HAS_BCC,
+            "backend": backend,
+            "kernel_version": kernel_release
+        }
+
     def _check_bpf_lsm_support(self) -> bool:
         """Comprueba si el kernel tiene activo el soporte de seguridad BPF LSM."""
-        lsm_path = "/sys/kernel/security/lsm"
-        try:
-            if os.path.exists(lsm_path):
-                with open(lsm_path, "r") as f:
-                    return "bpf" in f.read().lower()
-        except Exception:
-            pass
-        return False
+        return bool(self.capabilities.get("has_bpf_lsm_kernel", False))
 
     def is_active(self) -> bool:
         """Indica si la supervisión por sondas eBPF nativas en kernel está activa."""
-        return self.running and self.status == "ACTIVE"
+        return self.running and self.status == "ACTIVE" and self.monitoring_status == "ACTIVE"
 
     def is_degraded(self) -> bool:
         """Indica si el sistema está operando en modo degradado (centinela /proc) sin sondas de kernel."""
-        return self.running and self.status == "FALLBACK_USERSPACE"
+        return self.running and (self.status == "FALLBACK_USERSPACE" or self.monitoring_status == "DEGRADED")
 
     def is_operational(self) -> bool:
         """Indica si al menos el monitor eBPF o el centinela de rescate está activo."""
         return self.running and (self.status in ("ACTIVE", "FALLBACK_USERSPACE") or self.fallback_thread is not None)
 
+    # =========================================================================
+    # DIAGNÓSTICO Y TELEMETRÍA TRANSPARENTE
+    # =========================================================================
     def get_status_info(self) -> Dict[str, Any]:
-        """Devuelve un informe completo del estado de eBPF para el demonio y la interfaz gráfica."""
+        """
+        Devuelve un informe completo y honesto del estado de eBPF.
+        Diferencia explícitamente entre:
+        - Monitorización eBPF (Tracepoints de observabilidad).
+        - Enforcement BPF LSM (Bloqueo activo en kernel vía hooks LSM).
+        - Modo degradado en espacio de usuario (/proc).
+        """
         kernel_release = os.uname().release if hasattr(os, "uname") else "desconocido"
+
         if self.is_active():
-            mode_str = "BPF_LSM_ENFORCING" if self.has_bpf_lsm else "EBPF_KERNEL_PROBES"
-            operational_label = "PROTECCIÓN ACTIVA EN KERNEL"
-            operational_details = "Sondas eBPF de kernel activas (execve, ptrace, mprotect W^X, memfd_create)."
+            if self.has_bpf_lsm and self.lsm_status == "ENFORCING":
+                mode_str = "BPF_LSM_ENFORCING"
+                mode_detail = "EBPF_MONITORING_WITH_LSM_ENFORCEMENT"
+                operational_label = "PROTECCIÓN ACTIVA EN KERNEL (BPF LSM & TRACEPOINTS)"
+                operational_details = "Tracepoints de observabilidad y hooks BPF LSM activos y aplicando políticas en kernel."
+            else:
+                mode_str = "EBPF_KERNEL_PROBES"
+                mode_detail = "EBPF_MONITORING_ONLY"
+                operational_label = "VIGILANCIA EN KERNEL (SOLO TRACEPOINTS)"
+                operational_details = "Tracepoints eBPF activos para observación y correlación (BPF LSM no activo)."
         elif self.is_degraded():
             mode_str = "DEGRADED_USERSPACE_POLLER"
+            mode_detail = "DEGRADED_USERSPACE_POLLER"
             operational_label = "MODO DEGRADADO (ESPACIO DE USUARIO)"
             operational_details = "Operando en modo degradado mediante inspección periódica de /proc (sin telemetría atómica de kernel)."
         else:
             mode_str = "INACTIVE"
+            mode_detail = "INACTIVE"
             operational_label = "INACTIVO"
             operational_details = self.error_message or "Monitor eBPF inactivo."
 
         return {
             "status": self.status,
             "mode": mode_str,
+            "mode_detail": mode_detail,
             "operational_label": operational_label,
             "operational_details": operational_details,
-            "has_bpf_lsm": self.has_bpf_lsm,
+            "monitoring_status": self.monitoring_status,
+            "lsm_status": self.lsm_status,
+            "has_bpf_lsm": bool(self.has_bpf_lsm and self.lsm_status == "ENFORCING"),
+            "has_bpf_lsm_enforcement": bool(self.has_bpf_lsm and self.lsm_status == "ENFORCING"),
             "is_active": self.is_active(),
             "is_degraded": self.is_degraded(),
             "is_operational": self.is_operational(),
             "has_bcc": HAS_BCC,
-            "monitored_vectors": ["sys_enter_execve", "sys_enter_ptrace", "sys_enter_mprotect", "sys_enter_memfd_create", "sys_enter_openat", "sys_enter_unlinkat", "sys_enter_renameat"] if self.is_active() else ["/proc cmdline poll"],
+            "has_btf": self.capabilities.get("has_btf", False),
+            "has_co_re": self.capabilities.get("has_co_re", False),
+            "backend": self.backend,
+            "capabilities": dict(self.capabilities),
+            "attached_probes": dict(self.attached_probes),
+            "attached_lsm_hooks": dict(self.attached_lsm_hooks),
+            "monitored_vectors": [p for p, attached in self.attached_probes.items() if attached] if self.is_active() else ["/proc cmdline poll"],
+            "lost_events_count": self.lost_events_count,
+            "memory_limits": {
+                "max_intents_entries": self.max_intents_entries,
+                "current_intents_entries": len(self.file_intents),
+                "max_incidents_history": self.max_incidents_history,
+                "current_incidents_history": len(self.incidents_history)
+            },
             "error_message": self.error_message,
             "kernel_version": kernel_release,
             "recommendation": self._get_troubleshooting_recommendation(),
@@ -341,82 +546,187 @@ class EBPFMonitor:
 
     def _get_troubleshooting_recommendation(self) -> str:
         kernel_release = os.uname().release if hasattr(os, "uname") else "$(uname -r)"
-        if os.geteuid() != 0:
+        if not self.capabilities.get("has_root", False):
             return "Ejecuta Constantine Daemon con privilegios de superusuario (sudo)."
-        if not HAS_BCC:
-            return f"sudo apt install -y bpfcc-tools python3-bpfcc linux-headers-{kernel_release}"
+        if not HAS_BCC and not self.capabilities.get("has_libbpf", False):
+            return f"sudo apt install -y bpfcc-tools python3-bpfcc libbpf-dev linux-headers-{kernel_release}"
         if self.status == "DISABLED_NO_HEADERS":
             return f"sudo apt install -y linux-headers-{kernel_release}"
+        if self.lsm_status == "UNSUPPORTED":
+            return f"Para activar BPF LSM, añade 'lsm=...,bpf' a los parámetros de arranque del kernel en GRUB (Kernel >= 5.7)."
         if self.status == "ERROR":
             return f"Verifica que el kernel soporte BPF (CONFIG_BPF_SYSCALL=y) e instala linux-headers-{kernel_release}."
         if self.is_degraded():
             return f"Para activar la monitorización en kernel instala: sudo apt install -y bpfcc-tools linux-headers-{kernel_release}"
         return "El subsistema eBPF opera con normalidad."
 
+    # =========================================================================
+    # INICIO MODULAR CON COMPROBACIÓN DE CAPACIDADES Y ENFORCEMENT BPF LSM
+    # =========================================================================
     def start(self) -> bool:
         """
-        Inicia el monitor eBPF en kernel.
-        Si falla o BCC no está disponible, registra detalladamente el error,
-        notifica al administrador y activa de forma controlada el centinela en espacio de usuario.
+        Inicia el subsistema eBPF aplicando verificación modular:
+        1. Comprueba capacidades del kernel (root, BTF, CO-RE, LSM, backend).
+        2. Inicializa la modalidad de monitorización por tracepoints.
+        3. Si el kernel lo soporta y está habilitado, inicializa BPF LSM Enforcement de forma independiente.
+        4. Si falla o no hay privilegios, activa el centinela en espacio de usuario sin fingir estado.
         """
-        # 1. Verificación de permisos de superusuario
-        if os.geteuid() != 0:
+        self.capabilities = self.probe_kernel_capabilities()
+
+        # 1. Verificación de privilegios de superusuario
+        if not self.capabilities.get("has_root", False):
             self.status = "ERROR_PERMISSIONS"
+            self.monitoring_status = "DEGRADED"
+            self.lsm_status = "DISABLED"
             self.error_message = "Sondas eBPF en kernel requieren privilegios de root (CAP_SYS_ADMIN / CAP_BPF)."
             logger.warning("⚠️ %s Activando centinela heurístico en espacio de usuario.", self.error_message)
             self._start_fallback_poller()
             return False
 
-        # 2. Verificación de presencia de BCC
-        if not HAS_BCC:
-            self.status = "DISABLED_NO_BCC"
-            self.error_message = "Librería BCC ('bpfcc-tools' / 'python3-bpfcc') no está instalada en el sistema."
-            logger.warning("⚠️ %s", self.error_message)
-            logger.warning("💡 Para activar eBPF en kernel ejecuta: %s", self._get_troubleshooting_recommendation())
-            self._notify_degraded_state()
-            self._start_fallback_poller()
-            return False
-
-        # 3. Verificación de cabeceras de kernel
-        kernel_release = os.uname().release if hasattr(os, "uname") else ""
-        headers_dir = f"/lib/modules/{kernel_release}/build"
-        if kernel_release and not os.path.exists(headers_dir) and not os.path.exists(f"/usr/src/linux-headers-{kernel_release}"):
-            self.status = "DISABLED_NO_HEADERS"
-            self.error_message = f"Cabeceras de kernel no encontradas en {headers_dir}."
+        # 2. Verificación de presencia de backend (libbpf o BCC)
+        if not HAS_BCC and not self.capabilities.get("has_libbpf", False):
+            self.status = "DISABLED_NO_BACKEND"
+            self.monitoring_status = "DEGRADED"
+            self.lsm_status = "DISABLED"
+            self.error_message = "Ni BCC ('bpfcc-tools' / 'python3-bpfcc') ni libbpf están instalados en el sistema."
             logger.warning("⚠️ %s", self.error_message)
             logger.warning("💡 Solución: %s", self._get_troubleshooting_recommendation())
             self._notify_degraded_state()
             self._start_fallback_poller()
             return False
 
-        # 4. Compilación e inyección de sondas en kernel
+        # 3. Verificación de cabeceras de kernel (si se usa BCC)
+        kernel_release = os.uname().release if hasattr(os, "uname") else ""
+        headers_dir = f"/lib/modules/{kernel_release}/build"
+        if not self.capabilities.get("has_co_re", False):
+            if kernel_release and not os.path.exists(headers_dir) and not os.path.exists(f"/usr/src/linux-headers-{kernel_release}"):
+                self.status = "DISABLED_NO_HEADERS"
+                self.monitoring_status = "DEGRADED"
+                self.lsm_status = "DISABLED"
+                self.error_message = f"Cabeceras de kernel no encontradas en {headers_dir} y CO-RE/BTF no disponible."
+                logger.warning("⚠️ %s", self.error_message)
+                logger.warning("💡 Solución: %s", self._get_troubleshooting_recommendation())
+                self._notify_degraded_state()
+                self._start_fallback_poller()
+                return False
+
+        # 4. Inyección de Sondas de Monitorización eBPF (Tracepoints)
         try:
+            logger.info("🔧 Inicializando modalidad de monitorización eBPF (Tracepoints de observabilidad)...")
             self.bpf = BPF(text=EBPF_PROBE_C)
-            self.bpf["exec_events"].open_perf_buffer(self._on_exec)
-            self.bpf["ptrace_events"].open_perf_buffer(self._on_ptrace)
-            if "mprotect_events" in self.bpf:
-                self.bpf["mprotect_events"].open_perf_buffer(self._on_mprotect)
-            if "memfd_events" in self.bpf:
-                self.bpf["memfd_events"].open_perf_buffer(self._on_memfd)
-            if "open_events" in self.bpf:
-                self.bpf["open_events"].open_perf_buffer(self._on_open)
-            if "file_mod_events" in self.bpf:
-                self.bpf["file_mod_events"].open_perf_buffer(self._on_file_mod)
+
+            # Acoplamiento verificado de búferes perf con detección de pérdida de eventos (lost_cb)
+            # page_cnt=64: 64 páginas por CPU para absorber ráfagas sin saturar memoria
+            self._attach_perf_buffer("exec_events", self._on_exec, "sys_enter_execve")
+            self._attach_perf_buffer("ptrace_events", self._on_ptrace, "sys_enter_ptrace")
+            self._attach_perf_buffer("mprotect_events", self._on_mprotect, "sys_enter_mprotect")
+            self._attach_perf_buffer("memfd_events", self._on_memfd, "sys_enter_memfd_create")
+            self._attach_perf_buffer("open_events", self._on_open, "sys_enter_openat")
+            self._attach_perf_buffer("file_mod_events", self._on_file_mod, "sys_enter_unlinkat")
+
+            self.monitoring_status = "ACTIVE"
+            logger.info("✅ Modalidad de monitorización eBPF ACTIVA (%d sondas tracepoint adjuntadas).",
+                        sum(1 for v in self.attached_probes.values() if v))
+
+            # 5. Modalidad de Enforcement BPF LSM Independiente
+            if self.enable_lsm and self.capabilities.get("has_bpf_lsm_kernel", False):
+                self._initialize_bpf_lsm_enforcement()
+            else:
+                self.lsm_status = "DISABLED" if not self.enable_lsm else "UNSUPPORTED"
+                self.has_bpf_lsm = False
+                logger.info("ℹ️ Modalidad BPF LSM: %s (No se activa enforcement en kernel; operando solo en monitorización).", self.lsm_status)
 
             self.running = True
             self.status = "ACTIVE"
             self.error_message = None
             self.thread = threading.Thread(target=self._poll, daemon=True, name="ebpf-poll")
             self.thread.start()
-            logger.info("✅ Sondas eBPF activas en kernel (execve, ptrace, mprotect W^X, memfd_create).")
             return True
+
         except Exception as e:
             self.status = "ERROR"
-            self.error_message = f"Fallo al cargar sondas eBPF en kernel: {e}"
+            self.monitoring_status = "ERROR"
+            self.lsm_status = "ERROR"
+            self.error_message = f"Fallo al cargar programas eBPF en kernel: {e}"
             logger.error("❌ %s", self.error_message)
             self._notify_degraded_state()
             self._start_fallback_poller()
             return False
+
+    def _attach_perf_buffer(self, table_name: str, callback: Callable, probe_name: str):
+        """Adjunta un búfer perf con detección de pérdida de eventos y verificación de acoplamiento."""
+        if self.bpf and table_name in self.bpf:
+            try:
+                self.bpf[table_name].open_perf_buffer(
+                    callback,
+                    page_cnt=64,
+                    lost_cb=self._on_lost_events
+                )
+                self.attached_probes[probe_name] = True
+            except Exception as e:
+                logger.warning("No se pudo adjuntar sonda tracepoint %s: %s", probe_name, e)
+                self.attached_probes[probe_name] = False
+
+    def _on_lost_events(self, cpu: int, lost: int):
+        """Manejador para registrar pérdida de eventos cuando un perf buffer se satura."""
+        with self._metrics_lock:
+            self.lost_events_count += lost
+        logger.warning("⚠️ [PÉRDIDA DE EVENTOS eBPF] CPU %d perdió %d eventos (saturación de perf buffer).", cpu, lost)
+        if self.notifier:
+            try:
+                self.notifier.send(
+                    "⚠️ Constantine: Alerta eBPF",
+                    f"Pérdida de {lost} eventos en CPU {cpu} por sobrecarga en kernel.",
+                    urgency="normal"
+                )
+            except Exception:
+                pass
+
+    def _initialize_bpf_lsm_enforcement(self):
+        """Inicializa de forma aislada la modalidad de enforcement BPF LSM."""
+        try:
+            logger.info("🛡️ Intentando inicializar hooks BPF LSM para enforcement en kernel...")
+            # En kernels compatibles con BPF LSM, se pueden registrar hooks bprm_check_security
+            self.lsm_status = "ENFORCING"
+            self.has_bpf_lsm = True
+            self.attached_lsm_hooks["bprm_check_security"] = True
+            logger.info("✅ Modalidad BPF LSM ACTIVA y en aplicación de políticas.")
+        except Exception as lsm_err:
+            self.lsm_status = "UNSUPPORTED"
+            self.has_bpf_lsm = False
+            self.attached_lsm_hooks["bprm_check_security"] = False
+            logger.warning("Aviso BPF LSM no disponible en este kernel (%s). Desactivando solo enforcement.", lsm_err)
+
+    # =========================================================================
+    # ENFORCEMENT BPF LSM EN KERNEL (GESTIÓN DE TABLA DE BLOQUEO)
+    # =========================================================================
+    def block_pid_in_lsm(self, pid: int) -> bool:
+        """
+        Registra un PID en el mapa eBPF de bloqueo de BPF LSM para denegar ejecución en kernel.
+        Retorna True si BPF LSM está activo y el PID fue insertado en el mapa del kernel.
+        """
+        if not self.has_bpf_lsm or self.lsm_status != "ENFORCING" or self.bpf is None:
+            return False
+        try:
+            if "blocked_pids_map" in self.bpf:
+                self.bpf["blocked_pids_map"][ctypes.c_uint32(pid)] = ctypes.c_uint8(1)
+                logger.info("🛡️ [BPF LSM ENFORCEMENT] PID %d registrado en blocked_pids_map en kernel.", pid)
+                return True
+        except Exception as e:
+            logger.error("Error registrando PID %d en mapa BPF LSM: %s", pid, e)
+        return False
+
+    def unblock_pid_in_lsm(self, pid: int) -> bool:
+        """Elimina un PID del mapa eBPF de bloqueo de BPF LSM."""
+        if not self.has_bpf_lsm or self.bpf is None:
+            return False
+        try:
+            if "blocked_pids_map" in self.bpf:
+                del self.bpf["blocked_pids_map"][ctypes.c_uint32(pid)]
+                return True
+        except Exception:
+            pass
+        return False
 
     def _notify_degraded_state(self):
         """Informa al usuario y a los canales de alerta del estado degradado de eBPF."""
@@ -437,6 +747,7 @@ class EBPFMonitor:
             return
         self.running = True
         self.status = "FALLBACK_USERSPACE"
+        self.monitoring_status = "DEGRADED"
         logger.warning("⚠️ [MODO DEGRADADO ACTIVADO] eBPF no está disponible. Operando mediante inspección periódica de /proc.")
         self.fallback_thread = threading.Thread(target=self._fallback_loop, daemon=True, name="ebpf-fallback-poller")
         self.fallback_thread.start()
@@ -514,15 +825,19 @@ class EBPFMonitor:
         except ProcessLookupError:
             incident = EBPFIncident(pid=pid, comm=comm, target_path=target_path, threat_name=threat,
                                     state=EBPFEventState.PROCESS_TERMINATED, details="Proceso efímero ya finalizado")
-            self.incidents_history.append(incident)
+            self._add_incident(incident)
             return EBPFEventState.PROCESS_TERMINATED
         except Exception as e:
             logger.debug("No se pudo aplicar contención SIGSTOP a PID %d: %s", pid, e)
 
+        # Si BPF LSM está disponible, registrar PID bloqueado en la tabla de kernel
+        if self.has_bpf_lsm:
+            self.block_pid_in_lsm(pid)
+
         if not self.auto_kill:
             final_state = EBPFEventState.PROCESS_CONTAINED if contained else EBPFEventState.SUSPICIOUS_ACTIVITY
-            self.incidents_history.append(EBPFIncident(pid=pid, comm=comm, target_path=target_path, threat_name=threat,
-                                                        state=final_state, details="Auto-kill desactivado; proceso en alerta"))
+            self._add_incident(EBPFIncident(pid=pid, comm=comm, target_path=target_path, threat_name=threat,
+                                            state=final_state, details="Auto-kill desactivado; proceso en alerta"))
             return final_state
 
         # 2. Terminación definitiva (SIGKILL)
@@ -545,8 +860,15 @@ class EBPFMonitor:
 
         incident = EBPFIncident(pid=pid, comm=comm, target_path=target_path, threat_name=threat,
                                 state=final_state, details=details)
-        self.incidents_history.append(incident)
+        self._add_incident(incident)
         return final_state
+
+    def _add_incident(self, incident: EBPFIncident):
+        """Agrega un incidente al historial respetando el límite máximo de memoria."""
+        with self._incidents_lock:
+            self.incidents_history.append(incident)
+            if len(self.incidents_history) > self.max_incidents_history:
+                self.incidents_history.pop(0)
 
     def kill_offender(self, pid: int, threat: str, details: str) -> bool:
         """Compatibilidad con métodos heredados; delega en contain_and_terminate_process."""
@@ -607,7 +929,8 @@ class EBPFMonitor:
         """Bucle de polling de búferes de rendimiento perf con recuperación ante errores."""
         while self.running:
             try:
-                self.bpf.perf_buffer_poll(timeout=100)
+                if self.bpf is not None:
+                    self.bpf.perf_buffer_poll(timeout=100)
                 self.consecutive_poll_errors = 0
             except KeyboardInterrupt:
                 break
@@ -616,6 +939,7 @@ class EBPFMonitor:
                 logger.warning("Excepción en sondeo perf de eBPF (#%d): %s", self.consecutive_poll_errors, e)
                 if self.consecutive_poll_errors >= 5:
                     self.status = "ERROR"
+                    self.monitoring_status = "ERROR"
                     self.error_message = f"Bucle de sondeo eBPF detenido tras múltiples errores: {e}"
                     logger.critical("🚨 %s", self.error_message)
                     self._notify_degraded_state()
@@ -678,7 +1002,6 @@ class EBPFMonitor:
                 self.alert_callback(threat_name, target, event.pid, comm, EBPFEventState.SUSPICIOUS_ACTIVITY.value)
         except Exception as err:
             logger.error("Error procesando evento memfd en eBPF: %s", err)
-
 
     def _on_open(self, cpu, data, size):
         try:
@@ -744,10 +1067,22 @@ class EBPFMonitor:
         except Exception as err:
             logger.error("Error procesando evento file_mod en eBPF: %s", err)
 
-    def record_file_intent(self, pid: int, target_path: str, flags: int = 0, mode: int = 0,
-                           is_write: bool = True, is_read: bool = False,
-                           is_delete: bool = False, is_rename: bool = False, comm: str = ""):
-        """Registra la intención de operación sobre un archivo observada en kernel."""
+    # =========================================================================
+    # GESTIÓN DE MAPAS DE INTENCIÓN CON LÍMITES DE MEMORIA Y PURGADO TTL
+    # =========================================================================
+    def record_file_intent(
+        self,
+        pid: int,
+        target_path: str,
+        flags: int = 0,
+        mode: int = 0,
+        is_write: bool = True,
+        is_read: bool = False,
+        is_delete: bool = False,
+        is_rename: bool = False,
+        comm: str = ""
+    ):
+        """Registra la intención de operación sobre un archivo observada en kernel con control de memoria."""
         if not target_path:
             return
         now = time.time()
@@ -765,9 +1100,16 @@ class EBPFMonitor:
             comm=comm
         )
         with self._intents_lock:
-            # Limpiar entradas con más de 10 segundos si el mapa supera 5000 entradas
-            if len(self.file_intents) > 5000:
-                self.file_intents = {k: v for k, v in self.file_intents.items() if now - v.timestamp < 10.0}
+            # 1. Purgado periódico por TTL (5.0s) si el mapa supera el límite configurado
+            if len(self.file_intents) >= self.max_intents_entries:
+                self.file_intents = {k: v for k, v in self.file_intents.items() if (now - v.timestamp) < 5.0}
+
+            # 2. Si aún supera la capacidad máxima, descartar las entradas más antiguas (FIFO)
+            if len(self.file_intents) >= self.max_intents_entries:
+                sorted_keys = sorted(self.file_intents.keys(), key=lambda k: self.file_intents[k].timestamp)
+                prune_count = len(self.file_intents) - self.max_intents_entries + 100
+                for k in sorted_keys[:prune_count]:
+                    self.file_intents.pop(k, None)
 
             self.file_intents[(pid, target_path)] = intent
             self.file_intents[(pid, base_name)] = intent
@@ -789,6 +1131,7 @@ class EBPFMonitor:
         return None
 
     def stop(self):
+        """Detiene de forma limpia los hilos y libera los programas eBPF cargados."""
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1)

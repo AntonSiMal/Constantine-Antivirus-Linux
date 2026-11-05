@@ -320,4 +320,27 @@ class SubsystemHealthRegistry:
             details=p_details
         ))
 
+        # 7. Escaneo Activo Continuo en Tiempo Real (Proactive Continuous Sweeper)
+        ps_state = ShieldOperationalState.SERVICE_STOPPED
+        ps_details = "El servicio en segundo plano constantine.service está detenido."
+        if "proactive_scan" in disabled:
+            ps_state = ShieldOperationalState.DISABLED
+            ps_details = "Desactivado manualmente por el usuario."
+        elif cached_daemon and "proactive_scanner" in cached_daemon:
+            ps_state = ShieldOperationalState.ACTIVE if cached_daemon["proactive_scanner"].get("is_active") else ShieldOperationalState.SERVICE_STOPPED
+            ps_details = cached_daemon["proactive_scanner"].get("details", "Barrido proactivo continuo activo")
+        elif daemon_running:
+            ps_state = ShieldOperationalState.ACTIVE
+            ps_details = "Escaneo proactivo y vigilancia en tiempo real continua de memoria y staging activa."
+
+        results.append(ShieldStatusInfo(
+            id="proactive_scan",
+            name_es="Escaneo Activo y Vigilancia en Tiempo Real Continua",
+            name_en="Continuous Real-Time Active Scanning & Surveillance",
+            state=ps_state,
+            description_es="Barrido continuo en segundo plano de procesos en RAM y zonas de carga sin impacto en CPU.",
+            description_en="Continuous background sweeping of RAM processes and drop zones with low CPU footprint.",
+            details=ps_details
+        ))
+
         return results

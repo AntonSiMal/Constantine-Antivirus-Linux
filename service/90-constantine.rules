@@ -1,0 +1,11 @@
+// Regla Polkit de Constantine Antivirus - Principio de Mínimo Privilegio
+// Restringe las operaciones administrativas a usuarios autorizados y acciones explícitas
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.constantine.antivirus.") === 0) {
+        // Los usuarios pertenecientes al grupo administrativo pueden autorizar
+        if (subject.isInGroup("sudo") || subject.isInGroup("wheel") || subject.isInGroup("admin")) {
+            return polkit.Result.YES;
+        }
+        return polkit.Result.AUTH_ADMIN;
+    }
+});
