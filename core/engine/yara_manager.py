@@ -1,22 +1,26 @@
 """
-Constantine Antivirus - YARA Rule Manager (core/engine/yara_manager.py)
-Administrador integral de reglas YARA para defensa activa en Linux:
-1. Compilación Robusta y Aislamiento de Errores:
+Constantine Antivirus - YARA & YARA-X Rule Manager (core/engine/yara_manager.py)
+Administrador integral de reglas YARA con soporte evolutivo para YARA-X (Rust / VirusTotal):
+1. Arquitectura Evolutiva y Coexistencia Dual (YARA-X + libyara):
+   - Soporte para YARA-X (Rust) como motor moderno de alto rendimiento (~99% compatibilidad).
+   - Coexistencia con libyara (yara-python) clásica: no se descarta libyara para garantizar
+     estabilidad absoluta de las reglas de producción (demons.yar).
+   - Degradación transparente a motor heurístico nativo en entornos sin dependencias C/Rust.
+2. Compilación Robusta y Aislamiento de Errores:
    - Valida la sintaxis de cada regla individualmente antes de la compilación global.
    - Si un archivo .yar tiene errores de sintaxis, se aísla con registro detallado sin tumbar
      el resto del motor de firmas.
-2. Caché Binaria y Verificación de Integridad (mtime/hash state):
+3. Caché Binaria y Verificación de Integridad (mtime/hash state):
    - Soporta almacenamiento en caché compilada (.yac) con yara.load() para arranque en <5 ms.
    - Invalida la caché automáticamente cuando cualquier archivo .yar es modificado, añadido o borrado.
-3. Actualización Dinámica y Hot-Reload Atómico:
+4. Actualización Dinámica y Hot-Reload Atómico:
    - Recarga en caliente intercambiando el puntero de reglas en memoria atómicamente.
-4. Motor de Coincidencias Seguro:
-   - Ejecuta rules.match() con protección de timeout para evitar ataques de DoS/ReDoS.
+5. Motor de Coincidencias Seguro:
+   - Ejecuta coincidencias con protección de timeout para evitar ataques de DoS/ReDoS.
    - Extrae metadatos estructurados (regla, namespace, nivel de amenaza, tags, cadenas).
-5. Modo de Respaldo Heurístico Transparente (Fallback):
-   - Si yara-python no está disponible en el host, proporciona un motor heurístico compatible
-     que analiza las firmas de las reglas YARA nativamente sin interrumpir la protección.
 """
+
+from __future__ import annotations
 
 import os
 import glob
@@ -27,6 +31,8 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Any, Set
+
+from core.engine.yarax_engine import YaraXEngine, YaraXMatch
 
 logger = logging.getLogger("constantine.yara_manager")
 
@@ -58,12 +64,14 @@ class YaraMatch:
 
 class YaraRuleManager:
     """
-    Administrador centralizado de ciclo de vida de reglas YARA:
+    Administrador centralizado de ciclo de vida de reglas YARA y YARA-X:
     Carga, validación sintáctica, compilación atómica, caché binaria,
     hot-reload y ejecución de coincidencias con timeout.
     """
 
-    def __init__(self, rules_dir: Optional[str] = None, cache_dir: Optional[str] = None):
+    def __init__(self, rules_dir: Optional[str] = None, cache_dir: Optional[str] = None, engine_mode: str = "auto"):
+        self.engine_mode = engine_mode.lower()  # 'auto', 'yarax', 'classic', 'dual'
+
         if rules_dir:
             self.rules_dir = os.path.abspath(rules_dir)
         else:
@@ -89,6 +97,8 @@ class YaraRuleManager:
 
         self.compiled_cache_path = os.path.join(self.cache_dir, "constantine_rules.yac")
         self.meta_cache_path = os.path.join(self.cache_dir, "constantine_rules_meta.json")
+
+        self.yarax_engine = YaraXEngine(rules_dir=self.rules_dir)
 
         self._compiled_rules = None
         self._compiled_namespaces: Dict[str, str] = {}
@@ -131,22 +141,41 @@ class YaraRuleManager:
         return HAS_YARA
 
     @property
+    def has_yarax(self) -> bool:
+        return self.yarax_engine.is_available
+
+    @property
     def is_active(self) -> bool:
-        return (HAS_YARA and self._compiled_rules is not None) or (not HAS_YARA)
+        return (self.has_yarax and self.yarax_engine._compiled_rules is not None) or \
+               (HAS_YARA and self._compiled_rules is not None) or (not HAS_YARA and not self.has_yarax)
+
+    @property
+    def active_engine_name(self) -> str:
+        if self.has_yarax and self.yarax_engine._compiled_rules and self.engine_mode in ("auto", "yarax", "dual"):
+            return "YARA-X (Rust / VirusTotal)"
+        if HAS_YARA and self._compiled_rules:
+            return "Oficial YARA 4.x"
+        return "Heurístico Nativo de Respaldo"
 
     @property
     def rules_count(self) -> int:
+        if self.has_yarax and self.yarax_engine._compiled_rules:
+            return self.yarax_engine._loaded_rules_count
         if HAS_YARA and self._compiled_rules:
             return self._loaded_rules_count
         return len(self._fallback_signatures)
 
     def validate_rule_string(self, rule_str: str) -> Tuple[bool, Optional[str]]:
         """
-        Valida la sintaxis de una regla YARA sin alterar el estado del motor.
+        Valida la sintaxis de una regla YARA/YARA-X sin alterar el estado del motor.
         Retorna (is_valid, error_message).
         """
         if not rule_str or not rule_str.strip():
             return False, "Regla vacía o inválida."
+
+        # Priorizar YARA-X para validación moderna si está disponible
+        if self.has_yarax and self.engine_mode in ("auto", "yarax", "dual"):
+            return self.yarax_engine.validate_rule_source(rule_str)
 
         if HAS_YARA:
             try:
@@ -166,6 +195,9 @@ class YaraRuleManager:
         """Valida sintácticamente un archivo de reglas antes de su inclusión en el compilador."""
         if not os.path.exists(file_path):
             return False, f"Archivo no existe: {file_path}"
+
+        if self.has_yarax and self.engine_mode in ("auto", "yarax", "dual"):
+            return self.yarax_engine.validate_rule_file(file_path)
 
         if HAS_YARA:
             try:
@@ -218,23 +250,13 @@ class YaraRuleManager:
 
     def compile_rules(self, force_recompile: bool = False) -> bool:
         """
-        Compila o carga las reglas YARA con aislamiento de errores y caché binaria:
-        1. Comprueba si los archivos en rules_dir han cambiado comparando el state_hash.
-        2. Si no han cambiado y existe constantine_rules.yac, carga la caché con yara.load().
-        3. Si han cambiado o force_recompile es True:
-           - Valida cada archivo .yar individualmente.
-           - Excluye archivos corruptos para evitar que una regla defectuosa desactive el antivirus.
-           - Compila las reglas válidas con yara.compile(filepaths=...).
-           - Guarda la versión binaria precompilada en disco (.save()).
-           - Aplica Hot-Swap atómico del puntero de reglas en memoria.
+        Compila o carga las reglas con YARA-X y libyara en modo evolutivo:
+        1. Valida archivos en rules_dir.
+        2. Compila con YARA-X si está disponible.
+        3. Compila con libyara (yara-python) si está disponible, conservando soporte de caché (.yac).
+        4. Si ninguno está disponible, activa el modo heurístico de respaldo.
         """
         self._compilation_errors.clear()
-
-        if not HAS_YARA:
-            logger.info("YaraRuleManager: yara-python no disponible. Modo heurístico activo.")
-            self._compiled_rules = None
-            self._loaded_rules_count = len(self._fallback_signatures)
-            return False
 
         if not os.path.exists(self.rules_dir):
             logger.warning("Directorio de reglas YARA ausente: %s", self.rules_dir)
@@ -243,14 +265,13 @@ class YaraRuleManager:
 
         current_state_hash = self.compute_rules_state_hash()
 
-        # Intentar carga rápida desde caché binaria precompilada
-        if not force_recompile and current_state_hash:
+        # Intentar carga rápida desde caché binaria precompilada (libyara)
+        if not force_recompile and current_state_hash and HAS_YARA:
             if os.path.exists(self.compiled_cache_path) and os.path.exists(self.meta_cache_path):
                 try:
                     with open(self.meta_cache_path, "r", encoding="utf-8") as mf:
                         meta = json.load(mf)
                     if meta.get("state_hash") == current_state_hash:
-                        # Carga binaria ultrarrápida
                         cached_rules = yara.load(self.compiled_cache_path)
                         self._compiled_rules = cached_rules
                         self._last_state_hash = current_state_hash
@@ -259,9 +280,12 @@ class YaraRuleManager:
                         self._last_compile_time = meta.get("compile_time", time.time())
                         logger.info("⚡ [YARA CACHÉ] Reglas binarias cargadas en <5ms desde %s (%d reglas)",
                                     self.compiled_cache_path, self._loaded_rules_count)
+                        # También compilar en YARA-X si está activo en modo dual
+                        if self.has_yarax and self.engine_mode in ("auto", "dual", "yarax"):
+                            self.yarax_engine.compile_rules(self._compiled_namespaces)
                         return True
                 except Exception as cache_err:
-                    logger.warning("Fallo al leer caché YARA precompilada: %s. Procediendo a recompilación limpia.", cache_err)
+                    logger.warning("Fallo al leer caché YARA precompilada: %s. Procediendo a recompilación.", cache_err)
 
         # Descubrimiento de archivos de reglas
         found_files = sorted(glob.glob(os.path.join(self.rules_dir, "*.yar")) +
@@ -287,46 +311,58 @@ class YaraRuleManager:
             self._compiled_rules = None
             return False
 
-        try:
-            # Compilación segura de todos los namespaces válidos
-            new_rules = yara.compile(filepaths=valid_filepaths)
-            count = self._count_rules_in_files(valid_filepaths)
+        # 1. Compilación con YARA-X (Rust) si está disponible
+        yarax_success = False
+        if self.has_yarax and self.engine_mode in ("auto", "yarax", "dual"):
+            yarax_success = self.yarax_engine.compile_rules(valid_filepaths)
 
-            # Hot-Swap atómico en memoria
-            self._compiled_rules = new_rules
-            self._compiled_namespaces = valid_filepaths
-            self._loaded_rules_count = count
-            self._last_state_hash = current_state_hash
-            self._last_compile_time = time.time()
-
-            logger.info("✅ [YARA MOTOR COMPILADO] %d regla(s) activas desde %d archivo(s) en %s",
-                        count, len(valid_filepaths), self.rules_dir)
-
-            # Guardar versión compilada en disco para arranques futuros ultra-rápidos
+        # 2. Compilación con libyara (yara-python)
+        libyara_success = False
+        if HAS_YARA:
             try:
-                temp_cache = f"{self.compiled_cache_path}.tmp"
-                new_rules.save(temp_cache)
-                if os.path.exists(temp_cache):
-                    os.replace(temp_cache, self.compiled_cache_path)
+                new_rules = yara.compile(filepaths=valid_filepaths)
+                count = self._count_rules_in_files(valid_filepaths)
 
-                temp_meta = f"{self.meta_cache_path}.tmp"
-                with open(temp_meta, "w", encoding="utf-8") as mf:
-                    json.dump({
-                        "state_hash": current_state_hash,
-                        "rules_count": count,
-                        "namespaces": valid_filepaths,
-                        "compile_time": self._last_compile_time
-                    }, mf, indent=2)
-                os.replace(temp_meta, self.meta_cache_path)
-            except Exception as save_err:
-                logger.warning("No se pudo persistir la caché YARA binaria: %s", save_err)
+                self._compiled_rules = new_rules
+                self._compiled_namespaces = valid_filepaths
+                self._loaded_rules_count = count
+                self._last_state_hash = current_state_hash
+                self._last_compile_time = time.time()
+                libyara_success = True
 
-            return True
+                logger.info("✅ [YARA MOTOR COMPILADO] %d regla(s) activas desde %d archivo(s) en %s",
+                            count, len(valid_filepaths), self.rules_dir)
 
-        except Exception as compile_err:
-            logger.critical("Error crítico compilando conjunto de reglas YARA: %s", compile_err)
+                # Persistencia en caché binaria (.yac)
+                try:
+                    temp_cache = f"{self.compiled_cache_path}.tmp"
+                    new_rules.save(temp_cache)
+                    if os.path.exists(temp_cache):
+                        os.replace(temp_cache, self.compiled_cache_path)
+
+                    temp_meta = f"{self.meta_cache_path}.tmp"
+                    with open(temp_meta, "w", encoding="utf-8") as mf:
+                        json.dump({
+                            "state_hash": current_state_hash,
+                            "rules_count": count,
+                            "namespaces": valid_filepaths,
+                            "compile_time": self._last_compile_time
+                        }, mf, indent=2)
+                    os.replace(temp_meta, self.meta_cache_path)
+                except Exception as save_err:
+                    logger.warning("No se pudo persistir la caché YARA binaria: %s", save_err)
+
+            except Exception as compile_err:
+                logger.critical("Error crítico compilando conjunto de reglas YARA: %s", compile_err)
+                self._compiled_rules = None
+
+        if not HAS_YARA and not yarax_success:
+            logger.info("YaraRuleManager: yara-python no disponible. Modo heurístico activo.")
             self._compiled_rules = None
+            self._loaded_rules_count = len(self._fallback_signatures)
             return False
+
+        return yarax_success or libyara_success
 
     def reload_rules(self) -> bool:
         """Fuerza la recompilación y recarga en caliente de todas las reglas."""
@@ -335,14 +371,30 @@ class YaraRuleManager:
     def match_file(self, file_path: str, timeout: int = 5) -> List[YaraMatch]:
         """
         Ejecuta coincidencia de reglas sobre un archivo en disco:
-        - Si YARA oficial está activo, ejecuta rules.match(filepath=..., timeout=timeout).
-        - Si ocurre un Timeout, previene DoS y registra alerta.
-        - Si YARA oficial no está disponible, delega al motor heurístico de respaldo.
+        1. Prioriza YARA-X (Rust) si está disponible y compilado.
+        2. Ejecuta con libyara si YARA-X no está activo o como parte de modo dual.
+        3. Si ninguno está instalado, delega al motor heurístico de respaldo.
         """
         if not file_path or not os.path.exists(file_path):
             return []
 
-        # 1. Ejecución con YARA Oficial
+        # 1. YARA-X (Rust)
+        if self.has_yarax and self.engine_mode in ("auto", "yarax", "dual") and self.yarax_engine._compiled_rules:
+            matches_x = self.yarax_engine.scan_file(file_path, timeout=timeout)
+            if matches_x:
+                return [
+                    YaraMatch(
+                        rule=m.rule,
+                        namespace=m.namespace,
+                        tags=m.tags,
+                        meta=m.meta,
+                        strings=m.strings
+                    ) for m in matches_x
+                ]
+            if self.engine_mode == "yarax":
+                return []
+
+        # 2. Classic YARA (libyara)
         if HAS_YARA and self._compiled_rules:
             try:
                 raw_matches = self._compiled_rules.match(filepath=file_path, timeout=timeout)
@@ -374,7 +426,7 @@ class YaraRuleManager:
                 logger.error("Error ejecutando coincidencia YARA en %s: %s", file_path, e)
                 return []
 
-        # 2. Motor Heurístico de Respaldo Transparente
+        # 3. Motor Heurístico de Respaldo Transparente
         return self._fallback_match_file(file_path)
 
     def match_data(self, data: bytes, timeout: int = 5) -> List[YaraMatch]:
@@ -382,6 +434,23 @@ class YaraRuleManager:
         if not data:
             return []
 
+        # 1. YARA-X (Rust)
+        if self.has_yarax and self.engine_mode in ("auto", "yarax", "dual") and self.yarax_engine._compiled_rules:
+            matches_x = self.yarax_engine.scan_data(data, timeout=timeout)
+            if matches_x:
+                return [
+                    YaraMatch(
+                        rule=m.rule,
+                        namespace=m.namespace,
+                        tags=m.tags,
+                        meta=m.meta,
+                        strings=m.strings
+                    ) for m in matches_x
+                ]
+            if self.engine_mode == "yarax":
+                return []
+
+        # 2. Classic YARA (libyara)
         if HAS_YARA and self._compiled_rules:
             try:
                 raw_matches = self._compiled_rules.match(data=data, timeout=timeout)
@@ -398,7 +467,7 @@ class YaraRuleManager:
                 logger.error("Error en coincidencia YARA sobre búfer: %s", e)
                 return []
 
-        # Fallback en memoria
+        # 3. Fallback en memoria
         results = []
         for name, patterns, meta in self._fallback_signatures:
             if all(p in data for p in patterns):
@@ -406,7 +475,7 @@ class YaraRuleManager:
         return results
 
     def _fallback_match_file(self, file_path: str) -> List[YaraMatch]:
-        """Motor heurístico de inspección por firmas cuando yara-python no está disponible."""
+        """Motor heurístico de inspección por firmas cuando ni YARA ni YARA-X están disponibles."""
         matches: List[YaraMatch] = []
         try:
             with open(file_path, "rb") as f:
@@ -445,13 +514,19 @@ class YaraRuleManager:
         except Exception as e:
             return False, f"Error persistiendo regla: {e}"
 
+    def audit_rules_yarax_compatibility(self) -> Dict[str, Any]:
+        """Audita todas las reglas existentes para evaluar la compatibilidad con YARA-X."""
+        return self.yarax_engine.audit_rules_directory(self.rules_dir)
+
     def get_status(self) -> Dict[str, Any]:
-        """Retorna estadísticas completas del subsistema YARA para auditoría y GUI."""
-        engine_type = "Oficial YARA 4.x" if (HAS_YARA and self._compiled_rules) else "Heurístico Nativo de Respaldo"
+        """Retorna estadísticas completas del subsistema YARA y YARA-X para auditoría y GUI."""
         return {
             "has_yara": HAS_YARA,
+            "has_yarax": self.has_yarax,
+            "engine_mode": self.engine_mode,
+            "engine_type": self.active_engine_name,
+            "yarax_version": self.yarax_engine.get_version(),
             "is_active": self.is_active,
-            "engine_type": engine_type,
             "rules_count": self.rules_count,
             "namespaces": list(self._compiled_namespaces.keys()),
             "rules_dir": self.rules_dir,

@@ -1,0 +1,44 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "constantine-contain-ransomware-canaries"
+  namespace: "kube-system"
+spec:
+  kprobes:
+    - call: "sys_enter_rename"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string"
+      selectors:
+        - matchArgs:
+            - index: 1
+              operator: "Postfix"
+              values:
+                - ".locked"
+                - ".crypto"
+                - ".crypted"
+                - ".enc"
+          matchActions:
+            - action: "Override"
+              argError: -13 # -EACCES
+            - action: "Sigkill"
+    - call: "sys_enter_truncate"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - ".constantine_canary"
+          matchActions:
+            - action: "Override"
+              argError: -13 # -EACCES
+            - action: "Sigkill"

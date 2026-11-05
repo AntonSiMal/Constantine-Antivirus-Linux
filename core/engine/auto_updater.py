@@ -31,7 +31,7 @@ def _detect_current_version() -> str:
                         return ver
             except Exception:
                 pass
-    return "4.3.2"
+    return "5.1.0"
 
 CURRENT_VERSION = _detect_current_version()
 GITHUB_REPO = "AntonSiMal/Constantine-Antivirus-Linux"

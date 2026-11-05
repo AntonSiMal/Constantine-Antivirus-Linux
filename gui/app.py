@@ -34,7 +34,7 @@ def _load_app_version() -> str:
                         return ver
             except Exception:
                 pass
-    return "4.3.2"
+    return "5.1.0"
 
 APP_VERSION = _load_app_version()
 
@@ -58,7 +58,23 @@ from core.engine.auto_updater import ConstantineUpdater
 from core.engine.i18n import Localization
 from gui.tray import ConstantineTrayIcon
 from core.engine.notifier import DesktopNotifier
+import core.engine.clamav as clamav
+from core.engine.clamav_manager import ClamAVManager
+import yara_x
+from core.engine.yarax_engine import YaraXEngine
 from core.engine.ebpf_monitor import EBPFMonitor
+import tetragon
+from core.engine.tetragon import TetragonManager
+import falco
+from core.engine.falco import FalcoManager
+import wazuh
+from core.engine.wazuh import WazuhManager
+import osquery
+from core.engine.osquery import OSQueryManager
+import misp
+from core.engine.misp import MISPManager
+import sigma
+from core.engine.sigma_engine import SigmaManager
 
 IPC_SOCKET_PATH = f"/tmp/constantine_gui_{os.getuid()}.sock"
 
@@ -1106,6 +1122,22 @@ class ConstantineGUI:
         c_box.pack_start(self.lbl_c_count, False, False, 0)
         db_grid.attach(c_box, 3, 0, 1, 1)
 
+        # Columna 5: Cilium Tetragon (eBPF Kernel Enforcement & TracingPolicies)
+        t_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl_t_title = Gtk.Label(); lbl_t_title.set_markup("<b>⚡ Cilium Tetragon</b>"); lbl_t_title.set_xalign(0)
+        t_status = "Activo (Override + Sigkill)" if tetragon.is_available() else "Configurado (YAML)"
+        self.lbl_t_ver = Gtk.Label(label=f"Estado: {t_status}"); self.lbl_t_ver.set_xalign(0)
+        self.lbl_t_ver.get_style_context().add_class("subtitle-text")
+        self.lbl_t_date = Gtk.Label(label=f"Políticas: {len(tetragon.list_policies())} TracingPolicies"); self.lbl_t_date.set_xalign(0)
+        self.lbl_t_date.get_style_context().add_class("subtitle-text")
+        self.lbl_t_count = Gtk.Label(label="Kernel: Override -13 (Fail-Secure)"); self.lbl_t_count.set_xalign(0)
+        self.lbl_t_count.get_style_context().add_class("subtitle-text")
+        t_box.pack_start(lbl_t_title, False, False, 0)
+        t_box.pack_start(self.lbl_t_ver, False, False, 0)
+        t_box.pack_start(self.lbl_t_date, False, False, 0)
+        t_box.pack_start(self.lbl_t_count, False, False, 0)
+        db_grid.attach(t_box, 4, 0, 1, 1)
+
         db_vbox.pack_start(db_grid, True, True, 0)
 
         db_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -1116,6 +1148,30 @@ class ConstantineGUI:
         btn_clam_update = Gtk.Button(label="🛡️ Actualizar Firmas ClamAV (freshclam)")
         btn_clam_update.connect("clicked", self._on_clamav_update_clicked)
         db_btn_box.pack_start(btn_clam_update, False, False, 0)
+
+        btn_tetragon_reload = Gtk.Button(label="⚡ Desplegar Políticas Tetragon")
+        btn_tetragon_reload.connect("clicked", self._on_tetragon_deploy_clicked)
+        db_btn_box.pack_start(btn_tetragon_reload, False, False, 0)
+
+        btn_falco_rules = Gtk.Button(label="🦅 Reglas Conductuales Falco (CNCF)")
+        btn_falco_rules.connect("clicked", self._on_falco_rules_clicked)
+        db_btn_box.pack_start(btn_falco_rules, False, False, 0)
+
+        btn_wazuh_fim = Gtk.Button(label="🐺 Vigilancia FIM + YARA (Wazuh)")
+        btn_wazuh_fim.connect("clicked", self._on_wazuh_fim_clicked)
+        db_btn_box.pack_start(btn_wazuh_fim, False, False, 0)
+
+        btn_osquery_diag = Gtk.Button(label="🔎 Diagnóstico del Sistema (osquery SQL)")
+        btn_osquery_diag.connect("clicked", self._on_osquery_diag_clicked)
+        db_btn_box.pack_start(btn_osquery_diag, False, False, 0)
+
+        btn_misp_sync = Gtk.Button(label="🌐 Inteligencia de Amenazas (MISP Feeds)")
+        btn_misp_sync.connect("clicked", self._on_misp_sync_clicked)
+        db_btn_box.pack_start(btn_misp_sync, False, False, 0)
+
+        btn_sigma_rules = Gtk.Button(label="📜 Reglas de Detección Sigma (Universal SOC)")
+        btn_sigma_rules.connect("clicked", self._on_sigma_rules_clicked)
+        db_btn_box.pack_start(btn_sigma_rules, False, False, 0)
         db_vbox.pack_start(db_btn_box, False, False, 4)
 
         db_card.add(db_vbox)
@@ -1309,6 +1365,119 @@ class ConstantineGUI:
                 pass
 
         return True
+
+    def _on_misp_sync_clicked(self, button):
+        mgr = misp.get_default_manager()
+        count = mgr.ingest_local_feeds()
+        status = mgr.get_status_info()
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Plataforma Centralizada de Inteligencia de Amenazas (MISP)"
+        )
+        msg = (
+            "Sincronización de inteligencia completada con éxito:\n"
+            f"• Eventos MISP indexados: {status.get('events_count', 0)}\n"
+            f"• IoCs activos (Hashes, IPs, Dominios, URLs): {status.get('iocs_count', 0)}\n\n"
+            "Arquitectura Constantine + MISP:\n"
+            "Constantine consume feeds curados de MISP e IoCs verificados en tiempo real "
+            "sin requerir la infraestructura pesada local en cada endpoint."
+        )
+        dialog.format_secondary_text(msg)
+        dialog.run()
+        dialog.destroy()
+    def _on_sigma_rules_clicked(self, button):
+        mgr = sigma.get_default_manager()
+        status = mgr.get_status_info()
+        rules = mgr.rules
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Reglas de Detección de Comportamiento Sigma (Universal SOC)"
+        )
+        msg = (
+            f"Se encuentran activas {status.get('rules_count', len(rules))} reglas Sigma universales (pySigma Linux Adapter).\n\n"
+            "Categorías de Detección Cubiertas:\n"
+            "• Ejecución sospechosa de comandos (Reverse shells, Download cradles, base64 pipes)\n"
+            "• Persistencia mediante servicios (systemd units y tareas cron)\n"
+            "• Modificación peligrosa de permisos (chmod +s, bits SUID/SGID, accesos 777 en /bin)\n"
+            "• Actividades sospechosas en SSH (authorized_keys, robo de claves id_rsa, túneles)\n"
+            "• Ejecución de procesos desde directorios temporales (/tmp, /dev/shm, /var/tmp)\n"
+            "• Comportamientos típicos de ataques conocidos (LinPEAS, pspy, descubrimiento sudo)\n\n"
+            "Adaptador pySigma: Traduce reglas comunitarias universales a la telemetría del kernel de Constantine."
+        )
+        dialog.format_secondary_text(msg)
+        dialog.run()
+        dialog.destroy()
+
+    def _on_osquery_diag_clicked(self, button):
+        diag = osquery.get_security_diagnostic()
+        lines = [f"Salud del Sistema: {diag.overall_health} ({diag.health_score}/100)", ""]
+        for q, a in diag.summary_answers.items():
+            lines.append(f"• {q}")
+            lines.append(f"  {a}")
+            lines.append("")
+        summary_text = "\n".join(lines)
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Diagnóstico e Inventario del Sistema (osquery SQL)"
+        )
+        dialog.format_secondary_text(summary_text.strip())
+        dialog.run()
+        dialog.destroy()
+
+    def _on_wazuh_fim_clicked(self, button):
+        rules = wazuh.list_rules()
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Estrategia Wazuh FIM + YARA & Respuesta Activa"
+        )
+        dialog.format_secondary_text(
+            f"Se encuentran activas {len(rules)} reglas decodificadoras FIM + YARA (Niveles 1 a 15).\n\n"
+            "Estrategia: Al detectar la creación o modificación de un archivo en disco, se obtienen sus metadatos e identidad, se ejecuta un análisis YARA dirigido y se aplica Respuesta Activa según la gravedad (Aislamiento de red, Cuarentena en Baúl y Terminación). Esto previene escaneos redundantes de todo el equipo."
+        )
+        dialog.run()
+        dialog.destroy()
+
+    def _on_falco_rules_clicked(self, button):
+        rules = falco.list_rules()
+        status = falco.get_default_manager().get_status_info()
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Motor de Detección Conductual Falco (CNCF)"
+        )
+        dialog.format_secondary_text(
+            f"Se encuentran activas {len(rules)} reglas conductuales de llamadas al sistema (Privilegios, Red y Credenciales).\n\n"
+            "Rol arquitectónico: Falco detecta y notifica anomalías; Constantine actúa como ejecutor activo aplicando Fanotify FAN_DENY, aislamiento de red y cuarentena criptográfica."
+        )
+        dialog.run()
+        dialog.destroy()
+
+    def _on_tetragon_deploy_clicked(self, button):
+        count = tetragon.get_default_manager().deploy_policies()
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Políticas de Kernel Tetragon"
+        )
+        dialog.format_secondary_text(f"Se han sincronizado {len(tetragon.list_policies())} políticas TracingPolicy de Tetragon ({count} cargadas en caliente).")
+        dialog.run()
+        dialog.destroy()
 
     def _on_clamav_update_clicked(self, button):
         def _bg_update():
@@ -1851,42 +2020,80 @@ class ConstantineGUI:
         box.set_margin_start(25); box.set_margin_end(25); box.set_margin_top(20)
 
         lbl = Gtk.Label()
+        lbl.set_markup("<b>Aplicaciones de Red Externas (Administración Exclusiva del Usuario - Constantine 5.x)</b>\n"
+                       "Constantine instala las herramientas y facilita su acceso directo sin apropiarse de su administración.\n"
+                       "Las reglas, permisos de red y conexiones VPN son administradas únicamente por el usuario.")
         lbl.set_xalign(0)
         box.pack_start(lbl, False, False, 0)
 
-        # UFW / GUFW
-        f_frame = Gtk.Frame(label=" Cortafuegos de Linux (UFW / GUFW) ")
+        # UFW / GUFW Card
+        f_frame = Gtk.Frame(label=" Cortafuegos del Sistema (GUFW / UFW) ")
         fbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         fbox.set_margin_start(15); fbox.set_margin_end(15); fbox.set_margin_top(10); fbox.set_margin_bottom(10)
 
         self.lbl_ufw_state = Gtk.Label()
-        self.lbl_ufw_state.set_markup("<b>Estado de UFW:</b> Activo")
         self.lbl_ufw_state.set_xalign(0)
+        self._refresh_firewall_label()
         fbox.pack_start(self.lbl_ufw_state, False, False, 0)
 
-        f_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        btn_toggle = Gtk.Button(label="Activar / Desactivar UFW")
-        btn_toggle.connect("clicked", self._on_toggle_ufw_clicked)
-        f_btns.pack_start(btn_toggle, False, False, 0)
+        lbl_fw_expl = Gtk.Label(
+            label="• Responsabilidad de Constantine: Instalación de GUFW y activación inicial segura.\n"
+                  "• Responsabilidad del usuario: Administración completa manual de reglas, puertos y excepciones.\n"
+                  "• Regla Arquitectónica: Constantine NO crea, modifica ni administra reglas del cortafuegos."
+        )
+        lbl_fw_expl.set_xalign(0)
+        fbox.pack_start(lbl_fw_expl, False, False, 0)
 
-        btn_gufw = Gtk.Button(label="🔥 Abrir Panel Avanzado GUFW")
+        f_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        btn_gufw = Gtk.Button(label="🔥 Abrir Cortafuegos GUFW (Administración Manual)")
         btn_gufw.connect("clicked", lambda b: self.firewall.launch_gufw())
         f_btns.pack_start(btn_gufw, False, False, 0)
+
+        btn_toggle = Gtk.Button(label="Encender / Apagar Cortafuegos")
+        btn_toggle.connect("clicked", self._on_toggle_ufw_clicked)
+        f_btns.pack_start(btn_toggle, False, False, 0)
         fbox.pack_start(f_btns, False, False, 5)
         f_frame.add(fbox)
         box.pack_start(f_frame, False, False, 0)
 
-        # VPN
+        # Proton VPN Card
         v_frame = Gtk.Frame(label=" Red Privada Virtual (Proton VPN) ")
         vbox_vpn = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         vbox_vpn.set_margin_start(15); vbox_vpn.set_margin_end(15); vbox_vpn.set_margin_top(10); vbox_vpn.set_margin_bottom(10)
 
-        btn_vpn = Gtk.Button(label="🛡️ Abrir y Conectar Proton VPN")
+        vpn_info = self.vpn_mgr.get_status_info()
+        lbl_vpn_stat = Gtk.Label()
+        lbl_vpn_stat.set_markup(f"<b>Estado de Proton VPN:</b> {'🟢 Instalado (Acceso directo listo)' if vpn_info['installed'] else '🔴 No instalado'}")
+        lbl_vpn_stat.set_xalign(0)
+        vbox_vpn.pack_start(lbl_vpn_stat, False, False, 0)
+
+        lbl_vpn_expl = Gtk.Label(
+            label="• Responsabilidad de Constantine: Instalación de la aplicación y acceso directo.\n"
+                  "• Responsabilidad del usuario: Inicio de sesión, selección de servidores/protocolos y conexión.\n"
+                  "• Regla Arquitectónica: Constantine NO establece conexiones ni supervisa el tráfico VPN."
+        )
+        lbl_vpn_expl.set_xalign(0)
+        vbox_vpn.pack_start(lbl_vpn_expl, False, False, 0)
+
+        btn_vpn = Gtk.Button(label="🛡️ Abrir Proton VPN (Acceso Directo)")
         btn_vpn.connect("clicked", lambda b: self.vpn_mgr.launch())
         vbox_vpn.pack_start(btn_vpn, False, False, 5)
         v_frame.add(vbox_vpn)
         box.pack_start(v_frame, False, False, 0)
         return box
+
+    def _refresh_firewall_label(self):
+        stat = self.firewall.get_firewall_status()
+        st = stat.get("state")
+        if st == "INSTALLED_ACTIVE":
+            txt = "<span foreground='#30d158' weight='bold'>● Firewall instalado y activado</span>"
+        elif st == "INSTALLED_INACTIVE":
+            txt = "<span foreground='#ff9f0a' weight='bold'>● Firewall instalado pero desactivado</span>"
+        elif st == "NOT_INSTALLED":
+            txt = "<span foreground='#ff453a' weight='bold'>● Firewall no instalado</span>"
+        else:
+            txt = "<span foreground='#8e8e93' weight='bold'>● Estado desconocido o no verificable</span>"
+        self.lbl_ufw_state.set_markup(f"<b>Estado del Firewall:</b> {txt}")
 
     def _create_dns_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
@@ -2680,9 +2887,9 @@ class ConstantineGUI:
 
     def _on_toggle_ufw_clicked(self, button):
         if not self._check_auth_required(): return
-        current = self.firewall.get_ufw_status()
+        current = self.firewall.is_ufw_active()
         self.firewall.toggle_ufw(not current)
-        self.lbl_ufw_state.set_markup(f"<b>Estado de UFW:</b> {'Activo' if not current else 'Inactivo'}")
+        self._refresh_firewall_label()
 
     def _on_run_proactive_phishing_scan(self, button):
         self.btn_run_phish_scan.set_sensitive(False)

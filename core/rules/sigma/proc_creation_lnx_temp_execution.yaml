@@ -1,0 +1,31 @@
+title: Process Execution from Temporary or Memory Directories
+id: 7c2a1101-8b3d-4e92-b011-893a74c20005
+status: stable
+description: Detects process executions originating from temporary or shared memory directories commonly abused by droppers and malware loaders.
+author: Sigma Community / Constantine EDR Team
+date: 2026-11-05
+references:
+  - https://github.com/SigmaHQ/sigma/blob/master/rules/linux/process_creation/
+tags:
+  - attack.defense_evasion
+  - attack.t1036
+  - attack.execution
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_path:
+    Image|startswith:
+      - '/tmp/'
+      - '/var/tmp/'
+      - '/dev/shm/'
+      - '/run/user/'
+  filter_known_clean:
+    Image|endswith:
+      - 'apt-check'
+      - 'dpkg'
+      - 'systemd'
+  condition: selection_path and not filter_known_clean
+falsepositives:
+  - Temporary software installer test binaries
+level: high

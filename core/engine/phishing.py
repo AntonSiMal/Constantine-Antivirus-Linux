@@ -19,6 +19,7 @@ class PhishingResult:
 class PhishingShield:
     def __init__(self):
         self.intel = ThreatIntelligence()
+        self.proactive_monitoring = False
         self.target_brands = {
             "google": ["google.com", "accounts.google.com", "gmail.com"],
             "microsoft": ["microsoft.com", "login.live.com", "office.com"],
@@ -197,6 +198,7 @@ class PhishingShield:
 
     def start_proactive_monitoring(self, notifier=None, audit_logger=None):
         """Inicia el hilo centinela proactivo de phishing en segundo plano."""
+        self.proactive_monitoring = True
         import threading, time
         def loop():
             while True:

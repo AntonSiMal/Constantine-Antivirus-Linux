@@ -1,0 +1,38 @@
+title: Systemd Service and Cron Persistence Modification
+id: 7c2a1101-8b3d-4e92-b011-893a74c20002
+status: stable
+description: Detects command lines creating, enabling or modifying persistence mechanisms via systemd units or scheduled tasks in Linux.
+author: Sigma Community / Constantine EDR Team
+date: 2026-11-05
+references:
+  - https://github.com/SigmaHQ/sigma/blob/master/rules/linux/process_creation/
+tags:
+  - attack.persistence
+  - attack.t1053.003
+  - attack.t1543.002
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_systemd:
+    CommandLine|contains:
+      - '/etc/systemd/system/'
+      - '/usr/lib/systemd/system/'
+      - 'systemctl enable --now'
+      - 'systemctl daemon-reload'
+  selection_cron:
+    CommandLine|contains:
+      - 'crontab -e'
+      - '/etc/cron.d/'
+      - '/etc/cron.daily/'
+      - '/var/spool/cron/'
+  filter_package_manager:
+    Image|endswith:
+      - 'dpkg'
+      - 'apt'
+      - 'apt-get'
+      - 'unattended-upgrade'
+  condition: (selection_systemd or selection_cron) and not filter_package_manager
+falsepositives:
+  - Legitimate system administration and package installation
+level: medium

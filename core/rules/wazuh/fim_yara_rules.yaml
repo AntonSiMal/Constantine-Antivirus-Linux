@@ -1,0 +1,88 @@
+# ==============================================================================
+# Constantine Wazuh Rules: FIM (File Integrity Monitoring) + YARA Integration
+# Estrategia de vigilancia de integridad, decodificación y respuesta activa (AR)
+# ==============================================================================
+
+- rule:
+    id: 100200
+    level: 3
+    group: ["syscheck", "fim", "file_created"]
+    description: "FIM: Nuevo archivo detectado en directorio supervisado"
+    criteria:
+      event_type: "FILE_CREATED"
+    active_response:
+      action: "trigger_yara_scan"
+      timeout: 5
+
+- rule:
+    id: 100201
+    level: 3
+    group: ["syscheck", "fim", "file_modified"]
+    description: "FIM: Archivo modificado detectado en directorio supervisado"
+    criteria:
+      event_type: "FILE_MODIFIED"
+    active_response:
+      action: "trigger_yara_scan"
+      timeout: 5
+
+- rule:
+    id: 100202
+    level: 12
+    group: ["syscheck", "fim_yara", "reverse_shell", "c2"]
+    description: "Wazuh FIM+YARA: Shell reversa o agente C2 detectado en archivo nuevo o modificado"
+    criteria:
+      yara_rule_matches: ["Demons_Reverse_Shell_Netcat", "Demons_Reverse_Shell_DevTcp", "Demons_Reverse_Shell_Python", "Linux_Reverse_Shell"]
+    active_response:
+      action: "quarantine_vault_and_firewall_drop"
+      severity: "CRITICAL"
+      isolate_network: true
+      terminate_pid: true
+
+- rule:
+    id: 100203
+    level: 10
+    group: ["syscheck", "fim_yara", "cryptominer"]
+    description: "Wazuh FIM+YARA: Minero de criptomonedas no autorizado detectado en archivo"
+    criteria:
+      yara_rule_matches: ["Demons_Cryptominer_Pools", "Linux_XMRig_Miner"]
+    active_response:
+      action: "quarantine_vault"
+      severity: "HIGH"
+      terminate_pid: true
+
+- rule:
+    id: 100204
+    level: 13
+    group: ["syscheck", "fim_yara", "webshell"]
+    description: "Wazuh FIM+YARA: Webshell o backdoor web detectado tras modificación de archivo"
+    criteria:
+      yara_rule_matches: ["Webshell_Generic_PHP", "Webshell_Bypass", "Webshell_JSP"]
+    active_response:
+      action: "quarantine_vault_and_firewall_drop"
+      severity: "CRITICAL"
+      isolate_network: true
+
+- rule:
+    id: 100205
+    level: 14
+    group: ["syscheck", "fim", "system_integrity"]
+    description: "Wazuh FIM: Modificación anómala en archivo o binario crítico del sistema operativo"
+    criteria:
+      target_paths_prefix: ["/etc/shadow", "/etc/sudoers", "/etc/pam.d/", "/bin/", "/sbin/", "/usr/bin/"]
+      event_type: "FILE_MODIFIED"
+    active_response:
+      action: "quarantine_vault"
+      severity: "EMERGENCY"
+      notify_desktop: true
+
+- rule:
+    id: 100206
+    level: 9
+    group: ["syscheck", "fim", "privilege_anomaly"]
+    description: "Wazuh FIM: Detección de asignación de bit SUID/SGID en archivo nuevo o modificado"
+    criteria:
+      has_suid_or_sgid: true
+    active_response:
+      action: "quarantine_vault"
+      severity: "HIGH"
+      notify_desktop: true

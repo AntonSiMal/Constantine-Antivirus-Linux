@@ -33,7 +33,7 @@ def _detect_ti_version() -> str:
                         return ver
             except Exception:
                 pass
-    return "4.3.2"
+    return "5.1.0"
 
 THREAT_INTEL_VERSION = _detect_ti_version()
 import csv
@@ -133,6 +133,18 @@ class ThreatIntelligence:
             """)
 
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS malicious_ips (
+                    ip TEXT PRIMARY KEY,
+                    threat_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    added_at REAL NOT NULL,
+                    last_verified REAL NOT NULL,
+                    confidence INTEGER DEFAULT 90,
+                    status TEXT DEFAULT 'active'
+                )
+            """)
+
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS feed_sync_history (
                     feed_name TEXT PRIMARY KEY,
                     feed_url TEXT,
@@ -159,6 +171,7 @@ class ThreatIntelligence:
             # 2. Creación segura de índices tras asegurar columnas
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_hashes_status ON malicious_hashes(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_urls_status ON malicious_urls(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ips_status ON malicious_ips(status)")
             conn.commit()
 
             if self.db_path != ":memory:":
@@ -185,6 +198,17 @@ class ThreatIntelligence:
             cursor.execute("""
                 CREATE TABLE malicious_urls (
                     url_or_domain TEXT PRIMARY KEY,
+                    threat_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    added_at REAL NOT NULL,
+                    last_verified REAL NOT NULL,
+                    confidence INTEGER DEFAULT 90,
+                    status TEXT DEFAULT 'active'
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE malicious_ips (
+                    ip TEXT PRIMARY KEY,
                     threat_type TEXT NOT NULL,
                     source TEXT NOT NULL,
                     added_at REAL NOT NULL,
@@ -231,6 +255,18 @@ class ThreatIntelligence:
                 cursor.execute("ALTER TABLE malicious_urls ADD COLUMN confidence INTEGER DEFAULT 90")
             if "status" not in url_cols:
                 cursor.execute("ALTER TABLE malicious_urls ADD COLUMN status TEXT DEFAULT 'active'")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS malicious_ips (
+                    ip TEXT PRIMARY KEY,
+                    threat_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    added_at REAL NOT NULL,
+                    last_verified REAL NOT NULL,
+                    confidence INTEGER DEFAULT 90,
+                    status TEXT DEFAULT 'active'
+                )
+            """)
             conn.commit()
         except Exception as e:
             logger.debug("Migración de esquema: %s", e)
@@ -355,6 +391,66 @@ class ThreatIntelligence:
             logger.error("Error consultando URL en Threat Intel: %s", e)
         return None
 
+    def add_ip(self, ip: str, threat_type: str = "C2_Server", source: str = "MISP_ThreatIntel",
+               confidence: int = 90, timestamp: Optional[float] = None) -> bool:
+        """Añade o actualiza una IP maliciosa o nodo C2 en la base de datos de inteligencia."""
+        if not ip:
+            return False
+        clean_ip = ip.strip().lower()
+        ts = timestamp or time.time()
+        try:
+            conn = self._get_connection()
+            conn.execute("""
+                INSERT INTO malicious_ips (ip, threat_type, source, added_at, last_verified, confidence, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'active')
+                ON CONFLICT(ip) DO UPDATE SET
+                    last_verified = excluded.last_verified,
+                    threat_type = excluded.threat_type,
+                    source = excluded.source,
+                    confidence = excluded.confidence,
+                    status = 'active'
+            """, (clean_ip, threat_type.strip(), source.strip(), ts, ts, confidence))
+            conn.commit()
+            if self.db_path != ":memory:":
+                conn.close()
+            return True
+        except Exception as e:
+            logger.error("Error persistiendo IP en SQLite: %s", e)
+            return False
+
+    def lookup_ip(self, ip: str) -> Optional[Dict[str, Any]]:
+        """Consulta una dirección IP en la base de inteligencia. Solo retorna indicadores activos."""
+        if not ip:
+            return None
+        clean_ip = ip.strip().lower()
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT threat_type, source, added_at, last_verified, confidence
+                FROM malicious_ips
+                WHERE ip = ? AND status = 'active'
+            """, (clean_ip,))
+            row = cursor.fetchone()
+            if self.db_path != ":memory:":
+                conn.close()
+            if row:
+                return {
+                    "threat_type": row[0],
+                    "source": row[1],
+                    "added_at": row[2],
+                    "last_verified": row[3],
+                    "confidence": row[4]
+                }
+        except Exception as e:
+            logger.error("Error consultando IP en Threat Intel: %s", e)
+        return None
+
+    # Métodos alias para integración directa con MISP y módulos de Threat Intelligence
+    insert_hash = add_hash
+    insert_url = add_url
+    insert_ip = add_ip
+
     # =========================================================================
     # GESTIÓN DE FALSOS POSITIVOS Y CADUCIDAD
     # =========================================================================
@@ -375,6 +471,9 @@ class ThreatIntelligence:
             if cur.rowcount > 0:
                 updated = True
             cur.execute("UPDATE malicious_urls SET status = 'false_positive' WHERE url_or_domain = ?", (clean,))
+            if cur.rowcount > 0:
+                updated = True
+            cur.execute("UPDATE malicious_ips SET status = 'false_positive' WHERE ip = ?", (clean,))
             if cur.rowcount > 0:
                 updated = True
             conn.commit()
@@ -403,6 +502,8 @@ class ThreatIntelligence:
 
             cur.execute("DELETE FROM malicious_urls WHERE last_verified < ? AND status = 'active'", (cutoff_ts,))
             pruned_urls = cur.rowcount
+            cur.execute("DELETE FROM malicious_ips WHERE last_verified < ? AND status = 'active'", (cutoff_ts,))
+            pruned_ips = cur.rowcount
             conn.commit()
             if self.db_path != ":memory:":
                 conn.close()
@@ -767,6 +868,20 @@ class ThreatIntelligence:
             logger.error("Error contando URLs en SQLite: %s", e)
             return 0
 
+    def count_ips(self) -> int:
+        """Retorna el número EXACTO de IPs y servidores C2 activos en SQLite."""
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM malicious_ips WHERE status = 'active'")
+            row = cur.fetchone()
+            if self.db_path != ":memory:":
+                conn.close()
+            return row[0] if row else 0
+        except Exception as e:
+            logger.error("Error contando IPs en SQLite: %s", e)
+            return 0
+
     def get_feed_sync_history(self) -> List[Dict[str, Any]]:
         """Retorna el historial completo de sincronizaciones de feeds con procedencia y sumas de control."""
         try:
@@ -821,6 +936,7 @@ class ThreatIntelligence:
             "phish_version": self.get_metadata("phish_version", f"v{THREAT_INTEL_VERSION}-PhishDB"),
             "phish_date": date_formatted,
             "phish_count": self.count_urls(),
+            "ips_count": self.count_ips(),
             "active_feeds": list(OFFICIAL_FEEDS.keys()),
             "feed_history": self.get_feed_sync_history()
         }

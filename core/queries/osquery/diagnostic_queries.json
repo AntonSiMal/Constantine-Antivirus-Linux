@@ -1,0 +1,39 @@
+{
+  "queries": {
+    "suspicious_processes": {
+      "query": "SELECT pid, name, path, cmdline, uid, on_disk FROM processes WHERE path LIKE '/tmp/%' OR path LIKE '/dev/shm/%' OR path LIKE '/var/tmp/%' OR on_disk = 0;",
+      "interval": 60,
+      "description": "Detecta procesos ejecutándose desde ubicaciones temporales volátiles o cuyo binario fue eliminado de disco."
+    },
+    "listening_ports": {
+      "query": "SELECT pid, port, protocol, address FROM listening_ports WHERE port in (4444, 5555, 6666, 1337, 8888, 9001) OR port > 1024;",
+      "interval": 120,
+      "description": "Audita puertos de red a la escucha asociados comúnmente a balizas C2 y servicios no estándar."
+    },
+    "root_users": {
+      "query": "SELECT uid, username, shell, directory FROM users WHERE uid = 0;",
+      "interval": 300,
+      "description": "Verifica cuentas de usuario con privilegios de superusuario (UID 0)."
+    },
+    "suid_binaries": {
+      "query": "SELECT path, username, permissions FROM suid_binaries;",
+      "interval": 300,
+      "description": "Inspecciona binarios con bits SUID asignados en el sistema."
+    },
+    "active_services": {
+      "query": "SELECT name, active_state, sub_state, description FROM systemd_units WHERE active_state = 'active';",
+      "interval": 300,
+      "description": "Lista servicios de systemd en ejecución para auditoría de persistencia."
+    },
+    "crontab_entries": {
+      "query": "SELECT command, path FROM crontab;",
+      "interval": 300,
+      "description": "Supervisa tareas programadas de cron en búsqueda de comandos de persistencia."
+    },
+    "security_configurations": {
+      "query": "SELECT key, value, status, recommendation FROM security_configurations;",
+      "interval": 600,
+      "description": "Evalúa configuraciones del kernel y directivas de seguridad del sistema operativo."
+    }
+  }
+}

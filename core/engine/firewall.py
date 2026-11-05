@@ -22,7 +22,8 @@ import signal
 import shutil
 import subprocess
 import logging
-from typing import Set, Optional, Dict, List, Any
+from enum import Enum
+from typing import Set, Optional, Dict, List, Any, Tuple
 
 logger = logging.getLogger("constantine.firewall")
 
@@ -31,6 +32,14 @@ CGROUP_V2_QUARANTINE = "/sys/fs/cgroup/constantine_quarantine"
 CGROUP_V1_NET_CLS = "/sys/fs/cgroup/net_cls/constantine_quarantine"
 NET_CLS_CLASSID = "0x00100001"  # 10:1
 
+
+
+class FirewallState(str, Enum):
+    """Estados oficiales del cortafuegos en Constantine 5.x."""
+    INSTALLED_ACTIVE = "INSTALLED_ACTIVE"         # Firewall instalado y activado
+    INSTALLED_INACTIVE = "INSTALLED_INACTIVE"     # Firewall instalado pero desactivado
+    NOT_INSTALLED = "NOT_INSTALLED"               # Firewall no instalado
+    UNKNOWN = "UNKNOWN"                           # Estado desconocido o no verificable
 
 class NetworkQuarantine:
     """
@@ -324,6 +333,119 @@ class NetworkQuarantine:
             return res.returncode == 0
         except Exception:
             return False
+
+    def contain_process(self, pid: int, reason: str = "") -> bool:
+        """Alias para contención y aislamiento de procesos agresores en red."""
+        return self.isolate_pid(pid, terminate=False)
+
+    def get_firewall_status(self) -> Dict[str, Any]:
+        """
+        Distingue rigurosamente los 4 estados del firewall en Constantine 5.x:
+        1. INSTALLED_ACTIVE: Firewall instalado y activado.
+        2. INSTALLED_INACTIVE: Firewall instalado y desactivado.
+        3. NOT_INSTALLED: Firewall no instalado.
+        4. UNKNOWN: Estado desconocido o no verificable.
+        """
+        has_ufw = shutil.which("ufw") is not None
+        has_gufw = shutil.which("gufw") is not None
+
+        if not has_ufw and not has_gufw:
+            return {
+                "state": FirewallState.NOT_INSTALLED.value,
+                "state_enum": FirewallState.NOT_INSTALLED,
+                "state_label": "Firewall no instalado",
+                "ufw_installed": False,
+                "gufw_installed": False,
+                "is_active": False,
+                "details": "Ni UFW ni GUFW se encuentran instalados en el sistema operativo."
+            }
+
+        if not has_ufw and has_gufw:
+            return {
+                "state": FirewallState.UNKNOWN.value,
+                "state_enum": FirewallState.UNKNOWN,
+                "state_label": "Estado desconocido o no verificable",
+                "ufw_installed": False,
+                "gufw_installed": True,
+                "is_active": False,
+                "details": "GUFW está instalado pero el binario base ufw no está disponible en el PATH."
+            }
+
+        try:
+            cmd = ["ufw", "status"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            out = res.stdout.lower()
+
+            if "status: active" in out or "estado: activo" in out:
+                return {
+                    "state": FirewallState.INSTALLED_ACTIVE.value,
+                    "state_enum": FirewallState.INSTALLED_ACTIVE,
+                    "state_label": "Firewall instalado y activado",
+                    "ufw_installed": True,
+                    "gufw_installed": has_gufw,
+                    "is_active": True,
+                    "details": "El cortafuegos se encuentra activado y protegiendo el equipo."
+                }
+            elif "status: inactive" in out or "estado: inactivo" in out:
+                return {
+                    "state": FirewallState.INSTALLED_INACTIVE.value,
+                    "state_enum": FirewallState.INSTALLED_INACTIVE,
+                    "state_label": "Firewall instalado pero desactivado",
+                    "ufw_installed": True,
+                    "gufw_installed": has_gufw,
+                    "is_active": False,
+                    "details": "El cortafuegos se encuentra instalado pero ha sido apagado por el usuario."
+                }
+            else:
+                return {
+                    "state": FirewallState.UNKNOWN.value,
+                    "state_enum": FirewallState.UNKNOWN,
+                    "state_label": "Estado desconocido o no verificable",
+                    "ufw_installed": True,
+                    "gufw_installed": has_gufw,
+                    "is_active": False,
+                    "details": f"Respuesta no estándar de ufw status: {res.stdout.strip() or res.stderr.strip()}"
+                }
+        except Exception as e:
+            return {
+                "state": FirewallState.UNKNOWN.value,
+                "state_enum": FirewallState.UNKNOWN,
+                "state_label": "Estado desconocido o no verificable",
+                "ufw_installed": True,
+                "gufw_installed": has_gufw,
+                "is_active": False,
+                "details": f"Error verificando ufw status: {e}"
+            }
+
+    def is_ufw_active(self) -> bool:
+        """Determina si UFW está activo consultando el estado auditado."""
+        return self.get_firewall_status()["is_active"]
+
+    def activate_initial_firewall(self) -> Tuple[bool, str]:
+        """
+        Activación inicial segura de GUFW/UFW realizada durante la instalación:
+        - Comprueba que el firewall esté disponible en el sistema.
+        - Activa su protección mediante el mecanismo compatible con la distribución.
+        - Verifica el resultado inmediatamente.
+        - NO sobrescribe las reglas existentes ni asume configuraciones fijas.
+        """
+        if not shutil.which("ufw"):
+            return False, "ufw no se encuentra instalado en el sistema."
+
+        # Comprobar si ya está activo
+        stat = self.get_firewall_status()
+        if stat["is_active"]:
+            return True, "El cortafuegos ya se encuentra activado; reglas existentes preservadas."
+
+        try:
+            # ufw --force enable activa la protección sin interacción interactiva preservando reglas
+            res = subprocess.run(["ufw", "--force", "enable"], capture_output=True, text=True, timeout=5)
+            stat_post = self.get_firewall_status()
+            if stat_post["is_active"]:
+                return True, "Cortafuegos activado y verificado exitosamente en el sistema."
+            return False, f"Activación ejecutada pero no confirmada activa: {res.stdout.strip() or res.stderr.strip()}"
+        except Exception as e:
+            return False, f"Excepción durante la activación inicial: {e}"
 
     def cleanup(self):
         """Purga las reglas dinámicas temporales creadas en nftables y vacía cgroups."""

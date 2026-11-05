@@ -38,6 +38,18 @@ import ctypes.util
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Dict, Any, List, Tuple, Set
+import tetragon
+from core.engine.tetragon import TetragonManager, TetragonEvent
+import falco
+from core.engine.falco import FalcoManager, FalcoAlert
+import wazuh
+from core.engine.wazuh import WazuhManager, WazuhAlert
+import osquery
+from core.engine.osquery import OSQueryManager
+import misp
+from core.engine.misp import MISPManager
+import sigma
+from core.engine.sigma_engine import SigmaManager
 
 logger = logging.getLogger("constantine.ebpf")
 
@@ -340,6 +352,33 @@ class EBPFMonitor:
         self.lost_events_count = 0
         self._metrics_lock = threading.Lock()
 
+        # Integración con Cilium Tetragon para observabilidad y enforcement en kernel
+        self.tetragon = TetragonManager(
+            alert_callback=self._on_tetragon_alert,
+            auto_enforce=self.auto_kill
+        )
+
+        # Integración con Falco (CNCF) para detección conductual de llamadas al sistema
+        self.falco = FalcoManager(
+            alert_callback=self._on_falco_alert,
+            auto_contain=self.auto_kill
+        )
+
+        # Integración con Wazuh para vigilancia de cambios FIM + YARA y Respuesta Activa
+        self.wazuh = WazuhManager(
+            notifier=self.notifier,
+            alert_callback=self._on_wazuh_alert
+        )
+
+        # Integración con osquery para diagnóstico e inventario del sistema basado en SQL
+        self.osquery = OSQueryManager()
+
+        # Integración con MISP para correlación de inteligencia de amenazas e IoCs
+        self.misp = misp.get_default_manager()
+
+        # Integración con Sigma para correlación de comportamiento y reglas SOC
+        self.sigma = sigma.get_default_manager()
+
         # Comprobación de capacidades reales del kernel
         self.capabilities = self.probe_kernel_capabilities()
 
@@ -437,6 +476,13 @@ class EBPFMonitor:
                 except Exception:
                     pass
 
+        has_tetragon = tetragon.is_available()
+        has_falco = falco.is_available()
+        has_wazuh = wazuh.is_available()
+        has_osquery = osquery.is_available()
+        has_misp = misp.is_available()
+        has_sigma = sigma.is_available()
+
         # Determinar backend preferente
         backend = "USERSPACE_POLLER"
         if has_root:
@@ -455,6 +501,12 @@ class EBPFMonitor:
             "has_tracepoints": has_tracepoints,
             "has_libbpf": has_libbpf,
             "has_bcc": HAS_BCC,
+            "has_tetragon": has_tetragon,
+            "has_falco": has_falco,
+            "has_wazuh": has_wazuh,
+            "has_osquery": has_osquery,
+            "has_misp": has_misp,
+            "has_sigma": has_sigma,
             "backend": backend,
             "kernel_version": kernel_release
         }
@@ -462,6 +514,83 @@ class EBPFMonitor:
     def _check_bpf_lsm_support(self) -> bool:
         """Comprueba si el kernel tiene activo el soporte de seguridad BPF LSM."""
         return bool(self.capabilities.get("has_bpf_lsm_kernel", False))
+
+    def _on_tetragon_alert(self, event_dict: Dict[str, Any]):
+        """Reenvía alertas de Tetragon al callback de Constantine y registra el incidente."""
+        threat = event_dict.get("description", "Amenaza en kernel detectada por Tetragon")
+        path = event_dict.get("target_path", "")
+        pid = event_dict.get("pid", 0)
+        binary = event_dict.get("binary", "tetragon-hook")
+        action = event_dict.get("action", "OVERRIDE_ENFORCE")
+
+        st = EBPFEventState.PROCESS_CONTAINED if action == "OVERRIDE_ENFORCE" else EBPFEventState.PROCESS_TERMINATED
+        incident = EBPFIncident(
+            pid=pid,
+            comm=binary,
+            target_path=path or f"/proc/{pid}",
+            threat_name=threat,
+            state=st,
+            timestamp=event_dict.get("timestamp", time.time()),
+            details=event_dict.get("arguments", "")
+        )
+        self._add_incident(incident)
+
+        if self.alert_callback:
+            try:
+                self.alert_callback(threat, path or f"/proc/{pid}", pid, binary, action)
+            except Exception as e:
+                logger.error("Error en callback de alerta desde Tetragon: %s", e)
+
+    def _on_falco_alert(self, alert_dict: Dict[str, Any]):
+        """Reenvía alertas conductuales de Falco al pipeline de Constantine y registra el incidente."""
+        threat = f"Falco.{alert_dict.get('rule', 'Anomaly')}: {alert_dict.get('output', '')}"
+        path = alert_dict.get("target_path", "")
+        pid = alert_dict.get("pid", 0)
+        proc = alert_dict.get("process", "falco-event")
+        action = "FALCO_DETECT_ALERT"
+
+        incident = EBPFIncident(
+            pid=pid,
+            comm=proc,
+            target_path=path or f"/proc/{pid}",
+            threat_name=threat,
+            state=EBPFEventState.SUSPICIOUS_ACTIVITY,
+            timestamp=alert_dict.get("timestamp", time.time()),
+            details=alert_dict.get("cmdline", "")
+        )
+        self._add_incident(incident)
+
+        if self.alert_callback:
+            try:
+                self.alert_callback(threat, path or f"/proc/{pid}", pid, proc, action)
+            except Exception as e:
+                logger.error("Error en callback de alerta desde Falco: %s", e)
+
+    def _on_wazuh_alert(self, alert_dict: Dict[str, Any]):
+        """Reenvía alertas FIM+YARA de Wazuh al pipeline de Constantine y registra el incidente."""
+        threat = f"Wazuh.Rule{alert_dict.get('rule_id')}: {alert_dict.get('description', '')}"
+        path = alert_dict.get("file_path", "")
+        metadata = alert_dict.get("metadata", {})
+        pid = metadata.get("pid", 0) or 0
+        comm = metadata.get("comm", "wazuh-fim")
+        action = alert_dict.get("active_response_action", "WAZUH_AR")
+
+        incident = EBPFIncident(
+            pid=pid,
+            comm=comm,
+            target_path=path or f"/proc/{pid}",
+            threat_name=threat,
+            state=EBPFEventState.PROCESS_CONTAINED if alert_dict.get("active_response_executed") else EBPFEventState.SUSPICIOUS_ACTIVITY,
+            timestamp=alert_dict.get("timestamp", time.time()),
+            details=f"Level: {alert_dict.get('level')} | Action: {action}"
+        )
+        self._add_incident(incident)
+
+        if self.alert_callback:
+            try:
+                self.alert_callback(threat, path or f"/proc/{pid}", pid, comm, action)
+            except Exception as e:
+                logger.error("Error en callback de alerta desde Wazuh: %s", e)
 
     def is_active(self) -> bool:
         """Indica si la supervisión por sondas eBPF nativas en kernel está activa."""
@@ -540,6 +669,12 @@ class EBPFMonitor:
             },
             "error_message": self.error_message,
             "kernel_version": kernel_release,
+            "tetragon": self.tetragon.get_status_info() if hasattr(self, "tetragon") else {},
+            "falco": self.falco.get_status_info() if hasattr(self, "falco") else {},
+            "wazuh": self.wazuh.get_status_info() if hasattr(self, "wazuh") else {},
+            "osquery": self.osquery.get_status_info() if hasattr(self, "osquery") else {},
+            "misp": self.misp.get_status_info() if hasattr(self, "misp") else {},
+            "sigma": self.sigma.get_status_info() if hasattr(self, "sigma") else {},
             "recommendation": self._get_troubleshooting_recommendation(),
             "total_incidents": len(self.incidents_history)
         }
@@ -572,6 +707,19 @@ class EBPFMonitor:
         4. Si falla o no hay privilegios, activa el centinela en espacio de usuario sin fingir estado.
         """
         self.capabilities = self.probe_kernel_capabilities()
+
+        # 0. Si Tetragon está disponible en el host, delegar observabilidad y enforcement
+        if hasattr(self, "tetragon") and self.tetragon.is_engine_available():
+            tetragon_started = self.tetragon.start()
+            if tetragon_started:
+                self.running = True
+                self.status = "ACTIVE"
+                self.monitoring_status = "ACTIVE"
+                self.lsm_status = "ENFORCING"
+                self.has_bpf_lsm = True
+                self.backend = "TETRAGON_EBPF"
+                logger.info("🛡️ Subsistema Tetragon ACTIVO: Delegando observabilidad y runtime enforcement de kernel.")
+                return True
 
         # 1. Verificación de privilegios de superusuario
         if not self.capabilities.get("has_root", False):
@@ -1133,6 +1281,10 @@ class EBPFMonitor:
     def stop(self):
         """Detiene de forma limpia los hilos y libera los programas eBPF cargados."""
         self.running = False
+        if hasattr(self, "tetragon") and self.tetragon.running:
+            self.tetragon.stop()
+        if hasattr(self, "falco") and self.falco.running:
+            self.falco.stop()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1)
         if self.fallback_thread and self.fallback_thread.is_alive():

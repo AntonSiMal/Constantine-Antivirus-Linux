@@ -1,0 +1,42 @@
+title: Suspicious SSH Key Modification or Remote Tunneling
+id: 7c2a1101-8b3d-4e92-b011-893a74c20004
+status: stable
+description: Detects attempts to add unauthorized SSH keys to authorized_keys, read private SSH keys, or establish reverse SSH tunnels.
+author: Sigma Community / Constantine EDR Team
+date: 2026-11-05
+references:
+  - https://github.com/SigmaHQ/sigma/blob/master/rules/linux/process_creation/
+tags:
+  - attack.persistence
+  - attack.t1098.004
+  - attack.command_and_control
+  - attack.t1572
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_auth_keys:
+    CommandLine|contains:
+      - 'authorized_keys'
+      - '.ssh/authorized_keys'
+  selection_private_keys:
+    CommandLine|contains:
+      - 'id_rsa'
+      - 'id_ed25519'
+      - 'id_ecdsa'
+    CommandLine|startswith:
+      - 'cat '
+      - 'curl '
+      - 'base64 '
+      - 'scp '
+  selection_tunnel:
+    Image|endswith:
+      - 'ssh'
+    CommandLine|contains:
+      - '-R '
+      - '-D '
+      - '-L '
+  condition: selection_auth_keys or selection_private_keys or selection_tunnel
+falsepositives:
+  - Legitimate remote administrative SSH tunneling
+level: high

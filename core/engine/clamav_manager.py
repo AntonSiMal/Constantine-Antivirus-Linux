@@ -237,6 +237,8 @@ class ClamAVManager:
             pass
 
         self._clamonacc_enabled = clamonacc_active
+        if clamonacc_active:
+            logger.warning("⚠️ [COORDINACIÓN FANOTIFY] Detectado clamonacc activo en el sistema. Para evitar interferencias o deadlocks por doble intercepción en los mismos puntos de montaje, Constantine mantiene la autoridad central de acceso en kernel delegando el escaneo a clamd.")
 
         logger.info("🛡️ [COORDINACIÓN ON-ACCESS] ClamAV coordinado con FanotifyInterceptor. Binarios excluidos de bucle: %s", excluded)
         return {

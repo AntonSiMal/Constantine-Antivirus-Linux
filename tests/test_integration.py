@@ -109,7 +109,7 @@ class TestConstantineIntegrationSuite(unittest.TestCase):
 
         def daemon_dispatcher(cmd, params, client_uid):
             if cmd == "GET_STATUS":
-                return "OK", {"status": "ACTIVE", "version": "4.3.2", "client_uid": client_uid}, ""
+                return "OK", {"status": "ACTIVE", "version": "5.1.0", "client_uid": client_uid}, ""
             elif cmd == "QUARANTINE_SAMPLE":
                 path = params.get("path")
                 return "OK", {"vault_id": "test_vid_123"}, ""
@@ -134,7 +134,7 @@ class TestConstantineIntegrationSuite(unittest.TestCase):
         client = SecureIPCClient(socket_path=socket_path)
         resp = client.send_command("GET_STATUS")
         self.assertEqual(resp.get("status"), "OK")
-        self.assertEqual(resp.get("data", {}).get("version"), "4.3.2")
+        self.assertEqual(resp.get("data", {}).get("version"), "5.1.0")
 
         server.stop()
 

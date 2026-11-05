@@ -25,6 +25,20 @@ from core.engine.clamav_bridge import ClamAVDaemonClient
 from core.engine.archive_sentinel import ArchiveSentinel
 from core.engine.clamav_importer import ClamAVSignatureImporter
 from core.engine.clamav_manager import ClamAVManager
+import yara_x
+from core.engine.yarax_engine import YaraXEngine
+import tetragon
+from core.engine.tetragon import TetragonManager
+import falco
+from core.engine.falco import FalcoManager
+import wazuh
+from core.engine.wazuh import WazuhManager, WazuhAlert
+import osquery
+from core.engine.osquery import OSQueryManager
+import misp
+from core.engine.misp import MISPManager
+import sigma
+from core.engine.sigma_engine import SigmaManager
 
 logger = logging.getLogger("constantine.scanner")
 
@@ -160,6 +174,7 @@ class Scanner:
 
         # Administrador especializado de reglas YARA (sin privilegios administrativos)
         self.yara_manager = YaraRuleManager(rules_dir=self.rules_dir)
+        self.yarax_engine = self.yara_manager.yarax_engine
 
         # Motor heurístico estructural y conductual multicapa (sin privilegios administrativos)
         self.heuristics = MultiLayerHeuristicEngine(score_threshold=45)
@@ -172,6 +187,27 @@ class Scanner:
         self.clamav_bridge = self.clamav_manager.bridge
         self.archive_sentinel = self.clamav_manager.archive_sentinel
         self.clamav_importer = self.clamav_manager.importer
+
+        # Gestor de observabilidad y enforcement Tetragon
+        self.tetragon_manager = TetragonManager()
+
+        # Gestor de detección conductual y alertas Falco (CNCF)
+        self.falco_manager = FalcoManager(vault=getattr(self, "vault", None))
+
+        # Gestor de vigilancia de cambios FIM + YARA y Respuesta Activa (Wazuh)
+        self.wazuh_manager = WazuhManager(scanner=self, vault=getattr(self, "vault", None))
+
+        # Gestor de diagnóstico e inventario del sistema basado en SQL (osquery)
+        self.osquery_manager = OSQueryManager()
+
+        # Gestor centralizado de inteligencia de amenazas MISP
+        self.misp_manager = MISPManager(threat_intel=self.intel)
+
+        # Gestor universal de reglas de detección de comportamiento Sigma (SOC)
+        self.sigma_manager = SigmaManager()
+        # Gestor central de eventos y motor de decisiones (Data Flow)
+        from core.engine.event_manager import ConstantineEventManager
+        self.event_manager = ConstantineEventManager(scanner=self)
 
     @property
     def yara_rules(self):
@@ -229,6 +265,13 @@ class Scanner:
         info["clamd_available"] = self.clamav_bridge.is_available()
         info["clamd_version"] = self.clamav_bridge.get_version() if info["clamd_available"] else None
         info["clamav_engine"] = self.clamav_manager.get_status_info()
+        info["tetragon"] = self.tetragon_manager.get_status_info() if hasattr(self, "tetragon_manager") else {}
+        info["falco"] = self.falco_manager.get_status_info() if hasattr(self, "falco_manager") else {}
+        info["wazuh"] = self.wazuh_manager.get_status_info() if hasattr(self, "wazuh_manager") else {}
+        info["osquery"] = self.osquery_manager.get_status_info() if hasattr(self, "osquery_manager") else {}
+        info["misp"] = self.misp_manager.get_status_info() if hasattr(self, "misp_manager") else {}
+        info["sigma"] = self.sigma_manager.get_status_info() if hasattr(self, "sigma_manager") else {}
+        info["event_manager"] = self.event_manager.get_status_info() if hasattr(self, "event_manager") else {}
         return info
 
     def update_signatures(self, sync_remote: bool = True, timeout: int = 15) -> Dict[str, Any]:
@@ -262,6 +305,12 @@ class Scanner:
             if match:
                 return True, f"{match['threat_name']} ({match['source']})"
 
+        # Escaneo con motor ClamAV si el demonio clamd está disponible
+        if hasattr(self, "clamav_bridge") and self.clamav_bridge.is_available():
+            is_clam, clam_threat = self.clamav_bridge.scan_file(path)
+            if is_clam and clam_threat:
+                return True, f"ClamAV.{clam_threat}"
+
         yara_matches, heur_res = self.sandbox_worker.execute_sandboxed_analysis(path, self.yara_manager, self.heuristics)
         if yara_matches:
             return True, f"YARA.{yara_matches[0].rule}"
@@ -281,7 +330,7 @@ class Scanner:
         if not path or not os.path.exists(path):
             return ScanResult(is_malicious=False, details="No accesible")
 
-        # 1. Inteligencia de Amenazas (Hashes SHA-256)
+        # 1. Inteligencia de Amenazas (Hashes SHA-256 e Indicadores MISP)
         file_hash = self.compute_sha256(path)
         if file_hash:
             match = self.intel.lookup_hash(file_hash)
@@ -296,6 +345,19 @@ class Scanner:
                     risk_level="CRITICAL",
                     risk_action="BLOCK_AND_ISOLATE"
                 )
+            if hasattr(self, "misp_manager"):
+                misp_match = self.misp_manager.lookup_ioc(file_hash)
+                if misp_match and misp_match.matched:
+                    return ScanResult(
+                        is_malicious=True,
+                        threat_name=misp_match.threat_name,
+                        rule_matched="MISP_IOC_MATCH",
+                        sha256=file_hash,
+                        details=f"Indicador MISP [{misp_match.threat_level}]: {misp_match.comment or misp_match.campaign}",
+                        risk_score=misp_match.confidence,
+                        risk_level="CRITICAL" if misp_match.threat_level == "High" else "HIGH",
+                        risk_action="BLOCK_AND_ISOLATE"
+                    )
 
         # 2. Centinela de Archivos Comprimidos (Anti-ZipBomb y Descompresión Recursiva Segura)
         if self.archive_sentinel.is_archive(path):

@@ -1,0 +1,20 @@
+# ==============================================================================
+# Constantine Falco Rules: System Integrity & Credential Protection
+# Reglas de detección de lectura no autorizada de credenciales y archivos críticos
+# ==============================================================================
+
+- rule: Constantine_Sensitive_Credential_File_Access
+  desc: Detecta acceso de lectura a archivos de credenciales críticas (/etc/shadow, claves SSH, sudoers)
+  condition: >
+    open_read and (fd.name in (/etc/shadow, /etc/shadow-, /etc/gshadow, /etc/sudoers) or fd.name startswith "/root/.ssh" or fd.name startswith "/home") and not proc.name in (login, passwd, sshd, sudo)
+  output: "Acceso sospechoso a archivo de credenciales del sistema (file=%fd.name proc=%proc.cmdline user=%user.name pid=%proc.pid)"
+  priority: ERROR
+  tags: [filesystem, credentials, shadow, access]
+
+- rule: Constantine_Execution_From_Temporary_Directory
+  desc: Detecta ejecución de binarios o scripts no confiables directamente desde /tmp o /dev/shm
+  condition: >
+    spawned_process and (proc.filename startswith "/tmp" or proc.filename startswith "/dev/shm" or proc.filename startswith "/var/tmp") and not proc.pname in (apt, dpkg, constantine)
+  output: "Ejecución sospechosa iniciada desde directorio temporal volátil (path=%proc.filename proc=%proc.cmdline user=%user.name pid=%proc.pid)"
+  priority: WARNING
+  tags: [execution, droppers, tmp, evasion]

@@ -1,0 +1,20 @@
+# ==============================================================================
+# Constantine Falco Rules: Unexpected Network Operations
+# Reglas de detección de comportamiento de red, sockets inusuales y balizamiento C2
+# ==============================================================================
+
+- rule: Constantine_Unexpected_Outbound_Network_Connection
+  desc: Detecta conexiones de red salientes hacia puertos inusuales o por procesos no convencionales
+  condition: >
+    outbound and (fd.sport > 1024 or fd.dport in (4444, 5555, 6666, 1337, 8888, 9001)) and not proc.name in (firefox, chrome, curl, wget, git, dnsmasq, systemd-resolved)
+  output: "Conexión de red inesperada hacia puerto sospechoso (proc=%proc.cmdline connection=%fd.name dport=%fd.dport pid=%proc.pid)"
+  priority: CRITICAL
+  tags: [network, c2, egress, exfiltration]
+
+- rule: Constantine_Inbound_Or_Reverse_Shell_Connection
+  desc: Detecta procesos netcat/socat o intérpretes conectándose interactivamente a sockets
+  condition: >
+    (proc.name in (nc, ncat, netcat, socat) or proc.cmdline contains "bash -i" or proc.cmdline contains "/dev/tcp/") and (fd.connected = true or fd.type = ipv4)
+  output: "Intento de conexión interactiva de shell reversa / socket sospechoso (proc=%proc.cmdline fd=%fd.name pid=%proc.pid)"
+  priority: EMERGENCY
+  tags: [network, reverse_shell, c2, rce]

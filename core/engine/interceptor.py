@@ -260,7 +260,12 @@ class FanotifyInterceptor:
         self._failure_lock = threading.Lock()
 
         self.fan_fd = -1
-        self.running = False
+        # Separación explícita de estados de ciclo de vida del interceptor
+        self.is_initialized: bool = False
+        self._is_marked: bool = False
+        self.running: bool = False
+        self.event_thread: Optional[threading.Thread] = None
+
         self.marked_paths: Set[str] = set()
         self.active_mounts: Set[str] = set()
         self.kernel_supports_exec_perm = True
@@ -314,17 +319,70 @@ class FanotifyInterceptor:
             if self.fan_fd < 0:
                 err = ctypes.get_errno()
                 logger.error("fanotify_init falló con errno %d (%s)", err, os.strerror(err))
+                self.is_initialized = False
                 return False
 
+            self.is_initialized = True
             logger.info("✅ fanotify_init exitoso (fd: %d, flags: 0x%08x)", self.fan_fd, flags)
             return True
         except Exception as e:
             logger.error("Excepción en fanotify_init: %s", e)
+            self.is_initialized = False
             return False
 
+    @property
+    def is_marked(self) -> bool:
+        """Indica si el interceptor tiene al menos una ruta o sistema de archivos enganchado."""
+        return bool(self._is_marked or len(self.marked_paths) > 0)
+
+    @is_marked.setter
+    def is_marked(self, value: bool):
+        self._is_marked = bool(value)
+
     def is_active(self) -> bool:
-        """Comprueba si el interceptor está realmente activo y tiene rutas enganchadas."""
-        return self.running and self.fan_fd >= 0 and len(self.marked_paths) > 0
+        """
+        Comprueba si el interceptor está activo con descriptor de kernel inicializado y marcas válidas.
+        Verifica el estado de inicialización y marcas reales, independientemente de si el hilo de
+        eventos ya está ejecutándose o aún está por arrancar.
+        """
+        initialized = self.is_initialized or (self.fan_fd >= 0)
+        has_marks = self.is_marked or len(self.marked_paths) > 0
+        return bool(initialized and self.fan_fd >= 0 and has_marks)
+
+    def is_running(self) -> bool:
+        """Comprueba si el bucle o hilo receptor de eventos está en ejecución activa y vivo."""
+        return bool(self.running and (self.event_thread is None or self.event_thread.is_alive()))
+
+    def start(self) -> bool:
+        """
+        Inicia el hilo receptor de eventos fanotify y el grupo de trabajadores en segundo plano.
+        Verifica que el hilo esté vivo antes de retornar True.
+        """
+        if self.running and self.event_thread and self.event_thread.is_alive():
+            return True
+
+        if not self.is_active():
+            logger.error("No se puede iniciar el interceptor: no está inicializado o no tiene marcas activas.")
+            return False
+
+        self.running = True
+        self._start_workers()
+
+        self.event_thread = threading.Thread(
+            target=self.process_events,
+            name="fanotify-event-receiver",
+            daemon=True
+        )
+        self.event_thread.start()
+
+        time.sleep(0.05)
+        if not self.event_thread.is_alive():
+            logger.critical("❌ El hilo receptor de eventos fanotify falló al arrancar.")
+            self.running = False
+            return False
+
+        logger.info("✅ Hilo receptor de eventos fanotify activo y verificado en segundo plano.")
+        return True
 
     def mark_directory(self, path: str, mark_mount: bool = False, mark_filesystem: bool = False, recursive: bool = True) -> bool:
         """
@@ -373,6 +431,7 @@ class FanotifyInterceptor:
         ret = libc.fanotify_mark(self.fan_fd, flags, ctypes.c_uint64(mask), -100, path_bytes)
         if ret >= 0:
             self.marked_paths.add(path)
+            self.is_marked = True
             logger.info("🎯 Enganchado fanotify en: %s (flags=0x%08x, mask=0x%08x)", path, flags, mask)
             return True
 
@@ -1031,6 +1090,14 @@ class FanotifyInterceptor:
             except Exception:
                 break
 
+        # Esperar al hilo receptor de eventos si fue iniciado en segundo plano por start()
+        if self.event_thread and self.event_thread.is_alive() and threading.current_thread() != self.event_thread:
+            try:
+                self.event_thread.join(timeout=0.5)
+            except Exception:
+                pass
+        self.event_thread = None
+
         # Detener hilos trabajadores
         with self._workers_lock:
             for w in self.workers:
@@ -1056,4 +1123,9 @@ class FanotifyInterceptor:
             except OSError:
                 pass
             self.fan_fd = -1
+
+        self.marked_paths.clear()
+        self.active_mounts.clear()
+        self.is_initialized = False
+        self.is_marked = False
         logger.info("Interceptor fanotify detenido limpiamente.")
