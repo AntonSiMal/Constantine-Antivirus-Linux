@@ -3,6 +3,34 @@
 # Constantine Antivirus - Instalador de Sistema Seguro para Linux
 # Compatible con Debian 11/12+, Ubuntu 20.04/22.04/24.04+, Linux Mint 20/21/22+
 # ==============================================================================
+#                 INSTALLATION DATA FLOW (Constantine 5.1 Architecture)
+# ==============================================================================
+#                 CONSTANTINE INSTALLER
+#                           |
+#                           v
+#                 SYSTEM COMPATIBILITY VERIFICATION
+#                           |
+#                           v
+#                 DEPENDENCY INSTALLATION (ClamAV, YARA-X, Tetragon)
+#                           |
+#                           v
+#                 CONSTANTINE CORE INSTALLATION (/opt/constantine)
+#                           |
+#                           v
+#                 SECURITY SERVICES CONFIGURATION (systemd hardening)
+#                           |
+#                           v
+#                 GUFW INSTALLATION & INITIAL FIREWALL ACTIVATION
+#                           |
+#                           v
+#                 PROTON VPN INSTALLATION & DESKTOP SHORTCUTS
+#                           |
+#                           v
+#                 INSTALLATION CHECK & VERIFICATION
+#                           |
+#                           v
+#                   INSTALLATION DONE
+# ==============================================================================
 set -e
 
 # --- Colores y Utilerías de Registro ---
@@ -67,7 +95,7 @@ if [ -f "$SCRIPT_DIR/VERSION" ]; then
 elif [ -f "/opt/constantine/VERSION" ]; then
     VERSION=$(tr -d '[:space:]' < "/opt/constantine/VERSION")
 else
-    VERSION="4.3.2"
+    VERSION="5.1.0"
 fi
 
 echo -e "${BOLD}⚔️  Iniciando Instalador de Constantine Antivirus (v${VERSION})${NC}"
@@ -124,6 +152,10 @@ if ! dpkg -s policykit-1 >/dev/null 2>&1 && ! dpkg -s polkitd >/dev/null 2>&1; t
 fi
 
 step "3. Instalando dependencias opcionales y herramientas de red..."
+# Intento opcional de instalación de YARA-X (Rust / VirusTotal) si pip está disponible
+if command -v pip3 >/dev/null 2>&1; then
+    pip3 install --quiet --no-warn-script-location "yara-x>=0.7.0" 2>/dev/null || log_info "YARA-X no disponible vía pip local; operando con libyara / heurístico."
+fi
 for pkg in "${OPTIONAL_PACKAGES[@]}"; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
         if apt-get install -y -qq "$pkg" >/dev/null 2>&1; then
@@ -142,14 +174,19 @@ else
     log_warn "No se pudieron instalar cabeceras para el kernel actual. Las sondas eBPF avanzadas podrían estar inactivas; la protección por fanotify continuará operativa."
 fi
 
-# --- 3. Detección de Integración de Red Opcional (Proton VPN) ---
-step "4. Verificando integración con herramientas de red (opcional)..."
+# --- 3. Instalación de Aplicación Externa de Red: Proton VPN (Arquitectura 5.x) ---
+step "4. Instalando aplicación de red externa: Proton VPN..."
 if command -v protonvpn-app >/dev/null 2>&1 || command -v protonvpn >/dev/null 2>&1 || command -v proton-vpn-gnome-desktop >/dev/null 2>&1 || command -v protonvpn-cli >/dev/null 2>&1; then
-    log_success "Cliente Proton VPN detectado en el sistema; integración habilitada en el Centro de Control."
+    log_success "Cliente Proton VPN ya se encuentra instalado en el sistema."
 else
-    log_info "Proton VPN no está instalado (componente de red de terceros opcional)."
-    log_info "Constantine Antivirus opera de forma 100% independiente sin alterar tus herramientas de red."
-    log_info "Para instalar Proton VPN de forma segura con verificación criptográfica SHA-256 ejecuta: sudo ./scripts/setup_protonvpn.sh"
+    log_info "Instalando cliente oficial de Proton VPN..."
+    if apt-get install -y -qq proton-vpn-gnome-desktop 2>/dev/null || apt-get install -y -qq protonvpn 2>/dev/null || apt-get install -y -qq protonvpn-cli 2>/dev/null; then
+        log_success "Proton VPN instalado exitosamente desde repositorios de la distribución."
+    elif [ -f "$SCRIPT_DIR/scripts/setup_protonvpn.sh" ]; then
+        log_info "Configurando paquete verificado de Proton VPN..."
+        bash "$SCRIPT_DIR/scripts/setup_protonvpn.sh" --batch 2>/dev/null || log_info "Instalador de Proton VPN preparado para el usuario."
+    fi
+    log_info "Acceso directo a Proton VPN habilitado en el Centro de Control de Constantine."
 fi
 
 # --- 4. Instalación de Librerías Python de Requisitos ---
@@ -181,7 +218,7 @@ log_success "Entorno de ejecución de Python validado correctamente."
 step "6. Desplegando archivos del sistema en /opt/constantine..."
 mkdir -p /opt/constantine /var/lib/constantine/vault/payloads /etc/constantine /var/lib/constantine/canaries /var/log/constantine || die "No se pudieron crear los directorios de /opt/constantine o /var/lib/constantine."
 
-REQUIRED_FILES=("daemon.py" "VERSION" "uninstall.sh")
+REQUIRED_FILES=("daemon.py" "VERSION" "uninstall.sh" "clamav.py" "yara_x.py" "tetragon.py" "falco.py" "wazuh.py" "osquery.py" "misp.py" "sigma.py")
 REQUIRED_DIRS=("core" "gui" "service" "scripts" "assets")
 
 for d in "${REQUIRED_DIRS[@]}"; do
@@ -200,6 +237,41 @@ done
 
 [ -f "requirements.txt" ] && cp requirements.txt /opt/constantine/
 [ -f "README.md" ] && cp README.md /opt/constantine/
+
+# Despliegue de Políticas TracingPolicy de Tetragon
+if [ -d "/opt/constantine/core/policies/tetragon" ]; then
+    mkdir -p /etc/tetragon/tetragon.tp.d 2>/dev/null || true
+    cp /opt/constantine/core/policies/tetragon/*.yaml /etc/tetragon/tetragon.tp.d/ 2>/dev/null || true
+    log_info "Políticas TracingPolicy de Tetragon sincronizadas en /etc/tetragon/tetragon.tp.d/"
+fi
+
+# Despliegue de Reglas de Comportamiento de Falco
+if [ -d "/opt/constantine/core/rules/falco" ]; then
+    mkdir -p /etc/falco/rules.d 2>/dev/null || true
+    cp /opt/constantine/core/rules/falco/*.yaml /etc/falco/rules.d/ 2>/dev/null || true
+    log_info "Reglas de Comportamiento de Falco sincronizadas en /etc/falco/rules.d/"
+fi
+
+# Despliegue de Reglas FIM y Respuesta Activa de Wazuh
+if [ -d "/opt/constantine/core/rules/wazuh" ]; then
+    mkdir -p /var/ossec/etc/rules 2>/dev/null || true
+    cp /opt/constantine/core/rules/wazuh/*.yaml /var/ossec/etc/rules/ 2>/dev/null || true
+    log_info "Reglas de Integridad FIM y Respuesta Activa de Wazuh sincronizadas en /var/ossec/etc/rules/"
+fi
+
+# Despliegue de Feeds de Inteligencia de Amenazas MISP
+if [ -d "/opt/constantine/core/feeds" ]; then
+    mkdir -p /var/lib/constantine/feeds 2>/dev/null || true
+    cp -r /opt/constantine/core/feeds/* /var/lib/constantine/feeds/ 2>/dev/null || true
+    log_info "Feeds de Inteligencia de Amenazas MISP sincronizados en /var/lib/constantine/feeds/"
+fi
+
+# Despliegue de Reglas de Detección Sigma
+if [ -d "/opt/constantine/core/rules/sigma" ]; then
+    mkdir -p /var/lib/constantine/rules/sigma 2>/dev/null || true
+    cp -r /opt/constantine/core/rules/sigma/* /var/lib/constantine/rules/sigma/ 2>/dev/null || true
+    log_info "Reglas de Detección Sigma sincronizadas en /var/lib/constantine/rules/sigma/"
+fi
 
 # Permisos seguros y estrictos
 chmod -R 755 /opt/constantine/ || die "Fallo ajustando permisos 755 en /opt/constantine/"
@@ -252,6 +324,19 @@ if [ -f "/opt/constantine/scripts/constantine-nautilus-scan.sh" ]; then
     chmod +x "/etc/skel/.local/share/nautilus/scripts/Analizar con Constantine"
 fi
 chmod +x /etc/skel/Escritorio/constantine.desktop /etc/skel/Desktop/constantine.desktop
+
+# Accesos directos a aplicaciones externas (GUFW y Proton VPN)
+if [ -f "/usr/share/applications/gufw.desktop" ]; then
+    cp /usr/share/applications/gufw.desktop /etc/skel/Escritorio/ 2>/dev/null || true
+    cp /usr/share/applications/gufw.desktop /etc/skel/Desktop/ 2>/dev/null || true
+fi
+for vpn_d in /usr/share/applications/protonvpn-app.desktop /usr/share/applications/proton-vpn.desktop /usr/share/applications/protonvpn.desktop; do
+    if [ -f "$vpn_d" ]; then
+        cp "$vpn_d" /etc/skel/Escritorio/ 2>/dev/null || true
+        cp "$vpn_d" /etc/skel/Desktop/ 2>/dev/null || true
+        break
+    fi
+done
 
 # Integración con el menú contextual de Nemo (Linux Mint)
 mkdir -p /usr/share/nemo/actions
@@ -329,13 +414,36 @@ if dpkg -s clamav-daemon >/dev/null 2>&1 || command -v clamd >/dev/null 2>&1; th
     systemctl enable clamav-daemon 2>/dev/null || true
     systemctl enable clamav-freshclam 2>/dev/null || true
     systemctl start clamav-daemon 2>/dev/null || true
-    log_success "Motor antivirus ClamAV (clamd & freshclam) integrado y habilitado."
+    # Desactivar clamonacc para evitar colisiones y deadlocks con el interceptor fanotify de Constantine
+    systemctl stop clamav-clamonacc 2>/dev/null || true
+    systemctl disable clamav-clamonacc 2>/dev/null || true
+    log_success "Motor antivirus ClamAV (clamd & freshclam) integrado y habilitado (clamonacc desactivado para evitar conflictos fanotify)."
 else
     log_info "ClamAV no detectado; Constantine operará en modo híbrido nativo con YARA y heurística 5 capas."
 fi
 
-# --- 12. Activación de Servicio Systemd, Polkit, D-Bus y Separación de Privilegios ---
-step "12b. Configurando usuario de servicio no privilegiado, Systemd, Polkit y D-Bus..."
+# --- 12b. Activación Inicial Segura del Cortafuegos (UFW / GUFW - Arquitectura 5.x) ---
+step "12b. Realizando activación inicial segura del cortafuegos (GUFW / UFW)..."
+if command -v ufw >/dev/null 2>&1; then
+    log_info "Comprobando disponibilidad del cortafuegos del sistema..."
+    UFW_CUR=$(ufw status 2>/dev/null || true)
+    if echo "$UFW_CUR" | grep -qi "active"; then
+        log_success "El cortafuegos ya se encuentra activado. Preservando reglas existentes del usuario."
+    else
+        log_info "Activando protección inicial del cortafuegos sin sobrescribir reglas existentes..."
+        ufw --force enable >/dev/null 2>&1 || true
+        if ufw status 2>/dev/null | grep -qi "active"; then
+            log_success "Cortafuegos activado y verificado exitosamente (Administración manual exclusiva del usuario en GUFW)."
+        else
+            log_warn "No se pudo confirmar la activación automática de ufw. El usuario podrá activarlo desde GUFW."
+        fi
+    fi
+else
+    log_warn "ufw no encontrado. El usuario podrá instalar y activar GUFW cuando lo requiera."
+fi
+
+# --- 12c. Activación de Servicio Systemd, Polkit, D-Bus y Separación de Privilegios ---
+step "12c. Configurando usuario de servicio no privilegiado, Systemd, Polkit y D-Bus..."
 # Crear usuario de servicio para aislamiento del motor de escaneo (Least Privilege)
 id -u constantine-scanner &>/dev/null || useradd -r -s /usr/sbin/nologin -d /nonexistent constantine-scanner 2>/dev/null || true
 

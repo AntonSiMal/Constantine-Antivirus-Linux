@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+*.quar
+manifest.json
+auth.json
+*.log
