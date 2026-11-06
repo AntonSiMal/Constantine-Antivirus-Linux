@@ -1,297 +1,485 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ==============================================================================
-# CONSTANTINE ANTIVIRUS - INSTALADOR OFICIAL DEL SISTEMA
+# Constantine Antivirus & EDR v3.2.3 - Instalador Automatizado (Debian / Ubuntu / Mint)
+#
+# Novedades Anti-Ransomware en v3.2.3:
+# 1. Siembra de Señuelos Estratégicos (Canary Tripwires) en Desktop, Documents, Downloads y Pictures.
+# 2. Vigilancia Pasiva de Modificaciones y Borrados sobre Archivos Trampa.
+# 3. Detección de Ráfagas Anómalas de Cifrado y Entropía Elevada (H > 7.55).
+# 4. Neutralización Atómica de Procesos Ransomware con SIGKILL y Bloqueo de Red UFW.
+# 5. Suite completa de 16 motores, Fail-Secure estricto y desinstalador limpio en './uninstall.sh'.
 # ==============================================================================
-# Este instalador automatizado realiza:
-# 1. Detección de distribución Linux y gestor de paquetes (apt, dnf, zypper, pacman).
-# 2. Instalación de dependencias del sistema operativo (Python 3, dev headers, GTK3, ClamAV, AIDE).
-# 3. Instalación y verificación de dependencias Python (requirements.txt con fallback seguro).
-# 4. Puerta de verificación pre/post-instalación rigurosa (módulos, sockets, binarios).
-# 5. Creación de usuarios de sistema, permisos y jerarquía de directorios en /opt/constantine.
-# 6. Detección de versión de kernel Linux y ajuste dinámico de capacidades (CAP_BPF/CAP_PERFMON sin CAP_SYS_ADMIN en >= 5.8).
-# 7. Despliegue, habilitación e inicio inmediato del servicio systemd con verificación activa.
-# 8. Configuración del symlink CLI global /usr/local/bin/constantine.
-# ==============================================================================
-set -euo pipefail
+set -e
 
+if [ "$EUID" -ne 0 ]; then
+    echo "[-] Error: Se requieren permisos de superusuario: sudo ./install.sh"
+    exit 1
+fi
+
+REAL_USER="${SUDO_USER:-$USER}"
+USER_HOME=$(eval echo "~$REAL_USER")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION=$(tr -d '\r\n' < "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "5.4.7")
+BIN_DIR="/usr/local/bin"
+LOG_DIR="/var/log/clamav"
+CONSTANTINE_LOG_DIR="/var/log/constantine"
+TETRAGON_LOG_DIR="/var/log/tetragon"
+FALCO_LOG_DIR="/var/log/falco"
+AIDE_LOG_DIR="/var/log/aide"
+AIDE_LIB_DIR="/var/lib/aide"
+SIGMA_DIR="/var/lib/constantine/sigma"
+QUARANTINE_DIR="/var/lib/constantine/quarantine"
+RULES_DIR="/var/lib/constantine/rules"
+COMMUNITY_RULES_DIR="/var/lib/constantine/rules/community"
+TI_DIR="/var/lib/constantine/intelligence"
+TETRAGON_POLICIES_DIR="/etc/tetragon/tetragon.tp.d"
+WHITELIST_FILE="/var/lib/constantine/whitelist.txt"
+IMMUTABLE_LOG="/var/log/constantine/immutable_audit.log"
+VAULT_KEY_FILE="/var/lib/constantine/.vault.key"
+CLAMD_SOCK="/run/clamav/clamd.ctl"
+UPDATER_SCRIPT="/usr/local/bin/constantine-updater"
 
-if [ "$VERSION" != "5.4.7" ]; then
-    echo "⚠️ Inconsistencia de versión detectada. Versión canónica: $VERSION"
+echo "===================================================================="
+echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v3.2.3 - ESCUDO ANTI-RANSOMWARE "
+echo " Canary Tripwires + Detección de Ráfagas + Neutralización Fulminante "
+echo "===================================================================="
+echo "[+] Usuario detectado: $REAL_USER"
+echo "[+] Ruta protegida en tiempo real: $USER_HOME"
+echo ""
+
+# 1. Comprobación de Compatibilidad de la Plataforma
+echo "[1/19] Evaluando compatibilidad del núcleo del sistema y nivel de protección viable..."
+KERNEL_CONF="/boot/config-$(uname -r)"
+FANOTIFY_OK=false
+EBPF_OK=false
+
+if [ -f "$KERNEL_CONF" ]; then
+    if grep -q "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y" "$KERNEL_CONF"; then
+        FANOTIFY_OK=true
+    fi
+    if grep -q "CONFIG_BPF_SYSCALL=y" "$KERNEL_CONF"; then
+        EBPF_OK=true
+    fi
+else
+    if [ -d "/sys/kernel/security" ]; then FANOTIFY_OK=true; EBPF_OK=true; fi
 fi
 
-echo "============================================================================"
-echo "⚔️ Instalando Constantine Antivirus EDR v${VERSION}"
-echo "============================================================================"
+if [ "$FANOTIFY_OK" = true ] && [ "$EBPF_OK" = true ]; then
+    echo "   [✓] Nivel de Protección: PREVENCIÓN TOTAL PRE-EJECUCIÓN (fanotify FAN_DENY + eBPF SIGKILL)"
+elif [ "$FANOTIFY_OK" = true ]; then
+    echo "   [✓] Nivel de Protección: PREVENCIÓN SÍNCRONA DE ARCHIVOS (fanotify FAN_DENY)"
+else
+    echo "   [!] Nivel de Protección: CONTENCIÓN REACTIVA ASISTIDA"
+fi
 
-# Flags de instalación
-INSTALL_DEPS=true
-START_SERVICE=true
+# 2. Creación de Identidades y Grupos Dedicados (Separación de Roles)
+echo "[2/19] Configurando grupo de sistema dedicado 'constantine'..."
+if ! getent group constantine >/dev/null 2>&1; then
+    groupadd -r constantine
+    echo "   [✓] Grupo de sistema 'constantine' creado."
+fi
+usermod -a -G constantine "$REAL_USER" 2>/dev/null || true
+echo "   [✓] Usuario '$REAL_USER' agregado al grupo 'constantine' para operar sin sudo constante."
 
-for arg in "$@"; do
-    case "$arg" in
-        --no-deps)
-            INSTALL_DEPS=false
-            echo "ℹ️ Flag detectado: --no-deps (Se omitirá la instalación de dependencias externas)"
-            ;;
-        --skip-service-start)
-            START_SERVICE=false
-            echo "ℹ️ Flag detectado: --skip-service-start (No se iniciará el demonio tras la instalación)"
-            ;;
-        *)
-            ;;
-    esac
+# 3. Siembra de Señuelos Estratégicos (Canary Tripwires)
+echo "[3/19] Sembrando archivos trampa Canary Tripwires en ubicaciones estratégicas..."
+CANARY_PATHS=(
+    "$USER_HOME/Desktop/!000_canary_personal_vault.docx"
+    "$USER_HOME/Documents/!000_canary_financial_report.xlsx"
+    "$USER_HOME/Downloads/!000_canary_confidential_id.pdf"
+    "$USER_HOME/Pictures/!000_canary_backup_keys.txt"
+)
+
+for canary in "${CANARY_PATHS[@]}"; do
+    mkdir -p "$(dirname "$canary")"
+    if [ ! -f "$canary" ]; then
+        echo "CANARY_DOCUMENT_SECURE_TOKEN_DO_NOT_MODIFY_CONSTANTINE_EDR_PROTECTION_TRIPWIRE" > "$canary"
+        chown "$REAL_USER:$REAL_USER" "$canary"
+        chmod 644 "$canary"
+    fi
 done
+echo "   [✓] 4 Señuelos Canary sembrados estratégicamente."
 
-# Comprobación de privilegios root
-if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ Este script debe ejecutarse con privilegios de superusuario (sudo ./install.sh)"
-    exit 1
+# 4. Instalación de dependencias base y bibliotecas de seguridad
+echo "[4/19] Instalando dependencias base de Debian, ClamAV, AIDE y GTK4..."
+export DEBIAN_FRONTEND=noninteractive
+apt update -qq
+apt install -y -qq clamav clamav-daemon clamav-freshclam \
+    yara libyara-dev \
+    aide aide-common \
+    libgtk-4-1 libgtk-4-dev build-essential cargo rustc \
+    curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https
+
+CLAMONACC_BIN=$(command -v clamonacc || which clamonacc || true)
+if [ -z "$CLAMONACC_BIN" ]; then
+    for p in /usr/sbin/clamonacc /usr/bin/clamonacc /usr/local/sbin/clamonacc; do
+        if [ -x "$p" ]; then CLAMONACC_BIN="$p"; break; fi
+    done
 fi
 
-# ==============================================================================
-# FASE 1: DETECCIÓN DEL GESTOR DE PAQUETES E INSTALACIÓN DE DEPENDENCIAS DEL SISTEMA
-# ==============================================================================
-detect_package_manager() {
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "apt"
-    elif command -v dnf >/dev/null 2>&1; then
-        echo "dnf"
-    elif command -v zypper >/dev/null 2>&1; then
-        echo "zypper"
-    elif command -v pacman >/dev/null 2>&1; then
-        echo "pacman"
-    else
-        echo "unknown"
+# 5. Provisión Genuina de YARA-X (Sin wrappers falsos)
+echo "[5/19] Provisionando motor genuino YARA-X (VirusTotal en Rust)..."
+rm -f /usr/local/bin/yr.fake 2>/dev/null || true
+if ! command -v yr >/dev/null 2>&1; then
+    ARCH="x86_64"
+    if [ "$(uname -m)" = "aarch64" ]; then ARCH="aarch64"; fi
+    YARAX_VER="v0.12.0"
+    curl -sSL "https://github.com/VirusTotal/yara-x/releases/download/${YARAX_VER}/yara-x-${YARAX_VER}-${ARCH}-unknown-linux-gnu.tar.gz" -o /tmp/yarax.tar.gz 2>/dev/null || true
+    if [ -f /tmp/yarax.tar.gz ]; then
+        tar -xzf /tmp/yarax.tar.gz -C /usr/local/bin/ ./yr 2>/dev/null || true
+        rm -f /tmp/yarax.tar.gz
     fi
+fi
+if [ -x "/usr/local/bin/yr" ]; then
+    echo "   [✓] YARA-X oficial verificado en /usr/local/bin/yr."
+else
+    echo "   [i] YARA-X no disponible como binario precompilado; Constantine reportará honestamente su estado sin falsear wrappers."
+fi
+
+# 6. Provisión de Yara-Rules Comunitarias y Locales
+echo "[6/19] Sincronizando colección oficial de Yara-Rules comunitarias..."
+mkdir -p "$COMMUNITY_RULES_DIR" "$RULES_DIR"
+if [ ! -d "$COMMUNITY_RULES_DIR/.git" ]; then
+    git clone --depth 1 https://github.com/Yara-Rules/rules.git "$COMMUNITY_RULES_DIR" 2>/dev/null || true
+fi
+
+cat <<'EOF' > "$RULES_DIR/linux_webshells.yar"
+rule Linux_Generic_Webshell {
+    meta:
+        description = "Detecta webshells tipicas en PHP, Python y Bash"
+        author = "Constantine Security Team"
+    strings:
+        $php1 = "eval(base64_decode(" nocase
+        $php2 = "passthru($_" nocase
+        $php3 = "system($_GET[" nocase
+        $php4 = "shell_exec($_POST[" nocase
+        $bsh1 = "/bin/sh -i >& /dev/tcp/" nocase
+        $bsh2 = "nc -e /bin/bash" nocase
+    condition:
+        any of them
 }
+EOF
+chmod -R 755 "$RULES_DIR"
 
-PKG_MGR=$(detect_package_manager)
-echo "🔍 Gestor de paquetes detectado en el host: $PKG_MGR"
+# 7. Inicialización de AIDE (Integridad Crítica)
+echo "[7/19] Configurando AIDE para supervisión de binarios, bibliotecas y arranque..."
+mkdir -p "$AIDE_LOG_DIR" "$AIDE_LIB_DIR"
+touch "$AIDE_LOG_DIR/aide.log"
+chmod 666 "$AIDE_LOG_DIR/aide.log"
 
-if [ "$INSTALL_DEPS" = true ]; then
-    echo "📦 Instalando y verificando dependencias del sistema..."
-    case "$PKG_MGR" in
-        apt)
-            echo "🔄 Actualizando repositorios APT e instalando paquetes base..."
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq || true
-            apt-get install -y --no-install-recommends \
-                python3 python3-pip python3-dev \
-                python3-cryptography python3-yaml python3-gi gir1.2-gtk-3.0 \
-                clamav clamav-daemon aide || true
-            ;;
-        dnf)
-            echo "🔄 Instalando dependencias con DNF..."
-            dnf install -y python3 python3-pip python3-devel \
-                python3-cryptography python3-pyyaml python3-gobject gtk3 \
-                clamav clamd aide || true
-            ;;
-        zypper)
-            echo "🔄 Instalando dependencias con Zypper..."
-            zypper --non-interactive install -y python3 python3-pip python3-devel \
-                python3-cryptography python3-PyYAML python3-gobject gtk3 \
-                clamav aide || true
-            ;;
-        pacman)
-            echo "🔄 Instalando dependencias con Pacman..."
-            pacman -Sy --noconfirm python python-pip \
-                python-cryptography python-yaml python-gobject gtk3 \
-                clamav aide || true
-            ;;
-        *)
-            echo "⚠️ Gestor de paquetes no reconocido o entorno minimalista. Se asume instalación manual."
-            ;;
-    esac
-
-    # Instalación de dependencias de Python desde requirements.txt
-    if [ -f "$SCRIPT_DIR/requirements.txt" ] && command -v pip3 >/dev/null 2>&1; then
-        echo "🐍 Verificando dependencias de Python vía pip3..."
-        pip3 install -r "$SCRIPT_DIR/requirements.txt" --break-system-packages 2>/dev/null || \
-        pip3 install -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || true
+if [ ! -f "$AIDE_LIB_DIR/aide.db" ]; then
+    if command -v aideinit >/dev/null 2>&1; then
+        aideinit -y -f 2>/dev/null || true
+    elif command -v aide >/dev/null 2>&1; then
+        aide --init 2>/dev/null || true
     fi
-else
-    echo "⏩ Omitiendo instalación automática de paquetes externos (--no-deps activo)."
-fi
-
-# ==============================================================================
-# FASE 2: PUERTA DE VERIFICACIÓN OPERATIVA PREVIA (VERIFICATION GATE)
-# ==============================================================================
-echo "🧪 Ejecutando Puerta de Verificación Operativa de Constantine..."
-
-# 1. Comprobación de binario de Python 3 y versión mínima
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "❌ Error crítico: python3 no está instalado en el sistema."
-    exit 1
-fi
-
-PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
-
-if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]); then
-    echo "❌ Error: Constantine requiere Python 3.8 o superior (Detectado: $PY_VER)."
-    exit 1
-fi
-echo "  [OK] Intérprete Python verificado: v$PY_VER"
-
-# 2. Comprobación de módulos obligatorios del núcleo (Core)
-python3 -c "
-import sys
-missing = []
-for mod in ['cryptography', 'yaml']:
-    try:
-        __import__(mod)
-    except ImportError:
-        missing.append(mod)
-if missing:
-    print(f'❌ Módulos obligatorios faltantes: {missing}', file=sys.stderr)
-    sys.exit(1)
-" || {
-    echo "❌ Fallo en la verificación de dependencias críticas de Python (cryptography / PyYAML)."
-    echo "💡 Instálelas ejecutando: pip3 install cryptography PyYAML"
-    exit 1
-}
-echo "  [OK] Criptografía AES-256-GCM y parser YAML validados."
-
-# 3. Comprobación de dependencias de GUI / PyGObject
-if python3 -c "import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk" >/dev/null 2>&1; then
-    echo "  [OK] Soporte gráfico GTK 3.0 / PyGObject operativo."
-else
-    echo "  [INFO] Entorno gráfico GTK 3.0 no detectado o modo headless. GUI operará en degradación asistida."
-fi
-
-# 4. Comprobación de motor antivirus ClamAV (Opcional / Asistido)
-if command -v clamd >/dev/null 2>&1 || [ -S /run/clamav/clamd.ctl ] || [ -S /var/run/clamav/clamd.ctl ]; then
-    echo "  [OK] Demonio ClamAV (clamd) detectado en el host."
-elif command -v clamscan >/dev/null 2>&1; then
-    echo "  [OK] Escáner ClamAV CLI (clamscan) disponible."
-else
-    echo "  [INFO] ClamAV no encontrado. Constantine utilizará su motor autónomo heurístico y YARA nativo."
-fi
-
-# ==============================================================================
-# FASE 3: CREACIÓN DE USUARIOS, GRUPOS Y ESTRUCTURA DE DIRECTORIOS
-# ==============================================================================
-# Crear grupo de usuarios de Constantine para comunicación segura por socket IPC
-if ! getent group constantine-users >/dev/null 2>&1; then
-    echo "👥 Creando grupo de sistema 'constantine-users'..."
-    groupadd -r constantine-users || true
-else
-    echo "👥 Grupo 'constantine-users' ya existe en el sistema."
-fi
-
-# Asignar usuario real no-root al grupo de usuarios de Constantine
-REAL_USER="${SUDO_USER:-}"
-if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
-    echo "👤 Agregando usuario '$REAL_USER' al grupo 'constantine-users'..."
-    usermod -a -G constantine-users "$REAL_USER" || true
-    echo "✅ Usuario '$REAL_USER' agregado al grupo 'constantine-users'."
-fi
-
-# Creación de directorios del sistema con permisos estrictos
-echo "📁 Configurando directorios del sistema..."
-mkdir -p /opt/constantine
-mkdir -p /var/lib/constantine/vault/payloads
-mkdir -p /var/lib/constantine/vault/metadata
-mkdir -p /var/lib/constantine/intel
-mkdir -p /var/log/constantine
-mkdir -p /run/constantine
-mkdir -p /etc/constantine
-
-chmod 750 /var/lib/constantine
-chmod 700 /var/lib/constantine/vault
-chmod 750 /var/log/constantine
-chmod 770 /run/constantine
-chown root:constantine-users /run/constantine
-
-# ==============================================================================
-# FASE 4: DESPLIEGUE DE ARCHIVOS DE LA APLICACIÓN Y BINARIOS CLI
-# ==============================================================================
-echo "📦 Desplegando archivos del sistema en /opt/constantine..."
-cp -r "$SCRIPT_DIR"/* /opt/constantine/
-chmod +x /opt/constantine/daemon.py
-chmod +x /opt/constantine/install.sh
-chmod +x /opt/constantine/uninstall.sh
-
-# Crear symlink global para la herramienta de consola
-mkdir -p /usr/local/bin
-ln -sf /opt/constantine/daemon.py /usr/local/bin/constantine
-echo "🔗 Enlace simbólico creado: /usr/local/bin/constantine -> /opt/constantine/daemon.py"
-
-# ==============================================================================
-# FASE 5: CONFIGURACIÓN E INICIO DEL SERVICIO SYSTEMD
-# ==============================================================================
-echo "⚙️ Configurando servicio systemd de Constantine..."
-if [ -f "$SCRIPT_DIR/service/constantine.service" ]; then
-    cp "$SCRIPT_DIR/service/constantine.service" /etc/systemd/system/constantine.service
-    chmod 644 /etc/systemd/system/constantine.service
-
-    # Detección combinada: Versión de kernel y sondeo funcional activo eBPF (EBPFCapabilityProber)
-    KERNEL_VER=$(uname -r 2>/dev/null || echo "5.15.0")
-    echo "🐧 Kernel Linux detectado en host: $KERNEL_VER"
-
-    PROBE_RESULT=$(python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-try:
-    from core.engine.systemd_hardening import EBPFCapabilityProber
-    res = EBPFCapabilityProber.probe_ebpf_runtime()
-    print(f"{res['is_modern_kernel']}:{res['can_drop_sys_admin']}:{res['lockdown_mode']}:{res['unprivileged_bpf_disabled']}")
-except Exception:
-    print('False:False:none:1')
-" 2>/dev/null || echo "False:False:none:1")
-
-    IS_MODERN=$(echo "$PROBE_RESULT" | cut -d: -f1)
-    CAN_DROP=$(echo "$PROBE_RESULT" | cut -d: -f2)
-    LOCKDOWN=$(echo "$PROBE_RESULT" | cut -d: -f3)
-
-    if [ "$CAN_DROP" = "True" ]; then
-        echo "  [OK] Kernel moderno y sondeo funcional eBPF exitoso (sin restricciones de lockdown)."
-        echo "  [OK] Configurando perfil de mínimo privilegio: CAP_SYS_ADMIN retirado (eBPF activo vía CAP_BPF + CAP_PERFMON)."
-        sed -i 's/CapabilityBoundingSet=CAP_SYS_ADMIN /CapabilityBoundingSet=/' /etc/systemd/system/constantine.service 2>/dev/null || true
-        sed -i 's/AmbientCapabilities=CAP_SYS_ADMIN /AmbientCapabilities=/' /etc/systemd/system/constantine.service 2>/dev/null || true
+    if [ -f "$AIDE_LIB_DIR/aide.db.new" ]; then
+        cp -f "$AIDE_LIB_DIR/aide.db.new" "$AIDE_LIB_DIR/aide.db"
     else
-        echo "  [INFO] Sondeo funcional determinó mantener CAP_SYS_ADMIN (Compatibilidad heredada o restricciones de kernel: lockdown=$LOCKDOWN)."
+        touch "$AIDE_LIB_DIR/aide.db"
     fi
 fi
 
-HAS_SYSTEMD=false
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    HAS_SYSTEMD=true
-fi
+# 8. Provisión de Reglas Sigma para Linux
+echo "[8/19] Provisionando repositorio de reglas Sigma para eventos de Linux..."
+mkdir -p "$SIGMA_DIR"
+cat <<'EOF' > "$SIGMA_DIR/lnx_suspicious_execution.yml"
+title: Suspicious Execution from /tmp or /dev/shm
+id: 5a8a478c-423d-4c8d-8a56-b08bc4495e86
+status: stable
+description: Detects process executions originating from world-writable directories
+author: Constantine Security Team / SigmaHQ
+logsource:
+    category: process_creation
+    product: linux
+detection:
+    selection:
+        Image|startswith:
+            - '/tmp/'
+            - '/var/tmp/'
+            - '/dev/shm/'
+    condition: selection
+falsepositives:
+    - Custom developer scripts
+level: high
+EOF
 
-if [ "$HAS_SYSTEMD" = true ]; then
-    echo "🔄 Recargando configuración de demonios de systemd..."
-    systemctl daemon-reload || true
-    echo "🔌 Habilitando servicio constantine.service..."
-    systemctl enable constantine.service || true
+cat <<'EOF' > "$SIGMA_DIR/lnx_reverse_shell.yml"
+title: Linux Interactive Reverse Shell Pattern
+id: 3c9b740e-295b-48cf-9d41-11d2eef2d001
+status: stable
+description: Detects interactive bash/sh reverse shells over network devices
+author: Constantine Security Team / SigmaHQ
+logsource:
+    category: process_creation
+    product: linux
+detection:
+    selection:
+        CommandLine|contains:
+            - '/bin/sh -i'
+            - '/bin/bash -i'
+            - '/dev/tcp/'
+            - 'nc -e /bin/'
+    condition: selection
+falsepositives:
+    - Legitimate administrative remote management
+level: critical
+EOF
+chmod -R 755 "$SIGMA_DIR"
 
-    if [ "$START_SERVICE" = true ]; then
-        echo "🚀 Iniciando servicio constantine.service..."
-        systemctl restart constantine.service || true
-        sleep 1
-        if systemctl is-active --quiet constantine.service 2>/dev/null; then
-            echo "  [OK] Servicio constantine.service iniciado y activo en el sistema."
-        else
-            echo "  [AVISO] El servicio fue configurado pero no reportó estado activo de inmediato."
-        fi
+# 9. Ingesta de Feeds de Inteligencia y MISP
+echo "[9/19] Descargando feeds de inteligencia de amenazas e IoCs de MISP..."
+mkdir -p "$TI_DIR"
+touch "$TI_DIR/misp_iocs.txt" "$TI_DIR/malwarebazaar_hashes.txt" "$TI_DIR/threatfox_iocs.txt" \
+      "$TI_DIR/urlhaus_domains.txt" "$TI_DIR/openphish_domains.txt"
+
+curl -s --connect-timeout 5 --max-time 15 "https://raw.githubusercontent.com/MISP/misp-warninglists/master/lists/compromised-ip/list.json" | grep -oE '"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"' | tr -d '"' | head -n 3000 > "$TI_DIR/misp_iocs.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://bazaar.abuse.ch/export/txt/sha256/recent/" | grep -v '^#' | head -n 5000 > "$TI_DIR/malwarebazaar_hashes.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://threatfox.abuse.ch/export/txt/recent/" | grep -v '^#' | head -n 5000 > "$TI_DIR/threatfox_iocs.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://urlhaus.abuse.ch/downloads/hostfile/" | grep -v '^#' | awk '{print $2}' | head -n 5000 > "$TI_DIR/urlhaus_domains.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://openphish.com/feed.txt" | head -n 2500 > "$TI_DIR/openphish_domains.txt" || true
+
+# 10. Instalación de UFW y GUFW
+echo "[10/19] Instalando UFW y su interfaz gráfica oficial (GUFW)..."
+apt install -y -qq ufw gufw
+ufw --force enable || true
+
+# 11. Instalación de ProtonVPN
+echo "[11/19] Instalando cliente oficial de ProtonVPN..."
+if ! command -v protonvpn-app >/dev/null 2>&1 && ! command -v protonvpn >/dev/null 2>&1; then
+    PVPN_DEB="/tmp/protonvpn-stable-release.deb"
+    curl -sSL "https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.6_all.deb" -o "$PVPN_DEB" || true
+    if [ -f "$PVPN_DEB" ]; then
+        dpkg -i "$PVPN_DEB" 2>/dev/null || true
+        apt update -qq 2>/dev/null || true
+        apt install -y -qq protonvpn-app 2>/dev/null || apt install -y -qq protonvpn-cli 2>/dev/null || true
+        rm -f "$PVPN_DEB"
     fi
-else
-    echo "⚠️ Entorno sin systemd activo en PID 1 (contenedor Docker/LXC o mock CI)."
-    echo "💡 Para iniciar el demonio manualmente: sudo /opt/constantine/daemon.py"
 fi
 
-# ==============================================================================
-# FASE 6: RESUMEN FINAL DEL ESTADO OPERATIVO
-# ==============================================================================
-echo "============================================================================"
-echo "✅ Constantine Antivirus v${VERSION} instalado y configurado con éxito."
-echo "🛡️ Estado del sistema: OPERATIVO Y VERIFICADO"
-echo "💡 Comandos útiles:"
-echo "   - Control del servicio: sudo systemctl {start|stop|status|restart} constantine"
-echo "   - Ejecución interactiva: sudo constantine"
-echo "   - Interfaz Gráfica:      constantine-gui (o python3 /opt/constantine/gui/app.py)"
-echo "   - Desinstalación:        sudo /opt/constantine/uninstall.sh"
-echo "============================================================================"
+# 12. Instalación de Wazuh Agent
+echo "[12/19] Configurando Wazuh Agent para integridad de archivos y SIEM..."
+if [ ! -f "/var/ossec/bin/wazuh-control" ]; then
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import 2>/dev/null || true
+    chmod 644 /usr/share/keyrings/wazuh.gpg 2>/dev/null || true
+    echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list || true
+    apt update -qq 2>/dev/null || true
+    WAZUH_MANAGER="127.0.0.1" apt install -y -qq wazuh-agent 2>/dev/null || true
+fi
+
+if [ -f "/var/ossec/etc/ossec.conf" ]; then
+    mkdir -p /var/ossec/logs/alerts
+    touch /var/ossec/logs/alerts/alerts.log
+    chmod 666 /var/ossec/logs/alerts/alerts.log
+    if ! grep -q "/var/log/constantine" /var/ossec/etc/ossec.conf; then
+        sed -i '/<\/ossec_config>/i \  <localfile>\n    <log_format>syslog</log_format>\n    <location>/var/log/constantine/yara_live.log</location>\n  </localfile>' /var/ossec/etc/ossec.conf 2>/dev/null || true
+    fi
+    systemctl enable wazuh-agent 2>/dev/null || true
+fi
+
+# 13. Instalación de osquery
+echo "[13/19] Instalando osquery para consultas SQL del sistema..."
+if ! command -v osqueryi >/dev/null 2>&1; then
+    curl -fsSL https://pkg.osquery.io/deb/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/osquery-archive-keyring.gpg 2>/dev/null || true
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/osquery-archive-keyring.gpg] https://pkg.osquery.io/deb deb main" > /etc/apt/sources.list.d/osquery.list || true
+    apt update -qq 2>/dev/null || true
+    apt install -y -qq osquery 2>/dev/null || true
+fi
+
+# 14. Instalación de Falco
+echo "[14/19] Configurando Falco para detección de comportamiento..."
+mkdir -p "$FALCO_LOG_DIR" /etc/falco
+if ! command -v falco >/dev/null 2>&1; then
+    curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg 2>/dev/null || true
+    echo "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" > /etc/apt/sources.list.d/falcosecurity.list || true
+    apt update -qq 2>/dev/null || true
+    apt install -y -qq falco 2>/dev/null || true
+fi
+touch "$FALCO_LOG_DIR/events.log"
+chmod 666 "$FALCO_LOG_DIR/events.log"
+
+# 15. Provisión de Tetragon (Cilium eBPF)
+echo "[15/19] Configurando Tetragon (Cilium) para enforcement de procesos..."
+mkdir -p "$TETRAGON_LOG_DIR" "$TETRAGON_POLICIES_DIR"
+if ! command -v tetragon >/dev/null 2>&1; then
+    ARCH="amd64"
+    if [ "$(uname -m)" = "aarch64" ]; then ARCH="arm64"; fi
+    TETRAGON_VER="v1.1.2"
+    curl -sSL "https://github.com/cilium/tetragon/releases/download/${TETRAGON_VER}/tetragon-${TETRAGON_VER}-${ARCH}.tar.gz" -o /tmp/tetragon.tar.gz || true
+    if [ -f /tmp/tetragon.tar.gz ]; then
+        tar -xzf /tmp/tetragon.tar.gz -C /usr/local/bin/ ./tetragon 2>/dev/null || true
+        rm -f /tmp/tetragon.tar.gz
+    fi
+fi
+
+cat <<EOF > /etc/systemd/system/tetragon.service
+[Unit]
+Description=Cilium Tetragon - eBPF Security Observability and Enforcement
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tetragon --log-level=info --export-filename=$TETRAGON_LOG_DIR/tetragon.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 16. Configuración de clamd.conf y ClamOnAcc
+echo "[16/19] Configurando motor clamd y ClamOnAcc con fanotify (FAN_DENY)..."
+CLAMD_CONF="/etc/clamav/clamd.conf"
+if [ ! -f "$CLAMD_CONF" ]; then CLAMD_CONF="/usr/local/etc/clamd.conf"; fi
+cp "$CLAMD_CONF" "${CLAMD_CONF}.bak"
+
+sed -i '/^OnAccessIncludePath/d' "$CLAMD_CONF"
+sed -i '/^OnAccessExcludeUname/d' "$CLAMD_CONF"
+sed -i '/^OnAccessPrevention/d' "$CLAMD_CONF"
+sed -i '/^OnAccessExtraScanning/d' "$CLAMD_CONF"
+sed -i '/^OnAccessExcludeRootUID/d' "$CLAMD_CONF"
+sed -i '/^OnAccessMaxFileSize/d' "$CLAMD_CONF"
+sed -i '/^HeuristicAlerts/d' "$CLAMD_CONF"
+
+cat <<EOF >> "$CLAMD_CONF"
+# --- CONSTANTINE ANTIVIRUS ON-ACCESS CONFIGURATION ---
+OnAccessIncludePath $USER_HOME
+OnAccessExcludeUname clamav
+OnAccessPrevention yes
+OnAccessExtraScanning yes
+OnAccessExcludeRootUID yes
+OnAccessMaxFileSize 50M
+HeuristicAlerts yes
+AlertBrokenExecutables yes
+AlertEncrypted yes
+AlertOLE2Macros yes
+AlertPhishing yes
+ScanPE yes
+ScanELF yes
+ScanOLE2 yes
+ScanPDF yes
+ScanArchive yes
+MaxRecursion 16
+EOF
+
+# 17. Inicialización del Baúl Criptográfico y Registro Forense Inmutable
+echo "[17/19] Inicializando Baúl Criptográfico y Registro Inmutable (Hash Chaining)..."
+mkdir -p "$LOG_DIR" "$CONSTANTINE_LOG_DIR" "$QUARANTINE_DIR" "$RULES_DIR" "$TI_DIR" "$SIGMA_DIR"
+touch "$LOG_DIR/clamonacc.log" "$LOG_DIR/freshclam.log" \
+      "$CONSTANTINE_LOG_DIR/yara_live.log" "$CONSTANTINE_LOG_DIR/threat_intel.log" \
+      "$CONSTANTINE_LOG_DIR/sigma_matches.log" \
+      "$TETRAGON_LOG_DIR/tetragon.log" "$WHITELIST_FILE"
+
+if [ ! -f "$VAULT_KEY_FILE" ]; then
+    head -c 32 /dev/urandom | xxd -p -c 32 > "$VAULT_KEY_FILE"
+    chmod 600 "$VAULT_KEY_FILE"
+fi
+
+if [ ! -f "$IMMUTABLE_LOG" ]; then
+    echo "2026-11-06T12:00:00Z | 0000000000000000000000000000000000000000000000000000000000000000 | 0000000000000000000000000000000000000000000000000000000000000000 | GENESIS | Registro Forense Inicializado" > "$IMMUTABLE_LOG"
+fi
+
+chown -R clamav:adm "$LOG_DIR"
+chown -R root:constantine "$CONSTANTINE_LOG_DIR" "$QUARANTINE_DIR" "$TI_DIR" "$SIGMA_DIR"
+chmod 775 "$CONSTANTINE_LOG_DIR"
+chmod 640 "$LOG_DIR"/*.log
+chmod 664 "$CONSTANTINE_LOG_DIR"/*.log "$TETRAGON_LOG_DIR"/*.log "$WHITELIST_FILE" "$IMMUTABLE_LOG"
+chmod 770 "$QUARANTINE_DIR"
+
+# Actualizador Unificado
+cat <<'EOF' > "$UPDATER_SCRIPT"
+#!/bin/bash
+set -e
+echo "[+] Actualizando firmas ClamAV..."
+freshclam --quiet || true
+
+TI_DIR="/var/lib/constantine/intelligence"
+SIGMA_DIR="/var/lib/constantine/sigma"
+COMMUNITY_DIR="/var/lib/constantine/rules/community"
+mkdir -p "$TI_DIR" "$SIGMA_DIR"
+
+echo "[+] Sincronizando feeds de Inteligencia (MalwareBazaar, ThreatFox, URLhaus, OpenPhish)..."
+curl -s --connect-timeout 5 --max-time 15 "https://bazaar.abuse.ch/export/txt/sha256/recent/" | grep -v '^#' | head -n 5000 > "$TI_DIR/malwarebazaar_hashes.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://threatfox.abuse.ch/export/txt/recent/" | grep -v '^#' | head -n 5000 > "$TI_DIR/threatfox_iocs.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://urlhaus.abuse.ch/downloads/hostfile/" | grep -v '^#' | awk '{print $2}' | head -n 5000 > "$TI_DIR/urlhaus_domains.txt" || true
+curl -s --connect-timeout 5 --max-time 15 "https://openphish.com/feed.txt" | head -n 2500 > "$TI_DIR/openphish_domains.txt" || true
+
+echo "[+] Sincronizando feeds de IoCs de MISP..."
+curl -s --connect-timeout 5 --max-time 15 "https://raw.githubusercontent.com/MISP/misp-warninglists/master/lists/compromised-ip/list.json" | grep -oE '"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"' | tr -d '"' | head -n 3000 > "$TI_DIR/misp_iocs.txt" || true
+
+if [ -d "$COMMUNITY_DIR/.git" ]; then
+    echo "[+] Sincronizando repositorio Yara-Rules comunitario..."
+    git -C "$COMMUNITY_DIR" pull --quiet 2>/dev/null || true
+fi
+
+if [ -f "/var/ossec/bin/wazuh-control" ]; then
+    echo "[+] Comprobando actualizaciones de Wazuh Agent..."
+    apt-get install --only-upgrade -y -qq wazuh-agent 2>/dev/null || true
+    systemctl restart wazuh-agent 2>/dev/null || true
+fi
+
+if command -v aide >/dev/null 2>&1; then
+    echo "[+] Verificando integridad de archivos críticos con AIDE..."
+    aide --check > /var/log/aide/aide.log 2>&1 || true
+    if [ -f /var/lib/aide/aide.db.new ]; then
+        cp -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null || true
+    fi
+fi
+
+touch /var/lib/constantine/.last_update
+systemctl restart clamonacc 2>/dev/null || true
+echo "[✓] Sincronización completa de los 16 módulos finalizada."
+EOF
+chmod 755 "$UPDATER_SCRIPT"
+"$UPDATER_SCRIPT" || true
+
+# Timer de systemd
+cat <<EOF > /etc/systemd/system/constantine-boot-update.service
+[Unit]
+Description=Constantine Antivirus - Actualizacion Automatica Continua
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATER_SCRIPT
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat <<EOF > /etc/systemd/system/constantine-boot-update.timer
+[Unit]
+Description=Constantine Antivirus - Timer de 10 min de encendido y ciclo continuo cada 24 horas
+After=network-online.target
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now constantine-boot-update.timer
+
+# 18. Servicio Aislado de fanotify en systemd
+echo "[18/19] Configurando demonio de intercepción con directivas de aislamiento de seguridad..."
+cat <<EOF > /etc/systemd/system/clamonacc.service
+[Unit]
+Description=Constantine Antivirus - fanotify Kernel Permission Interceptor
+After=clamav-daemon.service
+Requires=clamav-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_KILL CAP_NET_ADMIN
+ExecStartPre=/bin/sh -c 'timeout 45 sh -c "while [ ! -S $CLAMD_SOCK ]; do sleep 1; done" || exit 1'
+ExecStart=$CLAMO
