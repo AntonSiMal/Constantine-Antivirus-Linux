@@ -17,27 +17,28 @@ Group=root
 # 2. NoNewPrivileges: Impide que el servicio y sus hijos ganen nuevos privilegios vía setuid/setgid
 NoNewPrivileges=true
 
-# 3. Aislamiento del Sistema de Archivos
-# Protege /usr, /boot y /etc contra escritura no autorizada
-ProtectSystem=strict
+# 3. Aislamiento del Sistema de Archivos con Separación de Planos
+# ProtectSystem=full protege /usr y /boot en modo solo lectura para resguardar binarios de sistema.
+ProtectSystem=full
 
-# Protege los directorios de usuario (/home, /root, /run/user) en modo solo lectura de base.
-# Se garantiza que ningún componente del servicio pueda escribir arbitrariamente en /home.
-ProtectHome=read-only
+# Supervisión de archivos personales:
+# ProtectHome=false permite que los centinelas y fanotify supervisen /home, /root y /run/user sin bloquear acceso.
+ProtectHome=false
 
-# Directorios de escritura estrictamente delimitados a la infraestructura interna del servicio:
+# Directorios de escritura delimitados con estricta separación:
 # - Infraestructura interna: /var/lib/constantine (Baúl y metadatos), /var/log/constantine (Logs), /run/constantine (Socket IPC), /etc/constantine (Claves)
-# - Se EXCLUYE expresamente /home para impedir que el demonio o componentes potencialmente
-#   comprometidos dispongan de permisos de escritura arbitrarios sobre archivos personales.
-# - ProtectHome=read-only permanece inalterado y efectivo sobre toda la jerarquía de usuarios.
-ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine
+# - Planos de supervisión y remediación controlada: /home y /tmp
+ReadWritePaths=/var/lib/constantine /var/log/constantine /run/constantine /etc/constantine /home /tmp
 
-# Directorios del programa protegidos en modo solo lectura
-ReadOnlyPaths=/opt/constantine /usr /etc /boot
+# Directorios de binarios de la aplicación protegidos en modo solo lectura
+ReadOnlyPaths=/opt/constantine /usr /boot
 
-# 4. Sandboxing y Protección de Kernel
-PrivateTmp=true
+# 4. Sandboxing y Protección de Kernel compatible con eBPF y Observabilidad
+# PrivateTmp=false permite vigilar y contener amenazas en el /tmp real compartido del host
+PrivateTmp=false
 ProtectKernelTunables=true
+# ProtectKernelModules=true: Protege el kernel contra inserción no autorizada de módulos (.ko/rootkits).
+# eBPF no requiere módulos del kernel; opera vía bpf() y tracepoints sin comprometer la integridad modular.
 ProtectKernelModules=true
 ProtectControlGroups=true
 ProtectHostname=true
@@ -58,25 +59,24 @@ DeviceAllow=char-video4linux r
 DeviceAllow=char-alsa r
 DeviceAllow=block-* r
 
-# 6. Restricción Estricta de Capacidades Linux (Capability Bounding Set & AmbientCapabilities)
-# Solo conserva las capacidades estrictamente requeridas por el motor de kernel, eBPF y red:
-# - CAP_SYS_ADMIN: Requerido por fanotify (FAN_CLASS_CONTENT) y attach de sondas eBPF
-# - CAP_NET_ADMIN: Requerido para aislamiento de red y corte de sockets mediante nftables/ss
-# - CAP_KILL: Requerido para contención inmediata SIGKILL de ransomware y procesos hostiles
-# - CAP_DAC_READ_SEARCH: Inspección forense y lectura de muestras (SIN CAP_DAC_OVERRIDE)
-# - CAP_BPF / CAP_PERFMON: Sondas eBPF de kernel y buffers de rendimiento
-# - CAP_SYS_PTRACE: Inspección de mapas de memoria (/proc/<pid>/maps)
-# - CAP_SYS_RESOURCE: Ajuste de límites de memoria bloqueada en kernel para mapas eBPF
-# ELIMINADAS EXPRESAMENTE:
-# - CAP_DAC_OVERRIDE: Impide que el servicio eluda los permisos de escritura del sistema de archivos
-# - CAP_NET_RAW: Impide la creación arbitraria de sockets raw
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE
-AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE
+# 6. Conjunto de Capacidades Linux para EDR (Separación Inspección vs Remediación)
+# - Plano de Inspección Continua: CAP_DAC_READ_SEARCH (lectura forense en todo el FS), CAP_SYS_PTRACE (mapas /proc)
+# - Plano de Instrumentación eBPF: CAP_BPF, CAP_PERFMON, CAP_IPC_LOCK (y CAP_SYS_ADMIN como compatibilidad kernel < 5.8)
+# - Plano de Remediación Concurrente y Focalizada: CAP_DAC_OVERRIDE (delegado a proceso aislado para cuarentena), CAP_KILL (SIGKILL), CAP_NET_ADMIN (aislamiento de red)
+# NOTA: En instalaciones con kernel >= 5.8, install.sh retira dinámicamente CAP_SYS_ADMIN para asegurar mínimo privilegio.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_IPC_LOCK
+# AmbientCapabilities acotadas estrictamente: CAP_DAC_OVERRIDE no se hereda como ambiente permanente a hijos/workers
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_IPC_LOCK
 
 # 7. Filtrado Restrictivo de Llamadas al Sistema (SystemCallFilter)
-# Bloquea grupos de llamadas al sistema innecesarias o peligrosas y restringe arquitectura
-SystemCallFilter=@system-service
-SystemCallFilter=~@obsolete @privileged @reboot @swap
+# Semántica combinada de systemd con cálculo formal de conjuntos efectivos:
+# - @system-service: Requerido para ciclo de vida del demonio, señales, hebras, memoria y socket IPC Unix (/run/constantine).
+# - @network-io: Requerido para feeds de amenazas (MISP, VirusTotal), perfiles DNS activos y telemetría.
+# - @file-system: Requerido para supervisión on-access, lectura forense de directorios y cuarentena atómica.
+# - bpf, perf_event_open, fanotify_init, fanotify_mark: Syscalls indispensables para observabilidad y bloqueo preventivo.
+# - ~@obsolete @reboot @swap: Denegación estricta de ABI de kernel obsoleto y llamadas de reinicio o swapping destructivas.
+SystemCallFilter=@system-service @network-io @file-system bpf perf_event_open fanotify_init fanotify_mark
+SystemCallFilter=~@obsolete @reboot @swap
 SystemCallArchitectures=native
 
 # 8. Directorios de Estado y Ejecución

@@ -1,5 +1,7 @@
 #!/bin/bash
-# Desinstalador oficial de Constantine Antivirus
+# ==============================================================================
+# CONSTANTINE ANTIVIRUS - DESINSTALADOR OFICIAL DEL SISTEMA
+# ==============================================================================
 set -e
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -7,14 +9,15 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-echo "Deteniendo y deshabilitando servicio..."
+echo "Deteniendo y deshabilitando servicio constantine.service..."
 systemctl stop constantine.service 2>/dev/null || true
 systemctl disable constantine.service 2>/dev/null || true
 rm -f /etc/systemd/system/constantine.service
 systemctl daemon-reload 2>/dev/null || true
 
-echo "Eliminando archivos del programa..."
+echo "Eliminando archivos del programa y enlaces globales..."
+rm -f /usr/local/bin/constantine
 rm -rf /opt/constantine
 rm -rf /run/constantine
 
-echo "✅ Constantine Antivirus ha sido desinstalado."
+echo "✅ Constantine Antivirus ha sido desinstalado con éxito."

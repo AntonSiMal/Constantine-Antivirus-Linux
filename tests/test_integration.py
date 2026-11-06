@@ -90,7 +90,7 @@ class TestConstantineIntegrationSuite(unittest.TestCase):
         """Flujo E2E: Cliente GUI sin privilegios -> Socket de dominio Unix -> Despacho en Demonio."""
         sock_path = os.path.join(self.temp_dir.name, "daemon_ipc.sock")
         def mock_dispatch(cmd, params, client_uid=0):
-            return "OK", {"status": "ACTIVE", "version": "5.2.2", "client_uid": client_uid}, ""
+            return "OK", {"status": "ACTIVE", "version": "5.4.7", "client_uid": client_uid}, ""
 
         server = SecureIPCServer(socket_path=sock_path, dispatcher=mock_dispatch)
         server.start()
@@ -100,7 +100,7 @@ class TestConstantineIntegrationSuite(unittest.TestCase):
         with patch("core.engine.ipc_protocol.verify_peer_credentials", return_value=(True, 4567, 1000, 1000)):
             resp = client.send_command("GET_STATUS")
             self.assertEqual(resp.get("status"), "OK")
-            self.assertEqual(resp.get("data", {}).get("version"), "5.2.2")
+            self.assertEqual(resp.get("data", {}).get("version"), "5.4.7")
             self.assertEqual(resp.get("data", {}).get("client_uid"), 1000)
 
         server.stop()
