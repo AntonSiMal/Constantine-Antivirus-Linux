@@ -30,7 +30,7 @@ from core.engine.whitelist import PROHIBITED_SYSTEM_DIRS
 
 logger = logging.getLogger("constantine.gui")
 
-APP_VERSION = "5.2.2"
+APP_VERSION = "5.4.7"
 
 # Comprobación de disponibilidad de GTK 3.0 para entorno de escritorio
 HAS_GTK = False
@@ -123,11 +123,18 @@ class ConstantineUIController:
             status_level = "WARNING"
         else:
             ebpf_state = data.get("ebpf", "UNKNOWN")
-            if ebpf_state == "DEGRADED":
+            ebpf_telemetry = data.get("ebpf_telemetry_state", "UNKNOWN")
+            if ebpf_telemetry == "DEGRADED_PROC_FALLBACK" or ebpf_state == "DEGRADED":
                 is_protected = True
                 status_code = "PROTECTED_DEGRADED"
                 status_title = "PROTECCIÓN ACTIVA (DEGRADADA)"
-                status_message = "La intercepción fanotify está activa en kernel, pero el monitor eBPF opera en espacio de usuario por falta de privilegios CAP_BPF / BPF LSM."
+                status_message = "La intercepción fanotify está activa en kernel, pero el monitor eBPF opera en degradación asistida mediante sondeo periódico de /proc (limitación documentada: latencia de muestreo y procesos efímeros no capturados)."
+                status_level = "WARNING"
+            elif ebpf_telemetry == "EBPF_PARTIAL":
+                is_protected = True
+                status_code = "PROTECTED_PARTIAL"
+                status_title = "PROTECCIÓN ACTIVA (PARCIAL)"
+                status_message = "Tracepoints eBPF activos para telemetría; contención reactiva ante alertas (sin BPF LSM preventivo en kernel)."
                 status_level = "WARNING"
             else:
                 is_protected = True
@@ -154,6 +161,8 @@ class ConstantineUIController:
             "fanotify_state": fanotify_raw,
             "ebpf_state": data.get("ebpf", "INACTIVE"),
             "ebpf_mode": data.get("ebpf_mode", "UNKNOWN"),
+            "ebpf_telemetry_state": data.get("ebpf_telemetry_state", "MONITORING_DISABLED"),
+            "ebpf_telemetry_description": data.get("ebpf_telemetry_description", ""),
             "firewall_state": data.get("firewall", "UNKNOWN"),
             "dns_profile": data.get("dns", "UNKNOWN"),
             "threats_neutralized": threats_count,
@@ -282,13 +291,27 @@ class ConstantineUIController:
             },
             {
                 "id": "tetragon",
-                "name": "Políticas Cilium Tetragon eBPF",
-                "type": "Kernel Enforcement",
-                "state": "ACTIVE",
+                "name": "Adaptador de Políticas Cilium Tetragon",
+                "type": "Kernel Policy Adapter",
+                "state": "ACTIVE" if integ.get("tetragon", {}).get("daemon_running", False) else "DEGRADED",
                 "integration_mode": integ.get("tetragon", {}).get("mode", "STANDALONE_POLICY_EMULATOR"),
                 "is_external_installed": integ.get("tetragon", {}).get("daemon_installed", False),
-                "description": integ.get("tetragon", {}).get("details", "Aplicación de TracingPolicies eBPF en kernel."),
-                "degraded_reason": None
+                "connection_state": integ.get("tetragon", {}).get("connection_state", "NOT_INSTALLED"),
+                "detected_version": integ.get("tetragon", {}).get("detected_version", "No instalado"),
+                "service_version": integ.get("tetragon", {}).get("service_version", "No conectado"),
+                "events_telemetry": integ.get("tetragon", {}).get("events_telemetry", {}),
+                "last_event": integ.get("tetragon", {}).get("last_event", None),
+                "communication_errors": integ.get("tetragon", {}).get("communication_errors", {}),
+                "external_policies_status": integ.get("tetragon", {}).get("external_policies_status", {}),
+                "constantine_enforcement_status": integ.get("tetragon", {}).get("constantine_enforcement_status", "CONSTANTINE_EBPF_EMULATION"),
+                "connectivity_status": integ.get("tetragon", {}).get("connectivity_status", integ.get("tetragon", {}).get("connection_state", "NOT_INSTALLED")),
+                "external_policy_status": integ.get("tetragon", {}).get("external_policy_status", "EMULATION_ONLY"),
+                "enforcement_capability": integ.get("tetragon", {}).get("enforcement_capability", "CONSTANTINE_EBPF_EMULATION"),
+                "cli_version": integ.get("tetragon", {}).get("cli_version", integ.get("tetragon", {}).get("detected_version", "No instalado")),
+                "transport_health": integ.get("tetragon", {}).get("transport_health", "NOT_CONNECTED"),
+                "grpc_service_health": integ.get("tetragon", {}).get("grpc_service_health", "UNAVAILABLE"),
+                "description": integ.get("tetragon", {}).get("details", "Evaluación de TracingPolicies Tetragon en espacio de usuario / eBPF nativo de Constantine."),
+                "degraded_reason": None if integ.get("tetragon", {}).get("daemon_running", False) else "Demonio Tetragon no conectado; evaluando TracingPolicies mediante motor emulador autónomo de Constantine (sin gRPC de kernel Tetragon)"
             },
             {
                 "id": "osquery",
@@ -377,6 +400,7 @@ class ConstantineUIController:
         start_time = time.time()
         scanned_count = 0
         threats_found = []
+        indeterminates_found = []
 
         for target in critical_targets:
             if os.path.exists(target):
@@ -385,6 +409,7 @@ class ConstantineUIController:
                     data = resp.get("data", {})
                     scanned_count += data.get("scanned_count", 0)
                     threats_found.extend(data.get("threats", []))
+                    indeterminates_found.extend(data.get("indeterminates", []))
 
         duration = round(time.time() - start_time, 2)
         result = {
@@ -393,6 +418,8 @@ class ConstantineUIController:
             "scanned_count": scanned_count,
             "threats_count": len(threats_found),
             "threats": threats_found,
+            "indeterminates_count": len(indeterminates_found),
+            "indeterminates": indeterminates_found,
             "duration_seconds": duration,
             "timestamp": time.time(),
             "timestamp_str": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -415,6 +442,8 @@ class ConstantineUIController:
             "scanned_count": data.get("scanned_count", 0),
             "threats_count": data.get("threats_count", 0),
             "threats": data.get("threats", []),
+            "indeterminates_count": data.get("indeterminates_count", len(data.get("indeterminates", []))),
+            "indeterminates": data.get("indeterminates", []),
             "duration_seconds": duration,
             "timestamp": time.time(),
             "timestamp_str": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -426,11 +455,13 @@ class ConstantineUIController:
         """Ejecuta un análisis sobre un archivo o directorio personalizado."""
         start_time = time.time()
         norm_path = os.path.normpath(path)
+        indeterminates = []
         if os.path.isdir(norm_path):
             resp = self.client.send_command("SCAN_DIRECTORY", {"path": norm_path, "recursive": True})
             data = resp.get("data", {}) if resp.get("status") == "OK" else {}
             scanned_count = data.get("scanned_count", 0)
             threats = data.get("threats", [])
+            indeterminates = data.get("indeterminates", [])
         else:
             resp = self.client.send_command("SCAN_FILE", {"path": norm_path})
             data = resp.get("data", {}) if resp.get("status") == "OK" else {}
@@ -442,6 +473,13 @@ class ConstantineUIController:
                     "threat_name": data.get("threat_name", "Threat"),
                     "severity": data.get("severity", "HIGH")
                 })
+            elif data.get("is_indeterminate") or data.get("status") == "INDETERMINATE":
+                indeterminates.append({
+                    "path": norm_path,
+                    "details": data.get("details", "Análisis indeterminado"),
+                    "category": data.get("category", "IO_ERROR"),
+                    "status": "INDETERMINATE"
+                })
 
         duration = round(time.time() - start_time, 2)
         result = {
@@ -450,6 +488,8 @@ class ConstantineUIController:
             "scanned_count": scanned_count,
             "threats_count": len(threats),
             "threats": threats,
+            "indeterminates_count": len(indeterminates),
+            "indeterminates": indeterminates,
             "duration_seconds": duration,
             "timestamp": time.time(),
             "timestamp_str": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -956,7 +996,10 @@ class ConstantineApp:
             "-" * 64,
             f"2. PROTECCIÓN: {prot['active_count']} activos, {prot['degraded_count']} degradados, {prot['inactive_count']} inactivos",
             f"   - Interceptor Fanotify: {home['fanotify_state']}",
-            f"   - Monitor eBPF: {home['ebpf_state']} ({home['ebpf_mode']})",
+            f"   - Monitor eBPF: {home['ebpf_state']} ({home['ebpf_mode']}) | Telemetría: {home.get('ebpf_telemetry_state', 'N/A')}",
+            f"   - Diagnóstico Telemetría: {home.get('ebpf_telemetry_description', 'Operativo')}",
+            f"   - Adaptador Tetragon: {next((m.get('state') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')} (Transporte: {next((m.get('transport_health') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')} | gRPC: {next((m.get('grpc_service_health') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')}) | CLI: {next((m.get('cli_version') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')} | Servicio: {next((m.get('service_version') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')}",
+            f"   - Tetragon Telemetría: Recibidos={next((m.get('events_telemetry', {}).get('received', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)} | Decodificados={next((m.get('events_telemetry', {}).get('decoded', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)} | Evaluados={next((m.get('events_telemetry', {}).get('evaluated', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)} | Acciones: Req={next((m.get('events_telemetry', {}).get('actions', {}).get('requested', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)}, Ejec={next((m.get('events_telemetry', {}).get('actions', {}).get('executed', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)}, Conf={next((m.get('events_telemetry', {}).get('actions', {}).get('confirmed', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)}, Fall={next((m.get('events_telemetry', {}).get('actions', {}).get('failed', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)} | Políticas={next((m.get('external_policies_status', {}).get('state', 'N/A') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')} ({len(next((m.get('external_policies_status', {}).get('loaded_names', []) for m in prot['all_modules'] if m['id'] == 'tetragon'), []))} activas) | Plano Aplicación={next((m.get('constantine_enforcement_status', 'N/A') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'N/A')} | Errores={next((m.get('communication_errors', {}).get('total_errors', 0) for m in prot['all_modules'] if m['id'] == 'tetragon'), 0)} [{next((m.get('communication_errors', {}).get('last_error_code', 'NONE') for m in prot['all_modules'] if m['id'] == 'tetragon'), 'NONE')}]",
             "-" * 64,
             "3. ANÁLISIS: Opciones disponibles (Rápido, Completo, Personalizado)",
             "-" * 64,
