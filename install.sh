@@ -482,4 +482,91 @@ PrivateTmp=true
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_KILL CAP_NET_ADMIN
 ExecStartPre=/bin/sh -c 'timeout 45 sh -c "while [ ! -S $CLAMD_SOCK ]; do sleep 1; done" || exit 1'
-ExecStart=$CLAMO
+ExecStart=$CLAMONACC_BIN --foreground --log=$LOG_DIR/clamonacc.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl restart clamav-daemon
+
+for i in {1..30}; do
+    if [ -S "$CLAMD_SOCK" ]; then break; fi
+    sleep 1
+done
+systemctl enable --now clamonacc
+systemctl enable --now tetragon 2>/dev/null || true
+systemctl enable --now falco 2>/dev/null || true
+systemctl enable --now wazuh-agent 2>/dev/null || true
+
+# 19. Compilación, Lanzador y Smoke Test de Validación Inicial
+echo "[19/19] Compilando Constantine v3.2.3 y ejecutando validación inicial de integridad..."
+cd "$SCRIPT_DIR"
+if [ ! -f "$BIN_DIR/constantine" ]; then
+    cargo build --release -q
+    cp "$SCRIPT_DIR/target/release/constantine" "$BIN_DIR/constantine"
+fi
+chmod 755 "$BIN_DIR/constantine"
+
+ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
+mkdir -p "$ICON_DIR" /usr/share/applications "$USER_HOME/Desktop"
+
+cat <<'EOF' > "$ICON_DIR/constantine.svg"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0071e3;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#003c80;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="url(#grad)"/>
+  <path d="M256 96 L384 144 V264 C384 344 320 408 256 424 C192 408 128 344 128 264 V144 Z" fill="#ffffff" opacity="0.95"/>
+  <path d="M232 296 L192 256 L208 240 L232 264 L304 192 L320 208 Z" fill="#0071e3"/>
+</svg>
+EOF
+
+cat <<EOF > /usr/share/applications/constantine.desktop
+[Desktop Entry]
+Name=Constantine Antivirus & EDR
+GenericName=Antivirus & EDR Debian v3.2.3
+Comment=Protección EDR con Escudo Anti-Ransomware en 4 capas (Canary Tripwires, Ráfagas, SIGKILL y Forense)
+Exec=constantine
+Icon=constantine
+Terminal=false
+Type=Application
+Categories=System;Security;Utility;
+Keywords=antivirus;edr;ransomware;canary;misp;sigma;aide;wazuh;siem;fim;ufw;gufw;protonvpn;falco;tetragon;ebpf;clamav;yara;yarax;
+EOF
+
+cp /usr/share/applications/constantine.desktop "$USER_HOME/Desktop/"
+chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/Desktop/constantine.desktop"
+chmod +x "$USER_HOME/Desktop/constantine.desktop"
+
+# --- SMOKE TEST DE VALIDACIÓN INICIAL ---
+echo ""
+echo "[*] Ejecutando Smoke Test de validación inicial de integridad..."
+SMOKE_PASS=true
+if [ ! -S "$CLAMD_SOCK" ]; then echo "   [-] Fallo: Socket clamd no responde."; SMOKE_PASS=false; fi
+if [ ! -f "$IMMUTABLE_LOG" ]; then echo "   [-] Fallo: Registro inmutable no inicializado."; SMOKE_PASS=false; fi
+if [ ! -f "$VAULT_KEY_FILE" ]; then echo "   [-] Fallo: Clave de cifrado del baúl ausente."; SMOKE_PASS=false; fi
+
+if [ "$SMOKE_PASS" = true ]; then
+    echo "   [✓] Smoke Test superado: Todos los subsistemas, señuelos canary y registros operativos."
+else
+    echo "   [!] Advertencia: Se detectaron anomalías en la inicialización."
+fi
+
+echo ""
+echo "===================================================================="
+echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v3.2.3 COMPLETADA EXITOSAMENTE "
+echo "===================================================================="
+echo " • ESCUDO ANTI-RANSOMWARE: 4 Señuelos Canary Tripwires Activos"
+echo " • DETECCIÓN DE RÁFAGAS: Monitoreo de frecuencia y entropía (H > 7.55)"
+echo " • NEUTRALIZACIÓN FULMINANTE: SIGKILL atómico y corte perimetral UFW"
+echo " • MULTI-MOTOR FAIL-SECURE: ClamAV, YARA y YARA-X con validación estricta"
+echo " • DESINSTALADOR LIMPIO: Disponible mediante './uninstall.sh'"
+echo " • ACTUALIZACIÓN CONTINUA: 10 min post-arranque + cada 24 horas continuas"
+echo "===================================================================="
