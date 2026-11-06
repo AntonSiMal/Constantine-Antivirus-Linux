@@ -206,8 +206,14 @@ class CryptographicVault:
         aesgcm = AESGCM(key)
         try:
             plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-            with open(target_dest, "wb") as f:
-                f.write(plaintext)
+            # Protección contra reemplazo/sustitución en restauración: O_CREAT | O_EXCL
+            try:
+                fd = os.open(target_dest, os.O_WRONLY | os.O_CREAT | getattr(os, "O_EXCL", 0), 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(plaintext)
+            except FileExistsError:
+                logger.error("El archivo destino ya existe; restauración abortada para prevenir sobrescritura de archivo ajeno: %s", target_dest)
+                return False, f"El archivo de destino ya existe ({target_dest}); restauración rechazada por seguridad (anti-reemplazo)"
             logger.info("Restaurado de baúl exitoso y verificado: %s -> %s", sample_id, target_dest)
             return True, target_dest
         except Exception as e:
@@ -237,7 +243,7 @@ class CryptographicVault:
             return False
 
         data = {
-            "version": "5.2.2",
+            "version": "5.4.7",
             "active_key_id": self.keyring.active_key_id,
             "keys": {k: v.hex() for k, v in self.keyring.keys.items()}
         }

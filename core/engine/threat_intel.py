@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger("constantine.intel")
 
-THREAT_INTEL_VERSION = "5.2.2"
+THREAT_INTEL_VERSION = "5.4.7"
 DEFAULT_INTEL_DB = "/var/lib/constantine/intel/threat_intel.db"
 FALLBACK_INTEL_DB = "/tmp/constantine_intel.db"
 

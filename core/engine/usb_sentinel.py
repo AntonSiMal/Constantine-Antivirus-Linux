@@ -31,6 +31,7 @@ class USBSentinel:
         logger.info("🛡️ [CONTENCIÓN KERNEL] Activando vigilancia fanotify en tiempo real sobre %s", mount_point)
 
         threats_found = 0
+        indeterminates_found = 0
         for root, _, files in os.walk(mount_point):
             for f in files:
                 fpath = os.path.join(root, f)
@@ -38,6 +39,11 @@ class USBSentinel:
                 if rep.is_threat:
                     self.vault.quarantine_file(fpath, threat_name=rep.threat_name)
                     threats_found += 1
+                elif getattr(rep, "is_indeterminate", False):
+                    indeterminates_found += 1
+                    logger.warning("⚠️ [USB ANÁLISIS INDETERMINADO] %s -> %s", fpath, rep.details)
 
         if threats_found > 0:
             logger.critical("🚨 [AMENAZA EN USB NEUTRALIZADA] %d amenaza(s) aislada(s) en %s", threats_found, label)
+        if indeterminates_found > 0:
+            logger.warning("⚠️ [ARCHIVOS INDETERMINADOS EN USB] %d archivo(s) no pudieron ser analizados en %s", indeterminates_found, label)

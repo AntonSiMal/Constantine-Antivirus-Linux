@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, Callable, Tuple
 
 logger = logging.getLogger("constantine.updater")
 
-CURRENT_VERSION = "5.2.2"
+CURRENT_VERSION = "5.4.7"
 BACKUP_DIR = "/var/lib/constantine/backups"
 FALLBACK_BACKUP_DIR = "/tmp/constantine_backups"
 

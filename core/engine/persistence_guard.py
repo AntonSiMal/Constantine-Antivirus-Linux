@@ -45,4 +45,7 @@ class PersistenceGuard:
                     f.write(self.baseline[path])
                 logger.info("🔄 [RESTAURACIÓN AUTOMÁTICA] Archivo de persistencia restaurado desde copia limpia: %s", path)
             return False
+        if getattr(report, "is_indeterminate", False):
+            logger.warning("⚠️ [PERSISTENCIA ANÁLISIS INDETERMINADO] Archivo modificado no pudo ser analizado: %s (%s)", path, report.details)
+            return False
         return True

@@ -29,6 +29,12 @@ MODE_BPF_LSM = "BPF_LSM_PREVENTIVE"          # Bloqueo en kernel pre-ejecución 
 MODE_REACTIVE_FALLBACK = "REACTIVE_CONTAINMENT" # Neutralización reactiva (SIGKILL + Aislamiento)
 MODE_DEGRADED_OBS = "DEGRADED_OBSERVATION"      # Solo lectura /proc en entornos no privilegiados
 
+# 4 Estados Formales de Telemetría eBPF y Degradación Asistida
+TELEMETRY_STATE_OPTIMAL = "EBPF_ACTIVE_OPTIMAL"
+TELEMETRY_STATE_PARTIAL = "EBPF_PARTIAL"
+TELEMETRY_STATE_DEGRADED = "DEGRADED_PROC_FALLBACK"
+TELEMETRY_STATE_DISABLED = "MONITORING_DISABLED"
+
 
 class KernelObservationEngine:
     """
@@ -193,6 +199,27 @@ class EBPFMonitor:
             self.enforcement_mode = MODE_DEGRADED_OBS
         else:
             self.enforcement_mode = MODE_REACTIVE_FALLBACK
+
+    @property
+    def telemetry_state(self) -> str:
+        if not self.running:
+            return TELEMETRY_STATE_DISABLED
+        if not self.fallback_mode:
+            if self.enforcer.bpf_lsm_supported:
+                return TELEMETRY_STATE_OPTIMAL
+            return TELEMETRY_STATE_PARTIAL
+        return TELEMETRY_STATE_DEGRADED
+
+    @property
+    def telemetry_description(self) -> str:
+        state = self.telemetry_state
+        if state == TELEMETRY_STATE_OPTIMAL:
+            return "Sondas eBPF en kernel activas y bloqueo preventivo BPF LSM operativo."
+        elif state == TELEMETRY_STATE_PARTIAL:
+            return "Tracepoints eBPF activos para telemetría; contención reactiva ante alertas."
+        elif state == TELEMETRY_STATE_DEGRADED:
+            return "eBPF restringido por políticas de host (lockdown/LSM/virt). Operando en degradación asistida mediante sondeo de /proc (limitación documentada: latencia de muestreo y procesos efímeros no capturados)."
+        return "Telemetría de kernel deshabilitada por configuración."
 
     @property
     def lost_events_count(self) -> int:

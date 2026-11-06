@@ -21,7 +21,7 @@ from typing import Dict, Any, Tuple, Optional, Callable
 
 logger = logging.getLogger("constantine.ipc")
 
-IPC_PROTOCOL_VERSION = "5.2.2"
+IPC_PROTOCOL_VERSION = "5.4.7"
 DEFAULT_SOCKET_PATH = "/run/constantine/constantine_daemon.sock"
 FALLBACK_SOCKET_PATH = "/tmp/constantine_daemon.sock"
 MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MB

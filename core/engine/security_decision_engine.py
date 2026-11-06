@@ -325,13 +325,34 @@ class SecurityDecisionEngine:
         )
 
     def evaluate_file_access(self, file_path: str, event_fd: int, pid: int = 0,
-                             comm: str = "", scanner=None) -> SecurityDecision:
+                             comm: str = "", scanner=None, interceptor=None) -> SecurityDecision:
         """
         Evalúa y aplica enforcement sobre el acceso a un archivo (Fanotify on-access).
         Acción bloqueable verificable:
         - Fanotify FAN_DENY (bloqueo preventivo antes de que el proceso lea o ejecute el archivo).
         - Cuarentena inmediata con cifrado AES-256 en el baúl (anti-TOCTOU).
         """
+        if interceptor:
+            code = interceptor.evaluate_access(event_fd, file_path, pid=pid, comm=comm)
+            if code == 0x02: # FAN_DENY
+                if self.audit:
+                    self.audit.log_event("FILE_ACCESS_DENIED", {"path": file_path, "pid": pid, "action": "FAN_DENY"})
+                return SecurityDecision(
+                    is_blocked=True,
+                    enforcement_action="FANOTIFY_DENY",
+                    threat_level="CRITICAL",
+                    primary_engine="FANOTIFY",
+                    reason=f"Acceso bloqueado preventivamente en kernel mediante fanotify FAN_DENY: {file_path}",
+                    quarantined=True
+                )
+            return SecurityDecision(
+                is_blocked=False,
+                enforcement_action="ALLOW",
+                threat_level="CLEAN",
+                primary_engine="FANOTIFY",
+                reason="Acceso permitido por interceptor fanotify"
+            )
+
         if not scanner:
             return SecurityDecision(
                 is_blocked=False,
@@ -368,13 +389,36 @@ class SecurityDecisionEngine:
                 details=report.to_dict() if hasattr(report, "to_dict") else {}
             )
 
+        if (getattr(report, "is_clean", False) or getattr(report, "status", None) == "CLEAN") and not getattr(report, "is_indeterminate", False):
+            return SecurityDecision(
+                is_blocked=False,
+                enforcement_action="ALLOW",
+                threat_level="CLEAN",
+                primary_engine="FANOTIFY_SCANNER",
+                reason="Archivo verificado limpio por escáner multicapa",
+                quarantined=False,
+                process_killed=False,
+                network_isolated=False
+            )
+
+        # Si no fue explícitamente verificado limpio ni amenaza confirmada, es ANÁLISIS INDETERMINADO
+        det = getattr(report, "details", "Análisis no concluyente")
+        eng = getattr(report, "engine", "Scanner")
+        if self.audit:
+            self.audit.log_event("FILE_SCAN_INDETERMINATE", {
+                "path": file_path,
+                "engine": eng,
+                "details": det,
+                "pid": pid
+            })
         return SecurityDecision(
-            is_blocked=False,
-            enforcement_action="ALLOW",
-            threat_level="CLEAN",
+            is_blocked=True,
+            enforcement_action="INDETERMINATE_DENY",
+            threat_level="HIGH",
             primary_engine="FANOTIFY_SCANNER",
-            reason="Archivo verificado limpio por escáner multicapa",
+            reason=f"Análisis indeterminado: no se pudo verificar la seguridad del archivo ({det})",
             quarantined=False,
             process_killed=False,
-            network_isolated=False
+            network_isolated=False,
+            details=report.to_dict() if hasattr(report, "to_dict") else {}
         )

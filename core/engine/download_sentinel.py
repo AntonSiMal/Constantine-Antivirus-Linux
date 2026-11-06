@@ -27,13 +27,16 @@ class DownloadSentinel:
         logger.info("Centinela de descargas detenido.")
 
     def handle_download_complete(self, file_path: str, username: str = "user") -> bool:
-        """Analiza la descarga recién finalizada y aplica aislamiento si es maliciosa."""
+        """Analiza la descarga recién finalizada y aplica aislamiento si es maliciosa o rechaza si es indeterminada."""
         fname = os.path.basename(file_path)
         logger.info("📥 [DESCARGA VERIFICADA FINALIZADA] Analizando con contención preventiva: %s (Usuario: %s)", fname, username)
         report = self.scanner.scan_file(file_path)
         if report.is_threat:
             logger.critical("🚨 [DESCARGA MALICIOSA AISLADA] %s -> Amenaza: %s", file_path, report.threat_name)
             self.vault.quarantine_file(file_path, threat_name=report.threat_name)
+            return False
+        if getattr(report, "is_indeterminate", False):
+            logger.warning("⚠️ [DESCARGA ANÁLISIS INDETERMINADO] No se pudo analizar la descarga: %s (%s). Denegando autorización preventiva.", fname, report.details)
             return False
         logger.info("✅ [DESCARGA LIMPIA] Verificada y autorizada: %s", fname)
         return True

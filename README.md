@@ -1,6 +1,6 @@
 # Constantine Antivirus & EDR for Linux
 
-[![Version: v5.2.2](https://img.shields.io/badge/Version-v5.2.2-blue.svg)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
+[![Version: v5.4.7](https://img.shields.io/badge/Version-v5.4.7-blue.svg)](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Security: Hardened](https://img.shields.io/badge/Security-Hardened%20100%2F100-emerald.svg)](service/constantine.service)
 [![Kernel: 5.15+](https://img.shields.io/badge/Kernel-5.15%2B%20LSM-purple.svg)](https://kernel.org)
@@ -50,7 +50,7 @@ El principio rector de Constantine es que **el usuario debe poder utilizar su co
 
 ---
 
-## 🖥️ Interfaz Gráfica de Usuario (GUI v5.2.2)
+## 🖥️ Interfaz Gráfica de Usuario (GUI v5.4.7)
 
 La interfaz gráfica opera en espacio de usuario no privilegiado conectándose al socket Unix seguro. Muestra **información real, dinámica y verificable**, estructurada en 8 secciones:
 
@@ -69,7 +69,7 @@ La interfaz gráfica opera en espacio de usuario no privilegiado conectándose a
 * **📜 5. Historial:**
   * Registro de auditoría cronológico en tiempo real (bloqueos fanotify, detecciones eBPF, alertas de comportamiento, cambios de configuración) con filtrado por severidad (`CRITICAL`, `WARNING`, `INFO`).
 * **⚡ 6. Actualizaciones:**
-  * Versión del sistema (v5.2.2) y estadísticas verificadas de firmas activas: reglas YARA / YARA-X, reglas Sigma, reglas Falco, reglas Wazuh FIM e IoCs indexados en MISP. Botón para comprobación y aplicación de actualizaciones con auto-rollback.
+  * Versión del sistema (v5.4.7) y estadísticas verificadas de firmas activas: reglas YARA / YARA-X, reglas Sigma, reglas Falco, reglas Wazuh FIM e IoCs indexados en MISP. Botón para comprobación y aplicación de actualizaciones con auto-rollback.
 * **⚙️ 7. Configuración:**
   * **Exclusiones (Whitelist):** Gestión de rutas autorizadas con verificación de integridad de inodo y hash SHA-256. Bloqueo estricto que prohíbe excluir directorios críticos (`/`, `/etc`, `/usr/bin`, etc.).
   * **Privacidad:** Selector de perfiles DNS seguros (Mullvad Adblock, Mullvad Base, Cloudflare Security) y escudo de periféricos (cámara web y micrófono).
@@ -95,7 +95,7 @@ La comunicación entre el demonio root y las herramientas de usuario (GUI y CLI)
 
 ```text
 constantine/
-├── VERSION                                 # Versión canónica del sistema (5.2.2)
+├── VERSION                                 # Versión canónica del sistema (5.4.7)
 ├── daemon.py                               # Demonio principal de seguridad y observabilidad
 ├── install.sh                              # Script oficial de instalación y verificación
 ├── service/
@@ -110,7 +110,8 @@ constantine/
 │       ├── compatibility_matrix.py         # Matriz oficial de compatibilidad de SO y kernel
 │       ├── resilience_manager.py           # Resiliencia, modo de mantenimiento y circuit breakers
 │       ├── ebpf_monitor.py                 # Motor eBPF (Observación, Detección, BPF LSM)
-│       ├── interceptor.py                  # Interceptor on-access Fanotify anti-deadlock
+│       ├── tetragon_monitor.py             # Adaptador de políticas Cilium Tetragon y socket gRPC stream
+│       ├── interceptor.py                  # Interceptor nativo Fanotify (fanotify_init, fanotify_mark, receptor multihilo y respuestas de permiso)
 │       ├── vault.py                        # Baúl criptográfico AES-256-GCM
 │       ├── scanner.py                      # Motor de análisis YARA-X y heurístico
 │       ├── yara_manager.py                 # Compilador y gestor de reglas YARA

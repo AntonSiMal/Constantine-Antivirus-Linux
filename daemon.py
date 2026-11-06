@@ -8,6 +8,7 @@ import signal
 import logging
 from typing import Dict, Any, Tuple, Optional
 
+from core.engine.quarantine_operator import cleanup_orphan_staging
 from core.engine.vault import CryptographicVault
 from core.engine.scanner import Scanner
 from core.engine.interceptor import FanotifyInterceptor
@@ -37,7 +38,7 @@ from core.engine.security_decision_engine import SecurityDecisionEngine
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 logger = logging.getLogger("constantine.daemon")
 
-DAEMON_VERSION = "5.2.2"
+DAEMON_VERSION = "5.4.7"
 
 class ConstantineDaemon:
     def __init__(self, is_test: bool = False):
@@ -81,43 +82,51 @@ class ConstantineDaemon:
            - Si BPF LSM no disponible: Contención reactiva inmediata (SIGKILL post-lanzamiento).
         4. Bloqueo Conductual (Falco - Opcional): Aislamiento reactivo de red (Firewall / iptables drop).
         5. Observabilidad pura (Tracepoints): NO bloquea; captura telemetría pasiva.
+        Invariante de integridad: NINGUNA capacidad puede ser declarada 'verified=True' sin
+        comprobar dinámicamente que su subsistema correspondiente está activo y operativo.
         """
-        bpf_lsm = getattr(self.ebpf.enforcer, "bpf_lsm_supported", False)
+        bpf_lsm = getattr(self.ebpf.enforcer, "bpf_lsm_supported", False) if (self.ebpf and hasattr(self.ebpf, "enforcer")) else False
+        fanotify_verified = bool(self.interceptor and self.interceptor.is_verified_operational())
+        vault_verified = bool(self.vault and getattr(self.vault, "keyring", None) is not None and not getattr(self.vault, "is_locked", False))
+        process_verified = bool(self.ebpf and getattr(self.ebpf, "running", False))
+        behavioral_verified = bool(self.firewall and getattr(self.decision_engine, "falco_enabled", False) and getattr(self.falco, "rules", None))
+        telemetry_verified = bool(self.ebpf and getattr(self.ebpf, "running", False) and getattr(self.ebpf.observer, "is_observing", False))
+
         return {
             "filesystem_on_access": {
                 "mechanism": "fanotify",
                 "capability": "BLOCK_PREVENTIVE",
                 "actions": ["FAN_DENY"],
-                "verified": bool(self.interceptor and getattr(self.interceptor, "running", False)) or True,
+                "verified": fanotify_verified,
                 "description": "Impide lectura, apertura y ejecución del archivo antes de que el proceso acceda a los bytes."
             },
             "vault_quarantine": {
                 "mechanism": "2PC_AES256_GCM_pinning",
                 "capability": "BLOCK_PREVENTIVE",
                 "actions": ["DESCRIPTOR_PINNING", "FILE_MOVE_SECURE"],
-                "verified": True,
+                "verified": vault_verified,
                 "description": "Aísla y cifra la muestra en el baúl atómicamente evitando carreras TOCTOU."
             },
             "process_execution_enforcement": {
-                "mechanism": "Tetragon_BPF_LSM" if bpf_lsm else "Tetragon_eBPF_SIGKILL_Fallback",
+                "mechanism": "Constantine_BPF_LSM" if bpf_lsm else "Constantine_eBPF_SIGKILL_Fallback",
                 "capability": "BLOCK_PREVENTIVE" if bpf_lsm else "REACTIVE_CONTAINMENT",
                 "actions": ["BPF_LSM_EPERM"] if bpf_lsm else ["SIGKILL_TERMINATION"],
-                "verified": True,
+                "verified": process_verified,
                 "bpf_lsm_supported": bpf_lsm,
-                "description": "Bloqueo preventivo en kernel (-EPERM) con BPF LSM; o terminación reactiva (SIGKILL) inmediata como fallback."
+                "description": "Bloqueo preventivo nativo en kernel (-EPERM) con BPF LSM; o terminación reactiva (SIGKILL) inmediata como fallback."
             },
             "behavioral_syscall_enforcement": {
                 "mechanism": "Falco_Rules_Network_Quarantine",
                 "capability": "REACTIVE_CONTAINMENT",
                 "actions": ["FIREWALL_EGRESS_DROP", "SOCKET_CLOSE"],
-                "verified": getattr(self.decision_engine, "falco_enabled", True),
+                "verified": behavioral_verified,
                 "description": "Falco evalúa anomalías conductuales; Constantine aplica aislamiento de red preventivo o reactivo al PID infractor."
             },
             "telemetry_tracepoints": {
                 "mechanism": "eBPF_tracepoints",
                 "capability": "OBSERVATION_ONLY",
                 "actions": ["LOG", "METRICS"],
-                "verified": True,
+                "verified": telemetry_verified,
                 "description": "Tracepoints pasivos de kernel: observan llamadas al sistema sin alterar su flujo de ejecución."
             }
         }
@@ -145,15 +154,33 @@ class ConstantineDaemon:
         if command == "PING":
             return "OK", {"pong": True, "version": DAEMON_VERSION}, "Daemon activo"
         elif command == "GET_STATUS":
-            fanotify_active = bool(self.interceptor and getattr(self.interceptor, "running", False))
+            fanotify_op = bool(self.interceptor and self.interceptor.is_verified_operational())
+            fanotify_active = "ACTIVE" if fanotify_op else "INACTIVE"
+
+            ebpf_state = "MONITORING_DISABLED"
+            ebpf_desc = "Telemetría de kernel deshabilitada por configuración."
+            if self.ebpf and getattr(self.ebpf, "running", False):
+                if not getattr(self.ebpf, "fallback_mode", True):
+                    if getattr(self.ebpf, "enforcement_mode", "") == "BPF_LSM":
+                        ebpf_state = "EBPF_ACTIVE_OPTIMAL"
+                        ebpf_desc = "Sondas eBPF en kernel activas y bloqueo preventivo BPF LSM operativo."
+                    else:
+                        ebpf_state = "EBPF_PARTIAL"
+                        ebpf_desc = "Tracepoints eBPF activos para telemetría; contención reactiva ante alertas."
+                else:
+                    ebpf_state = "DEGRADED_PROC_FALLBACK"
+                    ebpf_desc = "eBPF restringido por políticas de host (lockdown/LSM/virt). Operando en degradación asistida mediante sondeo de /proc (limitación documentada: latencia de muestreo y procesos efímeros no capturados)."
+
             return "OK", {
                 "version": DAEMON_VERSION,
                 "daemon_running": self.running,
-                "fanotify": "ACTIVE" if fanotify_active else "INACTIVE",
-                "fanotify_operational": fanotify_active,
+                "fanotify": fanotify_active,
+                "fanotify_operational": fanotify_op,
                 "vault": "ACTIVE" if (self.vault and getattr(self.vault, "keyring", None)) else "INACTIVE",
                 "ebpf": "ACTIVE" if (self.ebpf and not getattr(self.ebpf, "fallback_mode", True)) else "DEGRADED",
                 "ebpf_mode": getattr(self.ebpf, "enforcement_mode", "UNKNOWN"),
+                "ebpf_telemetry_state": ebpf_state,
+                "ebpf_telemetry_description": ebpf_desc,
                 "usb": "ACTIVE" if (self.usb and getattr(self.usb, "running", False)) else "INACTIVE",
                 "downloads": "ACTIVE" if (self.downloads and getattr(self.downloads, "running", False)) else "INACTIVE",
                 "persistence": "ACTIVE" if (self.persistence and getattr(self.persistence, "running", False)) else "INACTIVE",
@@ -163,11 +190,12 @@ class ConstantineDaemon:
                 "wazuh": "ACTIVE" if getattr(self.wazuh, "active", False) else "INACTIVE",
                 "misp": "ACTIVE" if getattr(self.misp, "active", False) else "INACTIVE",
                 "sigma": "ACTIVE" if getattr(self.sigma, "active", False) else "INACTIVE",
-                "firewall": self.firewall.get_status().get("state", "UNKNOWN") if self.firewall else "UNKNOWN",
+                "firewall": (self.firewall.get_status().get("state", "UNKNOWN") if isinstance(self.firewall.get_status(), dict) else str(self.firewall.get_status())) if self.firewall else "UNKNOWN",
                 "dns": self.dns.get_active_profile() if self.dns else "UNKNOWN",
                 "maintenance_mode": self.resilience.is_maintenance_mode_active(),
                 "emergency_bypass": self.resilience.emergency_bypass_active,
                 "isolated_modules": list(self.resilience.isolated_modules.keys()),
+                "tetragon": self.tetragon.probe_integration(),
                 "client_uid": client_uid
             }, "Estado del sistema recuperado"
         elif command == "SCAN_FILE":
@@ -175,12 +203,24 @@ class ConstantineDaemon:
             rep = self.scanner.scan_file(path)
             if rep.is_threat and hasattr(self, "audit"):
                 self.audit.log_event("SCAN_THREAT_DETECTED", {"path": path, "threat": rep.threat_name})
-            return "OK", {"is_threat": rep.is_threat, "threat_name": rep.threat_name, "severity": rep.severity}, "Escaneo completado"
+            elif getattr(rep, "is_indeterminate", False) and hasattr(self, "audit"):
+                self.audit.log_event("SCAN_INDETERMINATE", {"path": path, "details": rep.details})
+            return "OK", {
+                "status": getattr(rep.status, "value", str(rep.status)) if hasattr(rep, "status") else "CLEAN",
+                "is_threat": rep.is_threat,
+                "is_clean": getattr(rep, "is_clean", rep.is_threat is False),
+                "is_indeterminate": getattr(rep, "is_indeterminate", False),
+                "threat_name": rep.threat_name,
+                "severity": rep.severity,
+                "details": rep.details,
+                "category": rep.category
+            }, f"Escaneo completado: {getattr(rep, 'status', 'CLEAN')}"
         elif command == "SCAN_DIRECTORY":
             path = params.get("path", "")
             recursive = params.get("recursive", True)
             scanned = 0
             threats = []
+            indeterminates = []
             if os.path.exists(path):
                 for root, _, files in os.walk(path):
                     for fn in files:
@@ -189,9 +229,18 @@ class ConstantineDaemon:
                         rep = self.scanner.scan_file(fp)
                         if rep.is_threat:
                             threats.append({"path": fp, "threat_name": rep.threat_name, "severity": rep.severity})
+                        elif getattr(rep, "is_indeterminate", False):
+                            indeterminates.append({"path": fp, "details": rep.details, "category": rep.category})
                     if not recursive:
                         break
-            return "OK", {"path": path, "scanned_count": scanned, "threats_count": len(threats), "threats": threats}, "Escaneo de directorio completado"
+            return "OK", {
+                "path": path,
+                "scanned_count": scanned,
+                "threats_count": len(threats),
+                "threats": threats,
+                "indeterminates_count": len(indeterminates),
+                "indeterminates": indeterminates
+            }, "Escaneo de directorio completado"
         elif command == "GET_QUARANTINE_LIST":
             items = self.vault.list_quarantine()
             return "OK", {"items": items, "count": len(items)}, "Lista de cuarentena recuperada"
@@ -333,6 +382,14 @@ class ConstantineDaemon:
         return "OK", {}, "Comando ejecutado"
 
     def start(self):
+        # Limpieza higiénica de directorios y artefactos de staging huérfanos al arrancar
+        try:
+            cleaned = cleanup_orphan_staging()
+            if cleaned > 0:
+                logger.info("🧹 [HIGIENE] Limpieza preventiva de %s artefactos de staging huérfanos completada.", cleaned)
+        except Exception as e:
+            logger.debug("Aviso en limpieza de staging huérfano: %s", e)
+
         logger.info("⚔️ Iniciando Constantine Antivirus Daemon (Protección Activa Global en Kernel)...")
         logger.info("🌐 Cobertura Global Predeterminada: Enganchando todo el sistema de archivos (/ y todos los puntos de montaje de /proc/mounts)...")
         logger.info("✅ Protección global activa en 1 puntos de montaje y directorios del sistema operativo.")
@@ -343,6 +400,7 @@ class ConstantineDaemon:
         self.hardware.start()
         self.proactive_scanner.start()
         self.ebpf.start()
+        self.tetragon.start()
         self.clamav_coordination()
         self.interceptor.start_listening()
         self.osquery.run_security_diagnostic()
@@ -372,6 +430,7 @@ class ConstantineDaemon:
         self.hardware.stop()
         self.proactive_scanner.stop()
         self.ebpf.stop()
+        self.tetragon.stop()
         logger.info("Constantine Daemon detenido limpiamente.")
 
 def main():

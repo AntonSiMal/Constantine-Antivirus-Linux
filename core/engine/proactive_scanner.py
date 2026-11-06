@@ -41,3 +41,5 @@ class ProactiveActiveScanner:
                     self.vault.quarantine_file(fpath, threat_name=rep.threat_name)
                     logger.info("[NOTIFICACIÓN DESKTOP] ⚔️ Constantine: Amenaza Bloqueada | <b>Amenaza:</b> %s - <b>Archivo:</b> %s - <b>Proceso:</b> ProactiveActiveScanner (PID: 470) - <b>Acción:</b> Neutralizado en Baúl",
                                 rep.threat_name, fpath)
+                elif getattr(rep, "is_indeterminate", False):
+                    logger.warning("⚠️ [ESCÁNER ACTIVO: INDETERMINADO] Archivo no analizable en zona de aterrizaje: %s (%s)", fpath, rep.details)
