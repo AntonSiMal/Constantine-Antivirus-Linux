@@ -402,20 +402,54 @@ SECURE_TMP_DIR=$(mktemp -d /tmp/constantine_install.XXXXXXXXXX)
 chmod 700 "$SECURE_TMP_DIR"
 trap 'rm -rf "$SECURE_TMP_DIR"' EXIT
 
+# Función para liberar bloqueos huérfanos de apt/dpkg dejados por ejecuciones interrumpidas
+release_apt_locks() {
+    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        echo "   -> Detectado proceso previo de apt/dpkg reteniendo el bloqueo. Esperando 5s..."
+        sleep 5
+        if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+            echo "   -> Liberando procesos apt/dpkg huérfanos de sesiones interrumpidas..."
+            killall -q apt apt-get dpkg 2>/dev/null || true
+            sleep 2
+            rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+            DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true
+        fi
+    fi
+}
+
+# Limpieza automática del repositorio duplicado/sin clave de ProtonVPN si presenta conflicto
+if [ -f /etc/apt/sources.list.d/protonvpn-stable.list ] && [ -f /etc/apt/sources.list.d/protonvpn-stable.sources ]; then
+    echo "   -> Limpiando archivo duplicado /etc/apt/sources.list.d/protonvpn-stable.list..."
+    rm -f /etc/apt/sources.list.d/protonvpn-stable.list 2>/dev/null || true
+fi
+
 # 4. Instalación de dependencias base obligatorias (A3: validación estricta de componentes esenciales)
 echo "[4/19] Instalando dependencias obligatorias de Debian, ClamAV, YARA, AIDE y GTK4..."
 export DEBIAN_FRONTEND=noninteractive
 export FALCO_FRONTEND=noninteractive
 export FALCO_DRIVER_CHOICE=modern_ebpf
 export NEEDRESTART_MODE=a
-apt-get update -qq || echo "   [!] Advertencia en repositorios de terceros; continuando con índices locales..."
-if ! apt-get install -y -qq clamav clamav-daemon clamav-freshclam \
+
+release_apt_locks
+apt-get -o DPkg::Lock::Timeout=60 update -qq 2>/dev/null || echo "   [!] Advertencia menor en repositorio externo; continuando con índices locales..."
+release_apt_locks
+
+if ! apt-get -o DPkg::Lock::Timeout=60 install -y -qq clamav clamav-daemon clamav-freshclam \
     yara libyara-dev \
     aide aide-common \
     libgtk-4-1 libgtk-4-dev build-essential cargo rustc \
     curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https xxd; then
-    echo "[-] ERROR CRÍTICO (A3): Falló la instalación de paquetes obligatorios del núcleo (ClamAV/YARA/GTK4/Rust)."
-    exit 1
+    echo "   -> Reintentando configuración de paquetes tras liberar dpkg..."
+    release_apt_locks
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+    if ! apt-get -o DPkg::Lock::Timeout=60 install -y -qq clamav clamav-daemon clamav-freshclam \
+        yara libyara-dev \
+        aide aide-common \
+        libgtk-4-1 libgtk-4-dev build-essential cargo rustc \
+        curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https xxd; then
+        echo "[-] ERROR CRÍTICO (A3): Falló la instalación de paquetes obligatorios del núcleo (ClamAV/YARA/GTK4/Rust)."
+        exit 1
+    fi
 fi
 
 CLAMONACC_BIN=$(command -v clamonacc || which clamonacc || true)
@@ -554,7 +588,7 @@ curl -s --connect-timeout 5 --max-time 15 "https://openphish.com/feed.txt" | hea
 
 # 10. Instalación de UFW y GUFW Respetando la Política Existente del Equipo (A1)
 echo "[10/19] Verificando herramientas de cortafuegos (UFW y GUFW) sin alterar políticas preexistentes..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw gufw -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq ufw gufw -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>/dev/null || true
 if ufw status 2>/dev/null | grep -qiE "Status: active|Estado: activo"; then
     echo "   [✓] Se detectó cortafuegos UFW previamente activo (configuración respetada)."
 else
@@ -569,7 +603,7 @@ if ! command -v protonvpn-app >/dev/null 2>&1 && ! command -v protonvpn >/dev/nu
     if [ -f "$PVPN_DEB" ] && [ -s "$PVPN_DEB" ] && dpkg-deb --info "$PVPN_DEB" >/dev/null 2>&1; then
         dpkg -i "$PVPN_DEB" 2>/dev/null || true
         apt-get update -qq 2>/dev/null || true
-        apt-get install -y -qq protonvpn-app 2>/dev/null || apt-get install -y -qq protonvpn-cli 2>/dev/null || true
+        apt-get -o DPkg::Lock::Timeout=60 install -y -qq protonvpn-app 2>/dev/null || apt-get -o DPkg::Lock::Timeout=60 install -y -qq protonvpn-cli 2>/dev/null || true
     fi
 fi
 
@@ -580,7 +614,7 @@ if [ ! -f "/var/ossec/bin/wazuh-control" ]; then
     chmod 644 /usr/share/keyrings/wazuh.gpg 2>/dev/null || true
     echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list || true
     apt update -qq 2>/dev/null || true
-    WAZUH_MANAGER="127.0.0.1" apt install -y -qq wazuh-agent 2>/dev/null || true
+    WAZUH_MANAGER="127.0.0.1" apt-get -o DPkg::Lock::Timeout=60 install -y -qq wazuh-agent 2>/dev/null || true
 fi
 
 if [ -f "/var/ossec/etc/ossec.conf" ]; then
@@ -599,7 +633,7 @@ if ! command -v osqueryi >/dev/null 2>&1; then
     curl -fsSL https://pkg.osquery.io/deb/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/osquery-archive-keyring.gpg 2>/dev/null || true
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/osquery-archive-keyring.gpg] https://pkg.osquery.io/deb deb main" > /etc/apt/sources.list.d/osquery.list || true
     apt update -qq 2>/dev/null || true
-    apt install -y -qq osquery 2>/dev/null || true
+    apt-get -o DPkg::Lock::Timeout=60 install -y -qq osquery 2>/dev/null || true
 fi
 
 # 14. Instalación de Falco
@@ -610,7 +644,7 @@ if ! command -v falco >/dev/null 2>&1; then
     echo "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" > /etc/apt/sources.list.d/falcosecurity.list || true
     apt update -qq 2>/dev/null || true
     echo "falco falco/driver_choice select modern_ebpf" | debconf-set-selections 2>/dev/null || true
-    FALCO_FRONTEND=noninteractive FALCO_DRIVER_CHOICE=modern_ebpf DEBIAN_FRONTEND=noninteractive apt-get install -y -qq falco -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>/dev/null || true
+    FALCO_FRONTEND=noninteractive FALCO_DRIVER_CHOICE=modern_ebpf DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq falco -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>/dev/null || true
 fi
 touch "$FALCO_LOG_DIR/events.log"
 chown root:constantine "$FALCO_LOG_DIR/events.log" && chmod 640 "$FALCO_LOG_DIR/events.log"
