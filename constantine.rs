@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v3.2.5 - Aplicación Nativa en Rust (GTK4 Cupertino v2.7)
+// Constantine Antivirus & EDR v3.2.7 - Aplicación Nativa en Rust (GTK4 Cupertino v2.7)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -729,7 +729,7 @@ impl ThreatAnalysisEngine {
         false
     }
 
-    fn is_known_malware_hash(hash: &str) -> bool {
+    pub fn is_known_malware_hash(hash: &str) -> bool {
         let ti_files = ["malwarebazaar_hashes.txt", "threatfox_iocs.txt", "misp_iocs.txt"];
         for tf in &ti_files {
             let p = format!("{}/{}", TI_DIR, tf);
@@ -1287,7 +1287,7 @@ impl ModuleVersionAudit {
         vec![
             (
                 "Constantine Core EDR",
-                "v3.2.5 (Debian Edition)".into(),
+                "v3.2.7 (Debian Edition)".into(),
                 "Binario Nativo Rust Activo".into(),
             ),
             (
@@ -1561,6 +1561,401 @@ fn get_service_active(service: &str) -> bool {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active").unwrap_or(false)
 }
 
+// ==============================================================================
+// 10. Supervisor y Consumidor de Eventos de ClamOnAcc (Propiedad Única fanotify)
+// ==============================================================================
+// En Fase 1:
+// 1. El kernel genera el evento mediante fanotify (CONFIG_FANOTIFY=y, CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y).
+// 2. ClamOnAcc recibe el evento de permiso de acceso (propietario exclusivo para evitar colisiones).
+// 3. ClamOnAcc solicita el análisis síncrono a clamd.
+// 4. Si clamd detecta malware y OnAccessPrevention=yes, ClamOnAcc deniega el acceso en el kernel.
+// 5. Constantine administra la configuración, supervisa el estado real y consume LOG_FILE (/var/log/clamav/clamonacc.log)
+//    en tiempo real para emitir alertas críticas y registrar la evidencia forense (sin fingir que YARA/YARA-X
+//    participan síncronamente dentro de la llamada fanotify de ClamOnAcc).
+pub struct OnAccessSupervisor;
+
+impl OnAccessSupervisor {
+    /// Comprueba si el kernel actual dispone de CONFIG_FANOTIFY=y y CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y
+    pub fn check_kernel_fanotify_permissions() -> (bool, bool) {
+        if let Ok(out) = Command::new("uname").arg("-r").output() {
+            let kver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let kconf = format!("/boot/config-{}", kver);
+            if let Ok(content) = fs::read_to_string(&kconf) {
+                let has_fan = content.lines().any(|l| l.trim() == "CONFIG_FANOTIFY=y");
+                let has_perm = content.lines().any(|l| l.trim() == "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y");
+                return (has_fan, has_perm);
+            }
+        }
+        (false, false)
+    }
+
+    /// Devuelve el estado honesto y detallado del flujo fanotify -> ClamOnAcc -> clamd
+    pub fn get_onaccess_pipeline_status() -> (bool, String) {
+        let (has_fan, has_perm) = Self::check_kernel_fanotify_permissions();
+        let clamd_up = Path::new(CLAMD_SOCKET).exists() && get_service_active("clamav-daemon");
+        let onacc_up = get_service_active("clamonacc");
+
+        if !has_fan || !has_perm {
+            return (false, "● Kernel sin CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y (Solo notificación)".into());
+        }
+        if onacc_up && clamd_up {
+            (
+                true,
+                "● Activo: ClamOnAcc (Propietario fanotify) ➔ clamd (/home, /tmp, /var/tmp) [Nota: YARA/YARA-X operan en análisis bajo demanda/asíncrono]".into(),
+            )
+        } else if !clamd_up {
+            (false, "● Inactivo: Demonio clamd o socket /run/clamav/clamd.ctl detenido".into())
+        } else {
+            (false, "● Inactivo: Servicio propietario ClamOnAcc detenido".into())
+        }
+    }
+
+    /// Inicia un hilo consumidor en tiempo real que vigila /var/log/clamav/clamonacc.log,
+    /// detecta cada intercepción "FOUND" / "Access denied" de ClamOnAcc, emite la alerta de escritorio
+    /// y la sella en el registro forense encadenado.
+    pub fn start_realtime_event_consumer() {
+        thread::spawn(|| {
+            let mut last_offset: u64 = fs::metadata(LOG_FILE).map(|m| m.len()).unwrap_or(0);
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                if let Ok(meta) = fs::metadata(LOG_FILE) {
+                    let current_len = meta.len();
+                    if current_len < last_offset {
+                        last_offset = 0; // Rotación de log detectada
+                    }
+                    if current_len > last_offset {
+                        if let Ok(mut file) = File::open(LOG_FILE) {
+                            use std::io::{Seek, SeekFrom};
+                            if file.seek(SeekFrom::Start(last_offset)).is_ok() {
+                                let reader = BufReader::new(file);
+                                for line in reader.lines().flatten() {
+                                    let trimmed = line.trim();
+                                    if trimmed.contains("FOUND") || trimmed.contains("Access denied") || trimmed.contains("virus") {
+                                        ImmutableAuditLog::append_event(
+                                            "CLAMONACC_ACCESS_DENIED",
+                                            &format!("Prevención fanotify -> ClamOnAcc -> clamd: {}", trimmed),
+                                        );
+                                        let _ = Command::new("notify-send")
+                                            .args([
+                                                "-u", "critical",
+                                                "-i", "security-high",
+                                                "🛡️ Constantine: Acceso Denegado por ClamOnAcc (fanotify)",
+                                                &format!("ClamAV detectó malware en tiempo real y bloqueó el acceso:\n{}", trimmed),
+                                            ])
+                                            .status();
+                                    }
+                                }
+                            }
+                        }
+                        last_offset = current_len;
+                    }
+                }
+            }
+        });
+    }
+}
+
+// ==============================================================================
+// 11. Sensor EDR Principal: Tetragon eBPF y Motor de Correlación de 4 Pilares
+// ==============================================================================
+// Filosofía de Bloqueo Seguro:
+// 1. Puntos de control apropiados en el kernel (security_bprm_check, security_file_permission, tcp_connect) vía Tetragon.
+// 2. PROHIBIDO matar procesos únicamente por su nombre (comm / argv[0] son falsificables).
+// 3. Correlación obligatoria de los 4 pilares antes de cualquier acción destructiva:
+//    - Identidad: UID, GID, PID, PPID y sesión de auditoría.
+//    - Ejecutable: Ruta real resuelta (/proc/PID/exe), hash SHA-256 y estado de firma/paquete Debian (dpkg -S).
+//    - Comportamiento: Naturaleza de la operación (escritura sobre señuelo Canary, ejecución desde /tmp o /dev/shm,
+//      o ráfaga de alta entropía + extensión de secuestro).
+//    - Contexto: Árbol de procesos padre (parent_binary), directorio de trabajo (cwd) y estado en Lista Blanca.
+// 4. Pruebas previas de seguridad (DestructiveActionSafetyGate) antes de ejecutar SIGSTOP/SIGKILL o cuarentena.
+
+#[derive(Debug, Clone)]
+pub struct ProcessContextProfile {
+    pub pid: u32,
+    pub ppid: u32,
+    pub uid: u32,
+    pub exe_path: PathBuf,
+    pub exe_sha256: String,
+    pub cmdline: String,
+    pub parent_exe: String,
+    pub is_dpkg_managed: bool,
+    pub behavior_signal: String,
+    pub target_resource: String,
+}
+
+pub struct DestructiveActionSafetyGate;
+
+impl DestructiveActionSafetyGate {
+    /// Somete cualquier acción destructiva (SIGKILL / aislamiento en baúl) a 5 pruebas específicas e innegociables:
+    /// Prueba 1: Protección de procesos críticos de sistema e infraestructura gráfica/sesión (PID <= 1, systemd, dbus, Xorg, gnome-shell, etc.).
+    /// Prueba 2: Prohibición de bloqueo por simple nombre; exige que `exe_path` exista y se haya resuelto su hash SHA-256.
+    /// Prueba 3: Verificación contra Lista Blanca por hash SHA-256.
+    /// Prueba 4: Verificación de propiedad en paquetes oficiales de Debian (`dpkg -S`); un binario gestionado por dpkg en `/usr/bin` o `/bin`
+    ///           no debe ser destruido ni movido al baúl (evitando inutilizar intérpretes del sistema).
+    /// Prueba 5: Exigencia de correlación multivariable (Al menos 2 vectores independientes confirmados o impacto directo en Canary Tripwire).
+    pub fn authorize_destructive_response(profile: &ProcessContextProfile, correlation_score: u8) -> Result<(), String> {
+        if profile.pid <= 1 || profile.pid == std::process::id() {
+            return Err("Prueba 1 fallida: PID crítico del sistema o del propio agente.".into());
+        }
+
+        let exe_str = profile.exe_path.to_string_lossy();
+        let protected_daemons = [
+            "/lib/systemd/systemd",
+            "/usr/bin/dbus-daemon",
+            "/usr/bin/gnome-shell",
+            "/usr/lib/xorg/Xorg",
+            "/usr/sbin/sshd",
+            "/usr/local/bin/constantine",
+            "/usr/local/bin/tetragon",
+            "/usr/sbin/clamd",
+            "/usr/sbin/clamonacc",
+        ];
+        for &prot in &protected_daemons {
+            if exe_str == prot {
+                return Err(format!("Prueba 1 fallida: Binario de infraestructura crítica protegido ({})", exe_str));
+            }
+        }
+
+        if profile.exe_sha256.is_empty() || !profile.exe_path.is_absolute() {
+            return Err("Prueba 2 fallida: Identidad de ejecutable o hash SHA-256 no verificado (prohibido actuar solo por nombre).".into());
+        }
+
+        if ThreatAnalysisEngine::is_whitelisted(&profile.exe_sha256) {
+            return Err("Prueba 3 fallida: El hash SHA-256 del ejecutable está autorizado en la Lista Blanca.".into());
+        }
+
+        if profile.is_dpkg_managed && (exe_str.starts_with("/usr/") || exe_str.starts_with("/bin/") || exe_str.starts_with("/sbin/")) {
+            return Err(format!(
+                "Prueba 4: El ejecutable {} pertenece a un paquete oficial del sistema Debian; se impide destruir el binario del sistema.",
+                exe_str
+            ));
+        }
+
+        if correlation_score < 70 {
+            return Err(format!(
+                "Prueba 5 fallida: Puntuación de correlación insuficiente ({}/100) para autorizar acción destructiva.",
+                correlation_score
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+pub struct TetragonPrimarySensor;
+
+impl TetragonPrimarySensor {
+    /// Construye el perfil completo de Identidad + Ejecutable + Comportamiento + Contexto
+    pub fn build_correlated_profile(
+        pid: u32,
+        ppid: u32,
+        uid: u32,
+        exe_hint: &str,
+        cmdline: &str,
+        parent_exe: &str,
+        behavior_signal: &str,
+        target_resource: &str,
+    ) -> ProcessContextProfile {
+        let proc_exe = format!("/proc/{}/exe", pid);
+        let exe_path = fs::read_link(&proc_exe).unwrap_or_else(|_| PathBuf::from(exe_hint));
+        let exe_sha256 = ThreatAnalysisEngine::compute_sha256(&exe_path).unwrap_or_default();
+
+        // Comprobar si el binario pertenece legítimamente a un paquete instalado con dpkg
+        let is_dpkg_managed = if exe_path.exists() {
+            Command::new("dpkg")
+                .args(["-S", &exe_path.to_string_lossy()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        ProcessContextProfile {
+            pid,
+            ppid,
+            uid,
+            exe_path,
+            exe_sha256,
+            cmdline: cmdline.to_string(),
+            parent_exe: parent_exe.to_string(),
+            is_dpkg_managed,
+            behavior_signal: behavior_signal.to_string(),
+            target_resource: target_resource.to_string(),
+        }
+    }
+
+    /// Evalúa la correlación de los 4 pilares y devuelve una puntuación [0..100]
+    pub fn evaluate_four_pillars(profile: &ProcessContextProfile) -> u8 {
+        let mut score: u8 = 0;
+        let exe_str = profile.exe_path.to_string_lossy();
+
+        // 1. Pilar de Ejecutable (Ubicación volátil + ausencia en dpkg + presencia en feeds TI)
+        if exe_str.starts_with("/tmp/") || exe_str.starts_with("/var/tmp/") || exe_str.starts_with("/dev/shm/") {
+            score = score.saturating_add(35);
+        }
+        if !profile.is_dpkg_managed {
+            score = score.saturating_add(15);
+        }
+        if !profile.exe_sha256.is_empty() && ThreatAnalysisEngine::is_known_malware_hash(&profile.exe_sha256) {
+            score = score.saturating_add(60);
+        }
+
+        // 2. Pilar de Comportamiento (Puntos de control LSM de Tetragon)
+        if profile.behavior_signal.contains("CANARY_WRITE") || AntiRansomwareShield::is_canary_file(Path::new(&profile.target_resource)) {
+            score = score.saturating_add(65);
+        }
+        if profile.behavior_signal.contains("security_bprm_check") {
+            score = score.saturating_add(25);
+        }
+        if profile.behavior_signal.contains("security_file_permission") && (profile.target_resource.starts_with("/etc/shadow") || profile.target_resource.starts_with("/etc/sudoers")) {
+            score = score.saturating_add(45);
+        }
+
+        // 3. Pilar de Contexto y Linaje (Shells inversas o ejecución sospechosa desde servicios web)
+        let cmd_low = profile.cmdline.to_lowercase();
+        if cmd_low.contains("/dev/tcp/") || cmd_low.contains("nc -e") || cmd_low.contains("bash -i") {
+            score = score.saturating_add(45);
+        }
+
+        // 4. Pilar de Identidad (Procesos no privilegiados intentando alterar rutas críticas o ejecutables efímeros)
+        if profile.uid >= 1000 && !profile.is_dpkg_managed {
+            score = score.saturating_add(10);
+        }
+
+        score.min(100)
+    }
+
+    /// Inicia el hilo consumidor en tiempo real del Sensor EDR Principal (Tetragon JSON stream en /var/log/tetragon/tetragon.log)
+    pub fn start_primary_edr_consumer() {
+        thread::spawn(|| {
+            let mut last_offset: u64 = fs::metadata(TETRAGON_LOG_FILE).map(|m| m.len()).unwrap_or(0);
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                if let Ok(meta) = fs::metadata(TETRAGON_LOG_FILE) {
+                    let current_len = meta.len();
+                    if current_len < last_offset {
+                        last_offset = 0;
+                    }
+                    if current_len > last_offset {
+                        if let Ok(mut file) = File::open(TETRAGON_LOG_FILE) {
+                            use std::io::{Seek, SeekFrom};
+                            if file.seek(SeekFrom::Start(last_offset)).is_ok() {
+                                let reader = BufReader::new(file);
+                                for line in reader.lines().flatten() {
+                                    Self::process_tetragon_json_event(&line);
+                                }
+                            }
+                        }
+                        last_offset = current_len;
+                    }
+                }
+            }
+        });
+    }
+
+    fn process_tetragon_json_event(json_line: &str) {
+        let val: serde_json::Value = match serde_json::from_str(json_line) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // Extraer evento process_kprobe o process_exec generado por las TracingPolicies de Tetragon
+        let event_Node = if let Some(kp) = val.get("process_kprobe") {
+            kp
+        } else if let Some(ex) = val.get("process_exec") {
+            ex
+        } else {
+            return;
+        };
+
+        let proc = match event_Node.get("process") {
+            Some(p) => p,
+            None => return,
+        };
+
+        let pid = proc.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let uid = proc.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let binary = proc.get("binary").and_then(|v| v.as_str()).unwrap_or("");
+        let args = proc.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+
+        let parent_bin = event_Node
+            .get("parent")
+            .and_then(|p| p.get("binary"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let ppid = event_Node
+            .get("parent")
+            .and_then(|p| p.get("pid"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        let func_name = event_Node
+            .get("function_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("process_exec");
+
+        // Extraer recurso objetivo si viene en los argumentos del kprobe
+        let mut target_res = String::new();
+        if let Some(kp_args) = event_Node.get("args").and_then(|a| a.as_array()) {
+            for arg in kp_args {
+                if let Some(f_arg) = arg.get("file_arg").and_then(|fa| fa.get("path")).and_then(|p| p.as_str()) {
+                    target_res = f_arg.to_string();
+                } else if let Some(b_arg) = arg.get("linux_binprm_arg").and_then(|ba| ba.get("path")).and_then(|p| p.as_str()) {
+                    target_res = b_arg.to_string();
+                }
+            }
+        }
+
+        if pid <= 1 || binary.is_empty() {
+            return;
+        }
+
+        let profile = Self::build_correlated_profile(
+            pid,
+            ppid,
+            uid,
+            binary,
+            args,
+            parent_bin,
+            func_name,
+            &target_res,
+        );
+
+        let score = Self::evaluate_four_pillars(&profile);
+
+        // Si supera el umbral de correlación y aprueba las 5 pruebas de DestructiveActionSafetyGate:
+        if score >= 70 {
+            match DestructiveActionSafetyGate::authorize_destructive_response(&profile, score) {
+                Ok(()) => {
+                    AntiRansomwareShield::neutralize_attack(
+                        profile.pid,
+                        Path::new(&profile.target_resource),
+                        &format!(
+                            "Correlación Tetragon eBPF ({}/100) [Hook: {}, Bin: {}, SHA256: {}]",
+                            score,
+                            profile.behavior_signal,
+                            profile.exe_path.display(),
+                            &profile.exe_sha256[..12.min(profile.exe_sha256.len())]
+                        ),
+                    );
+                }
+                Err(gate_reason) => {
+                    ImmutableAuditLog::append_event(
+                        "TETRAGON_SAFETY_GATE_BLOCKED",
+                        &format!(
+                            "Acción destructiva retenida por prueba de seguridad sobre PID {} ({}): {}",
+                            profile.pid,
+                            profile.exe_path.display(),
+                            gate_reason
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let app = Application::builder().application_id("com.constantine.antivirus").build();
     app.connect_startup(|_| {
@@ -1590,6 +1985,12 @@ fn build_ui(app: &Application) {
     // Siembra automática de señuelos Canary Tripwires al iniciar
     AntiRansomwareShield::deploy_canary_tripwires(&user_home);
 
+    // Iniciar consumidor en tiempo real del flujo fanotify -> ClamOnAcc -> clamd -> Constantine
+    OnAccessSupervisor::start_realtime_event_consumer();
+
+    // Iniciar sensor EDR principal Tetragon eBPF con correlación de 4 pilares y pruebas previas a acciones destructivas
+    TetragonPrimarySensor::start_primary_edr_consumer();
+
     // Minimización persistente al cerrar
     let win_clone = window.clone();
     window.connect_close_request(move |_| {
@@ -1605,7 +2006,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
 
-    let badge_lbl = Label::new(Some("v3.2.5 Debian Edition"));
+    let badge_lbl = Label::new(Some("v3.2.7 Debian Edition"));
     badge_lbl.add_css_class("badge-version");
     title_box.append(&title_lbl);
     title_box.append(&badge_lbl);
@@ -1706,7 +2107,7 @@ fn build_ui(app: &Application) {
 
     let card_overview = Box::new(Orientation::Vertical, 12);
     card_overview.add_css_class("macos-card");
-    let t_ov = Label::new(Some("Panel de Estado Operativo Unificado (EDR v3.2.5)"));
+    let t_ov = Label::new(Some("Panel de Estado Operativo Unificado (EDR v3.2.7)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     card_overview.append(&t_ov);
@@ -1715,9 +2116,10 @@ fn build_ui(app: &Application) {
     grid_sensors.set_column_spacing(28);
     grid_sensors.set_row_spacing(10);
 
-    grid_sensors.attach(&Label::new(Some("1. Sensor de Archivos (fanotify):")), 0, 0, 1, 1);
-    let s_f = Label::new(Some("● Activo / Prevención Total (FAN_DENY)"));
-    s_f.add_css_class("mini-row-status-ok");
+    grid_sensors.attach(&Label::new(Some("1. Prevención en Acceso (fanotify ➔ ClamOnAcc ➔ clamd):")), 0, 0, 1, 1);
+    let (onacc_ok, onacc_txt) = OnAccessSupervisor::get_onaccess_pipeline_status();
+    let s_f = Label::new(Some(&onacc_txt));
+    s_f.add_css_class(if onacc_ok { "mini-row-status-ok" } else { "mini-row-status-warn" });
     grid_sensors.attach(&s_f, 1, 0, 1, 1);
 
     grid_sensors.attach(&Label::new(Some("2. Escudo Anti-Ransomware (Canary Tripwires):")), 0, 1, 1, 1);
@@ -1725,9 +2127,14 @@ fn build_ui(app: &Application) {
     s_ran.add_css_class("mini-row-status-ok");
     grid_sensors.attach(&s_ran, 1, 1, 1, 1);
 
-    grid_sensors.attach(&Label::new(Some("3. Sensor de Procesos (Tetragon eBPF):")), 0, 2, 1, 1);
-    let s_p = Label::new(Some("● Activo / Observación y SIGKILL"));
-    s_p.add_css_class("mini-row-status-ok");
+    grid_sensors.attach(&Label::new(Some("3. Sensor EDR Principal (Tetragon eBPF):")), 0, 2, 1, 1);
+    let tetra_up = get_service_active("tetragon");
+    let s_p = Label::new(Some(if tetra_up {
+        "● Activo: Puntos de Control LSM + Correlación 4 Pilares (Identidad, Ejecutable, Comportamiento, Contexto)"
+    } else {
+        "● Inactivo: Demonio Tetragon detenido"
+    }));
+    s_p.add_css_class(if tetra_up { "mini-row-status-ok" } else { "mini-row-status-warn" });
     grid_sensors.attach(&s_p, 1, 2, 1, 1);
 
     grid_sensors.attach(&Label::new(Some("4. Custodia de Periféricos (Cámara/Mic):")), 0, 3, 1, 1);

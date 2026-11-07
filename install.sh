@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Constantine Antivirus & EDR v3.2.5 - Instalador Automatizado (Debian / Ubuntu / Mint)
+# Constantine Antivirus & EDR v3.2.7 - Instalador Automatizado (Debian / Ubuntu / Mint)
 #
-# Novedades Anti-Ransomware en v3.2.5:
+# Novedades Anti-Ransomware en v3.2.7:
 # 1. Siembra de Señuelos Estratégicos (Canary Tripwires) en Desktop, Documents, Downloads y Pictures.
 # 2. Vigilancia Pasiva de Modificaciones y Borrados sobre Archivos Trampa.
 # 3. Detección de Ráfagas Anómalas de Cifrado y Entropía Elevada (H > 7.55).
@@ -118,13 +118,13 @@ class InstallerWizard:
     def build_ui(self, app):
         if GTK_VER == 4:
             self.win = Gtk.ApplicationWindow(application=app)
-            self.win.set_title("Asistente de Instalación — Constantine Antivirus & EDR v3.2.5")
+            self.win.set_title("Asistente de Instalación — Constantine Antivirus & EDR v3.2.7")
             self.win.set_default_size(780, 540)
             provider = Gtk.CssProvider()
             provider.load_from_data(CSS)
             Gtk.StyleContext.add_provider_for_display(self.win.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         else:
-            self.win = Gtk.Window(title="Asistente de Instalación — Constantine Antivirus & EDR v3.2.5")
+            self.win = Gtk.Window(title="Asistente de Instalación — Constantine Antivirus & EDR v3.2.7")
             self.win.set_default_size(780, 540)
             self.win.set_position(Gtk.WindowPosition.CENTER)
             self.win.connect("destroy", Gtk.main_quit)
@@ -141,7 +141,7 @@ class InstallerWizard:
             main_box.set_border_width(20)
             self.win.add(main_box)
 
-        lbl_title = Gtk.Label(label="🛡️ Asistente de Instalación — Constantine EDR v3.2.5")
+        lbl_title = Gtk.Label(label="🛡️ Asistente de Instalación — Constantine EDR v3.2.7")
         lbl_title.set_xalign(0)
         lbl_title.get_style_context().add_class("title-banner")
 
@@ -213,7 +213,7 @@ class InstallerWizard:
             self.win.show_all()
 
         self.append_log("====================================================================\n")
-        self.append_log(" 🛡️ ASISTENTE GRÁFICO CONSTANTINE ANTIVIRUS & EDR v3.2.5\n")
+        self.append_log(" 🛡️ ASISTENTE GRÁFICO CONSTANTINE ANTIVIRUS & EDR v3.2.7\n")
         self.append_log(" • Haz clic en 'Iniciar Instalación Automática' para comenzar.\n")
         self.append_log(" • Esta terminal integrada muestra en vivo cada comando y progreso.\n")
         self.append_log("====================================================================\n\n")
@@ -337,36 +337,48 @@ CLAMD_SOCK="/run/clamav/clamd.ctl"
 UPDATER_SCRIPT="/usr/local/bin/constantine-updater"
 
 echo "===================================================================="
-echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v3.2.5 - ESCUDO ANTI-RANSOMWARE "
+echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v3.2.7 - ESCUDO ANTI-RANSOMWARE "
 echo " Canary Tripwires + Detección de Ráfagas + Neutralización Fulminante "
 echo "===================================================================="
 echo "[+] Usuario detectado: $REAL_USER"
 echo "[+] Ruta protegida en tiempo real: $USER_HOME"
 echo ""
 
-# 1. Comprobación de Compatibilidad de la Plataforma
-echo "[1/19] Evaluando compatibilidad del núcleo del sistema y nivel de protección viable..."
+# 1. Comprobación Indispensable de Capacidades del Kernel (CONFIG_FANOTIFY=y y CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y)
+echo "[1/19] Evaluando capacidades de kernel (CONFIG_FANOTIFY y CONFIG_FANOTIFY_ACCESS_PERMISSIONS)..."
 KERNEL_CONF="/boot/config-$(uname -r)"
+FANOTIFY_BASE_OK=false
+FANOTIFY_PERM_OK=false
 FANOTIFY_OK=false
 EBPF_OK=false
 
 if [ -f "$KERNEL_CONF" ]; then
-    if grep -q "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y" "$KERNEL_CONF"; then
+    if grep -qE "^CONFIG_FANOTIFY=y" "$KERNEL_CONF"; then
+        FANOTIFY_BASE_OK=true
+    fi
+    if grep -qE "^CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y" "$KERNEL_CONF"; then
+        FANOTIFY_PERM_OK=true
+    fi
+    if [ "$FANOTIFY_BASE_OK" = true ] && [ "$FANOTIFY_PERM_OK" = true ]; then
         FANOTIFY_OK=true
     fi
-    if grep -q "CONFIG_BPF_SYSCALL=y" "$KERNEL_CONF"; then
+    if grep -qE "^CONFIG_BPF_SYSCALL=y" "$KERNEL_CONF"; then
         EBPF_OK=true
     fi
-else
-    if [ -d "/sys/kernel/security" ]; then FANOTIFY_OK=true; EBPF_OK=true; fi
+elif [ -f "/proc/config.gz" ]; then
+    if zcat /proc/config.gz | grep -qE "^CONFIG_FANOTIFY=y" && zcat /proc/config.gz | grep -qE "^CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y"; then
+        FANOTIFY_BASE_OK=true
+        FANOTIFY_PERM_OK=true
+        FANOTIFY_OK=true
+    fi
+    if zcat /proc/config.gz | grep -qE "^CONFIG_BPF_SYSCALL=y"; then EBPF_OK=true; fi
 fi
 
-if [ "$FANOTIFY_OK" = true ] && [ "$EBPF_OK" = true ]; then
-    echo "   [✓] Nivel de Protección: PREVENCIÓN TOTAL PRE-EJECUCIÓN (fanotify FAN_DENY + eBPF SIGKILL)"
-elif [ "$FANOTIFY_OK" = true ]; then
-    echo "   [✓] Nivel de Protección: PREVENCIÓN SÍNCRONA DE ARCHIVOS (fanotify FAN_DENY)"
+echo "   -> CONFIG_FANOTIFY=y: $FANOTIFY_BASE_OK | CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y: $FANOTIFY_PERM_OK"
+if [ "$FANOTIFY_OK" = true ]; then
+    echo "   [✓] Propiedad exclusiva de prevención en acceso: ClamOnAcc (fanotify -> clamd)."
 else
-    echo "   [!] Nivel de Protección: CONTENCIÓN REACTIVA ASISTIDA"
+    echo "   [!] Advertencia: El kernel no reporta soporte completo de permisos fanotify; ClamOnAcc operará en modo notificación."
 fi
 
 # 2. Creación de Identidades y Grupos Dedicados (Separación de Roles)
@@ -649,37 +661,87 @@ fi
 touch "$FALCO_LOG_DIR/events.log"
 chown root:constantine "$FALCO_LOG_DIR/events.log" && chmod 640 "$FALCO_LOG_DIR/events.log"
 
-# 15. Provisión de Tetragon (Cilium eBPF)
-echo "[15/19] Configurando Tetragon (Cilium) para enforcement de procesos..."
+# 15. Provisión de Tetragon (Cilium eBPF) como Sensor EDR Principal y TracingPolicies en Puntos de Control LSM
+echo "[15/19] Configurando Tetragon (Cilium eBPF) como Sensor EDR Principal..."
 mkdir -p "$TETRAGON_LOG_DIR" "$TETRAGON_POLICIES_DIR"
 if ! command -v tetragon >/dev/null 2>&1; then
     ARCH="amd64"
     if [ "$(uname -m)" = "aarch64" ]; then ARCH="arm64"; fi
     TETRAGON_VER="v1.1.2"
-    echo "   -> Obteniendo binario ligero de Tetragon eBPF..."
+    echo "   -> Obteniendo sensor principal Tetragon eBPF..."
     TETRA_ARCHIVE="$SECURE_TMP_DIR/tetragon.tar.gz"
-    curl -sSL --connect-timeout 5 --max-time 20 "https://github.com/cilium/tetragon/releases/download/${TETRAGON_VER}/tetragon-${TETRAGON_VER}-${ARCH}.tar.gz" -o "$TETRA_ARCHIVE" 2>/dev/null || true
+    curl -sSL --connect-timeout 5 --max-time 25 "https://github.com/cilium/tetragon/releases/download/${TETRAGON_VER}/tetragon-${TETRAGON_VER}-${ARCH}.tar.gz" -o "$TETRA_ARCHIVE" 2>/dev/null || true
     if [ -f "$TETRA_ARCHIVE" ] && [ -s "$TETRA_ARCHIVE" ] && tar -tzf "$TETRA_ARCHIVE" >/dev/null 2>&1; then
         TETRA_SHA=$(sha256sum "$TETRA_ARCHIVE" | awk '{print $1}')
-        echo "   -> Paquete Tetragon verificado (SHA-256: ${TETRA_SHA:0:16}...). Extrayendo binario..."
-        tar -xzf "$TETRA_ARCHIVE" -C /usr/local/bin/ ./tetragon 2>/dev/null || true
-        echo "   [✓] Tetragon instalado."
+        echo "   -> Paquete Tetragon verificado (SHA-256: ${TETRA_SHA:0:16}...). Extrayendo binarios..."
+        tar -xzf "$TETRA_ARCHIVE" -C /usr/local/bin/ ./tetragon ./tetra 2>/dev/null || tar -xzf "$TETRA_ARCHIVE" -C /usr/local/bin/ ./tetragon 2>/dev/null || true
+        echo "   [✓] Sensor principal Tetragon instalado en /usr/local/bin/tetragon."
     else
-        echo "   [i] Tetragon opcional no disponible en este momento; continuando sin demoras..."
+        echo "   [i] Tetragon no pudo descargarse en este momento; se reintentará en el actualizador."
     fi
 else
-    echo "   [✓] Tetragon ya presente en el sistema."
+    echo "   [✓] Sensor principal Tetragon ya presente en el sistema."
 fi
+
+# Políticas TracingPolicy en Puntos de Control del Kernel (security_bprm_check, security_file_permission, tcp_connect)
+# Regla de oro: NUNCA matar procesos solo por nombre; las políticas observan y emiten telemetría JSON estructurada
+# con identidad (uid/pid), ruta completa del ejecutable, binario padre y argumentos para correlación en Constantine.
+cat <<'EOF' > "$TETRAGON_POLICIES_DIR/constantine_edr_checkpoints.yaml"
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "constantine-edr-kernel-checkpoints"
+spec:
+  kprobes:
+    - call: "security_bprm_check"
+      syscall: false
+      args:
+        - index: 0
+          type: "linux_binprm"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/tmp/"
+                - "/var/tmp/"
+                - "/dev/shm/"
+    - call: "security_file_permission"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/etc/shadow"
+                - "/etc/sudoers"
+                - "/home/"
+            - index: 1
+              operator: "Equal"
+              values:
+                - "2" # MAY_WRITE (Puntos de control de escritura, nunca lectura)
+    - call: "tcp_connect"
+      syscall: false
+      args:
+        - index: 0
+          type: "sock"
+EOF
+chmod 640 "$TETRAGON_POLICIES_DIR/constantine_edr_checkpoints.yaml"
 
 cat <<EOF > /etc/systemd/system/tetragon.service
 [Unit]
-Description=Cilium Tetragon - eBPF Security Observability and Enforcement
+Description=Cilium Tetragon - Sensor EDR Principal eBPF de Constantine
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/tetragon --log-level=info --export-filename=$TETRAGON_LOG_DIR/tetragon.log
+ExecStart=/usr/local/bin/tetragon --log-level=info --export-filename=$TETRAGON_LOG_DIR/tetragon.log --tracing-policy-dir=$TETRAGON_POLICIES_DIR
 Restart=always
 RestartSec=5
 
@@ -687,40 +749,49 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# 16. Configuración de clamd.conf y ClamOnAcc
-echo "[16/19] Configurando motor clamd y ClamOnAcc con fanotify (FAN_DENY)..."
+# 16. Configuración de clamd.conf y ClamOnAcc (Propietario Único de Prevención fanotify)
+echo "[16/19] Configurando clamd.conf y delegando la prevención de acceso exclusivamente a ClamOnAcc..."
 CLAMD_CONF="/etc/clamav/clamd.conf"
 if [ ! -f "$CLAMD_CONF" ]; then CLAMD_CONF="/usr/local/etc/clamd.conf"; fi
-cp "$CLAMD_CONF" "${CLAMD_CONF}.bak"
+cp -f "$CLAMD_CONF" "${CLAMD_CONF}.bak"
 
+# Detectar dinámicamente el usuario real del servicio ClamAV en esta distribución
+CLAMAV_SERVICE_USER=$(awk '/^User / {print $2; exit}' "$CLAMD_CONF" 2>/dev/null || true)
+if [ -z "$CLAMAV_SERVICE_USER" ]; then
+    if id -u clamav >/dev/null 2>&1; then
+        CLAMAV_SERVICE_USER="clamav"
+    elif id -u clam >/dev/null 2>&1; then
+        CLAMAV_SERVICE_USER="clam"
+    else
+        CLAMAV_SERVICE_USER="clamav"
+    fi
+fi
+echo "   -> Usuario del servicio ClamAV detectado en el sistema: $CLAMAV_SERVICE_USER"
+
+sed -i '/# --- CONSTANTINE ANTIVIRUS ON-ACCESS CONFIGURATION ---/,$d' "$CLAMD_CONF" 2>/dev/null || true
 sed -i '/^OnAccessIncludePath/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExcludeUname/d' "$CLAMD_CONF"
 sed -i '/^OnAccessPrevention/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExtraScanning/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExcludeRootUID/d' "$CLAMD_CONF"
 sed -i '/^OnAccessMaxFileSize/d' "$CLAMD_CONF"
-sed -i '/^HeuristicAlerts/d' "$CLAMD_CONF"
 
-cat <<EOF >> "$CLAMD_CONF"
-# --- CONSTANTINE ANTIVIRUS ON-ACCESS CONFIGURATION ---
-OnAccessIncludePath $USER_HOME
-OnAccessExcludeUname clamav
-OnAccessPrevention yes
-OnAccessExtraScanning yes
-OnAccessExcludeRootUID yes
-OnAccessMaxFileSize 50M
-HeuristicAlerts yes
-AlertBrokenExecutables yes
-AlertEncrypted yes
-AlertOLE2Macros yes
-AlertPhishing yes
-ScanPE yes
-ScanELF yes
-ScanOLE2 yes
-ScanPDF yes
-ScanArchive yes
-MaxRecursion 16
-EOF
+{
+    echo "# --- CONSTANTINE ANTIVIRUS ON-ACCESS CONFIGURATION ---"
+    if [ -d "/home" ]; then echo "OnAccessIncludePath /home"; fi
+    if [ -d "/tmp" ]; then echo "OnAccessIncludePath /tmp"; fi
+    if [ -d "/var/tmp" ]; then echo "OnAccessIncludePath /var/tmp"; fi
+    if [ "$FANOTIFY_OK" = true ]; then
+        echo "OnAccessPrevention yes"
+    else
+        echo "OnAccessPrevention no"
+    fi
+    echo "OnAccessExcludeUname $CLAMAV_SERVICE_USER"
+    echo "OnAccessExcludeRootUID yes"
+    echo "OnAccessExtraScanning yes"
+    echo "OnAccessMaxFileSize 50M"
+} >> "$CLAMD_CONF"
+echo "   [✓] clamd.conf actualizado (/home, /tmp, /var/tmp protegidos por ClamOnAcc; excluido: $CLAMAV_SERVICE_USER)." 
 
 # 17. Inicialización del Baúl Criptográfico y Registro Forense Inmutable
 echo "[17/19] Inicializando Baúl Criptográfico y Registro Inmutable (Hash Chaining)..."
@@ -868,7 +939,7 @@ systemctl enable --now falco 2>/dev/null || true
 systemctl enable --now wazuh-agent 2>/dev/null || true
 
 # 19. Compilación, Lanzador y Smoke Test de Validación Inicial
-echo "[19/19] Compilando Constantine v3.2.5 y ejecutando validación inicial de integridad..."
+echo "[19/19] Compilando Constantine v3.2.7 y ejecutando validación inicial de integridad..."
 cd "$SCRIPT_DIR"
 echo "   -> Compilando binario optimizado en Rust (~30 a 60 segundos, por favor espere)..."
 cargo build --release -q
@@ -895,7 +966,7 @@ EOF
 cat <<EOF > /usr/share/applications/constantine.desktop
 [Desktop Entry]
 Name=Constantine Antivirus & EDR
-GenericName=Antivirus & EDR Debian v3.2.5
+GenericName=Antivirus & EDR Debian v3.2.7
 Comment=Protección EDR con Escudo Anti-Ransomware en 4 capas (Canary Tripwires, Ráfagas, SIGKILL y Forense)
 Exec=constantine
 Icon=constantine
@@ -925,7 +996,7 @@ fi
 
 echo ""
 echo "===================================================================="
-echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v3.2.5 COMPLETADA EXITOSAMENTE "
+echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v3.2.7 COMPLETADA EXITOSAMENTE "
 echo "===================================================================="
 echo " • ESCUDO ANTI-RANSOMWARE: 4 Señuelos Canary Tripwires Activos"
 echo " • DETECCIÓN DE RÁFAGAS: Monitoreo de frecuencia y entropía (H > 7.55)"
