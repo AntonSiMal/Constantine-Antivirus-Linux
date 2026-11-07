@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Constantine Antivirus & EDR v3.2.3 - Desinstalador Limpio y Reversión Total
+# Constantine Antivirus & EDR v3.2.7 - Desinstalador Limpio y Reversión Total
 #
 # Funciones:
 # 1. Cierre coordinado y seguro de servicios (vaciado de colas y desvinculación kernel).
@@ -23,7 +23,7 @@ CLAMD_CONF="/etc/clamav/clamd.conf"
 if [ ! -f "$CLAMD_CONF" ]; then CLAMD_CONF="/usr/local/etc/clamd.conf"; fi
 
 echo "===================================================================="
-echo " 🛑 DESINSTALADOR OFICIAL CONSTANTINE ANTIVIRUS & EDR v3.2.3 "
+echo " 🛑 DESINSTALADOR OFICIAL CONSTANTINE ANTIVIRUS & EDR v3.2.7 "
 echo "===================================================================="
 echo "[+] Iniciando desinstalación limpia y reversión de configuraciones..."
 echo ""
@@ -37,6 +37,10 @@ systemctl stop clamonacc 2>/dev/null || true
 systemctl disable clamonacc 2>/dev/null || true
 systemctl stop tetragon 2>/dev/null || true
 systemctl disable tetragon 2>/dev/null || true
+systemctl stop falco 2>/dev/null || true
+systemctl disable falco 2>/dev/null || true
+systemctl stop wazuh-agent 2>/dev/null || true
+systemctl disable wazuh-agent 2>/dev/null || true
 
 pkill -f "/usr/local/bin/constantine" 2>/dev/null || true
 echo "   [✓] Interceptores en kernel (fanotify y eBPF) desvinculados limpiamente."
@@ -92,14 +96,19 @@ echo "[5/7] Eliminando unidades de servicio de systemd..."
 rm -f /etc/systemd/system/clamonacc.service \
       /etc/systemd/system/constantine-boot-update.service \
       /etc/systemd/system/constantine-boot-update.timer \
-      /etc/systemd/system/tetragon.service
+      /etc/systemd/system/tetragon.service \
+      /etc/systemd/system/falco.service \
+      /etc/systemd/system/wazuh-agent.service
 systemctl daemon-reload
 echo "   [✓] Servicios del sistema desregistrados."
 
 # 6. Retirada de binarios, scripts y repositorios locales
 echo "[6/7] Retirando ejecutables, scripts de actualización y reglas..."
 rm -f /usr/local/bin/constantine \
-      /usr/local/bin/constantine-updater
+      /usr/local/bin/constantine-updater \
+      /usr/local/bin/yr \
+      /usr/local/bin/tetragon \
+      /usr/local/bin/tetra
 
 rm -rf /var/lib/constantine \
        /var/log/constantine
@@ -115,7 +124,7 @@ gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 
 echo ""
 echo "===================================================================="
-echo " 🎉 DESINSTALACIÓN DE CONSTANTINE v3.2.3 COMPLETADA CON ÉXITO "
+echo " 🎉 DESINSTALACIÓN DE CONSTANTINE v3.2.7 COMPLETADA CON ÉXITO "
 echo "===================================================================="
 echo " • Interceptores en Kernel: Totalmente desvinculados"
 echo " • Señuelos Canary Tripwires: Retirados de directorios de usuario"
