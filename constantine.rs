@@ -1,7 +1,26 @@
 // ==============================================================================
 // Constantine Antivirus & EDR v3.2.7 - Aplicación Nativa en Rust (GTK4 Cupertino v2.7)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
+//
+// Módulo de Protección Anti-Ransomware en Cuatro Capas:
+// 1. Archivos Trampa (Canary Tripwires):
+//    - Distribución de señuelos estratégicos en ~/Desktop, ~/Documents, ~/Downloads y ~/Pictures.
+//    - Vigilancia pasiva: lecturas inocuas permitidas, pero cualquier intento de modificación,
+//      sobrescritura o borrado dispara la contención instantánea antes de tocar archivos reales.
+// 2. Detección de Ráfagas Anómalas de Cifrado y Modificación:
+//    - Medición de frecuencia de operaciones de renombrado y escritura en ventanas de 2 segundos.
+//    - Identificación de sufijos de ransomware (.locked, .crypto, .enc, .crypted, .locky, etc.).
+//    - Detección de alta entropía de Shannon (H > 7.55) en datos sobrescritos.
+// 3. Aislamiento y Neutralización del Proceso Agresor:
+//    - Terminación fulminante inmediata mediante señal SIGKILL directa al PID del proceso agresor.
+//    - Corte perimetral de comunicaciones de red (regla dinámica UFW para aislar comando y control).
+//    - Aislamiento atómico del binario o script agresor en el Baúl Criptográfico (chmod 000).
+// 4. Preservación y Respaldo Forense:
+//    - Permisividad para lecturas de indexadores/backups legítimos (cero falsos positivos).
+//    - Registro cronológico inmutable con encadenamiento SHA-256 de cada ataque neutralizado.
+//    - Notificación visual de emergencia crítica en el escritorio informando del rescate de datos.
 // ==============================================================================
+
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box, Button, CssProvider, Grid,
@@ -10,22 +29,19 @@ use gtk4::{
 };
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write}; // Read es necesario para .take()
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-// 🔴 CORREGIDO: Eliminados todos los espacios finales fantasma en las constantes
 const CLAMD_SOCKET: &str = "/run/clamav/clamd.ctl";
 const LOG_FILE: &str = "/var/log/clamav/clamonacc.log";
 const YARA_LOG_FILE: &str = "/var/log/constantine/yara_live.log";
@@ -65,7 +81,7 @@ button.titlebutton.maximize { background-color: #27c93f; border: 1px solid #1aab
 .health-box { background-color: rgba(48, 209, 88, 0.12); border: 1px solid rgba(48, 209, 88, 0.3); border-radius: 9999px; padding: 4px 12px; }
 .health-score { color: #30d158; font-weight: 700; font-size: 10pt; }
 .sidebar-box { background-color: #141416; border-right: 1px solid rgba(255, 255, 255, 0.08); min-width: 250px; padding: 8px; }
-button.nav-btn { background-image: none; background-color: transparent; color: #e5e5ea; border: none; border-radius: 7px; padding: 7px 10px; margin: 1px 6px; font-weight: 500; transition: all 120ms ease; }
+button.nav-btn { background-image: none; background-color: transparent; color: #e5e5ea; border: none; border-radius: 7px; padding: 7px 10px; margin: 1px 6px; font-weight: 500; transition: all 120ms ease; box-shadow: none; }
 button.nav-btn:hover { background-color: rgba(255, 255, 255, 0.08); color: #ffffff; }
 button.nav-btn.nav-btn-active { background-image: none; background-color: #0071e3; color: #ffffff; border: none; border-radius: 7px; box-shadow: 0 1px 4px rgba(0, 113, 227, 0.4); }
 .mini-status-card { background-color: #1e1e20; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 12px 14px; margin: 10px 10px 14px 10px; }
@@ -76,7 +92,7 @@ button.nav-btn.nav-btn-active { background-image: none; background-color: #0071e
 .macos-card { background-color: #242426; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2); }
 .macos-table-header { font-size: 9pt; font-weight: 700; color: #86868b; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 6px; }
 .macos-table-cell { font-size: 9pt; color: #f5f5f7; padding: 4px 0; }
-button { background-image: none; background-color: rgba(255, 255, 255, 0.08); color: #f5f5f7; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 6px 14px; font-weight: 500; font-size: 9.5pt; transition: all 120ms ease; }
+button { background-image: none; background-color: rgba(255, 255, 255, 0.08); color: #f5f5f7; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 6px 14px; font-weight: 500; font-size: 9.5pt; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1); transition: all 120ms ease; }
 button:hover { background-color: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.2); color: #ffffff; }
 button.suggested-action { background-image: none; background-color: #0071e3; border: 1px solid #0a84ff; color: #ffffff; font-weight: 600; }
 button.destructive-action, button.power-btn { background-image: none; background-color: rgba(255, 69, 58, 0.15); border: 1px solid rgba(255, 69, 58, 0.35); color: #ff453a; font-weight: 600; }
@@ -179,10 +195,10 @@ impl AntiRansomwareShield {
         if pid <= 1 { return; }
         let pid_str = pid.to_string();
 
-        // 🔴 CORREGIDO: 1. Congelar el proceso PRIMERO para evitar race conditions (ej. execve cambiando el exe)
+        // 1. Congelar el proceso PRIMERO para evitar race conditions (execve cambiando el exe)
         let _ = SecurityAuth::privileged_action(&["kill", "-STOP", &pid_str]);
 
-        // 🔴 CORREGIDO: 2. Capturar identidad y ruta del ejecutable AHORA que está congelado
+        // 2. Capturar identidad y ruta del ejecutable AHORA que está congelado
         let proc_exe_link = format!("/proc/{}/exe", pid);
         let resolved_exe = fs::read_link(&proc_exe_link).ok();
 
@@ -247,7 +263,6 @@ impl ThreatAnalysisEngine {
                     let compressed_len = meta.len();
                     if compressed_len > 0 && compressed_len < 1024 * 1024 {
                         let mut buf = Vec::new();
-                        // 🔴 CORREGIDO: Limitar la lectura a 10 MB para evitar DoS por memoria (Zip Bomb)
                         let _ = f.take(10_485_760).read_to_end(&mut buf);
                         let zero_count = buf.iter().filter(|&&b| b == 0).count();
                         if zero_count > (buf.len() * 95) / 100 {
@@ -504,7 +519,6 @@ impl ContainmentEngine {
                     return Ok(arr);
                 }
             }
-            // 🔴 CORREGIDO: Si el archivo existe pero está corrupto, fallar explícitamente para evitar perder acceso al baúl
             return Err(format!("La clave en {} está corrupta o tiene un formato inválido. No se puede generar una nueva clave sin perder acceso a los archivos en cuarentena.", VAULT_KEY_FILE));
         }
 
@@ -798,25 +812,57 @@ impl ModuleVersionAudit {
         let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
         vec![
             ("Constantine Core EDR", "v3.2.7 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
-            ("Escudo Anti-Ransomware", format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()), if active_canaries == CANARY_FILES.len() { "Operativo (Correlación Multivariable)".into() } else { "Cobertura Parcial".into() }),
+            (
+                "Escudo Anti-Ransomware",
+                format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
+                if active_canaries == CANARY_FILES.len() { "Operativo (Correlación Multivariable)".into() } else { "Cobertura Parcial".into() },
+            ),
             ("1. ClamAV Engine (clamd)", Self::cmd_version_with_service("clamd", &["-V"], "clamav-daemon"), Self::get_file_mtime("/var/lib/clamav/daily.cvd")),
             ("2. YARA Engine", Self::cmd_version("yara", &["-v"]), Self::get_file_mtime(YARA_RULES_DIR)),
             ("3. YARA-X Engine (Rust)", Self::get_real_yarax_version(), Self::get_file_mtime("/usr/local/bin/yr")),
-            ("4. ClamOnAcc (fanotify Shield)", if get_service_active("clamonacc") { "Servicio Activo (FAN_DENY)".into() } else { "Servicio Detenido".into() }, Self::get_file_mtime(LOG_FILE)),
+            (
+                "4. ClamOnAcc (fanotify Shield)",
+                if get_service_active("clamonacc") { "Servicio Activo (FAN_DENY)".into() } else { "Servicio Detenido".into() },
+                Self::get_file_mtime(LOG_FILE),
+            ),
             ("5. Tetragon (Cilium eBPF)", Self::cmd_version_with_service("tetragon", &["--version"], "tetragon"), Self::get_file_mtime("/usr/local/bin/tetragon")),
             ("6. Falco Behavioral Engine", Self::cmd_version_with_service("falco", &["--version"], "falco"), Self::get_file_mtime("/etc/falco/falco_rules.yaml")),
             ("7. osquery (SQL Audit)", Self::cmd_version("osqueryi", &["--version"]), Self::get_file_mtime("/usr/bin/osqueryi")),
             ("8. Wazuh Agent (SIEM & FIM)", Self::get_wazuh_version(), Self::get_file_mtime("/var/ossec/etc/ossec.conf")),
-            ("9. AIDE Critical Integrity", if aide_ready { Self::cmd_version("aide", &["-v"]) } else { "Instalado (Base aún no inicializada)".into() }, Self::get_file_mtime(AIDE_DB_FILE)),
+            (
+                "9. AIDE Critical Integrity",
+                if aide_ready { Self::cmd_version("aide", &["-v"]) } else { "Instalado (Base aún no inicializada)".into() },
+                Self::get_file_mtime(AIDE_DB_FILE),
+            ),
             ("10. MISP Threat Sharing", Self::feed_line_count(MISP_IOC_FILE), Self::get_file_mtime(MISP_IOC_FILE)),
-            ("11. MalwareBazaar Feed", Self::feed_line_count(&format!("{}/malwarebazaar_hashes.txt", TI_DIR)), Self::get_file_mtime(&format!("{}/malwarebazaar_hashes.txt", TI_DIR)),
-            ("12. ThreatFox Feed", Self::feed_line_count(&format!("{}/threatfox_iocs.txt", TI_DIR)), Self::get_file_mtime(&format!("{}/threatfox_iocs.txt", TI_DIR)),
-            ("13. URLhaus Feed", Self::feed_line_count(&format!("{}/urlhaus_domains.txt", TI_DIR)), Self::get_file_mtime(&format!("{}/urlhaus_domains.txt", TI_DIR)),
-            ("14. OpenPhish Feed", Self::feed_line_count(&format!("{}/openphish_domains.txt", TI_DIR)), Self::get_file_mtime(&format!("{}/openphish_domains.txt", TI_DIR)),
+            (
+                "11. MalwareBazaar Feed",
+                Self::feed_line_count(&format!("{}/malwarebazaar_hashes.txt", TI_DIR)),
+                Self::get_file_mtime(&format!("{}/malwarebazaar_hashes.txt", TI_DIR)),
+            ),
+            (
+                "12. ThreatFox Feed",
+                Self::feed_line_count(&format!("{}/threatfox_iocs.txt", TI_DIR)),
+                Self::get_file_mtime(&format!("{}/threatfox_iocs.txt", TI_DIR)),
+            ),
+            (
+                "13. URLhaus Feed",
+                Self::feed_line_count(&format!("{}/urlhaus_domains.txt", TI_DIR)),
+                Self::get_file_mtime(&format!("{}/urlhaus_domains.txt", TI_DIR)),
+            ),
+            (
+                "14. OpenPhish Feed",
+                Self::feed_line_count(&format!("{}/openphish_domains.txt", TI_DIR)),
+                Self::get_file_mtime(&format!("{}/openphish_domains.txt", TI_DIR)),
+            ),
             ("15. Sigma Detection Rules", Self::dir_file_count(SIGMA_RULES_DIR), Self::get_file_mtime(SIGMA_RULES_DIR)),
             ("16. YARA-Rules Comunitarias", Self::dir_file_count(YARA_COMMUNITY_DIR), Self::get_file_mtime(YARA_COMMUNITY_DIR)),
             ("Cortafuegos UFW / GUFW", if NetworkPrivacyAudit::is_ufw_active() { "UFW Activo".into() } else { "UFW Inactivo".into() }, Self::get_file_mtime("/etc/ufw/ufw.conf")),
-            ("ProtonVPN Client", if NetworkPrivacyAudit::is_protonvpn_active() { "Túnel ProtonVPN Activo".into() } else { Self::cmd_version("protonvpn-app", &["--version"]) }, "Verificación de Interfaz".into()),
+            (
+                "ProtonVPN Client",
+                if NetworkPrivacyAudit::is_protonvpn_active() { "Túnel ProtonVPN Activo".into() } else { Self::cmd_version("protonvpn-app", &["--version"]) },
+                "Verificación de Interfaz".into(),
+            ),
         ]
     }
 
@@ -898,7 +944,7 @@ impl ModuleVersionAudit {
 }
 
 // ==============================================================================
-// 9. Auditoría Exacta de Firewall y VPN
+// 9. Auditoría Exacta de Firewall y VPN (con lookup HTTPS fiable)
 // ==============================================================================
 pub struct NetworkPrivacyAudit;
 
@@ -936,19 +982,65 @@ impl NetworkPrivacyAudit {
         false
     }
 
+    /// Lookup de IP pública con HTTPS real y sin depender del tier de pago de ip-api.com.
+    /// Estrategia en cascada:
+    ///   1) https://ifconfig.co/json   — gratuito, sin clave, HTTPS, estable
+    ///   2) https://ipinfo.io/json     — gratuito, sin clave, HTTPS, muy estable
+    ///   3) http://ip-api.com/line/... — último recurso (HTTP, tier gratuito limitado)
     pub fn get_public_ip_info() -> (String, String) {
-        // 🔴 CORREGIDO: Cambio a HTTPS para prevenir ataques MITM
+        // 1) ifconfig.co (HTTPS, JSON)
+        if let Ok(out) = Command::new("curl")
+            .args(["-s", "--max-time", "4", "https://ifconfig.co/json"])
+            .output()
+        {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                let ip = v.get("ip").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                if !ip.is_empty() {
+                    let city = v.get("city").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let region = v.get("region_name").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let country = v.get("country").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let loc = format!("{}, {}, {}", city, region, country)
+                        .trim_matches(|c: char| c == ',' || c == ' ')
+                        .to_string();
+                    return (ip, if loc.is_empty() { "Desconocida".into() } else { loc });
+                }
+            }
+        }
+
+        // 2) ipinfo.io (HTTPS, JSON)
+        if let Ok(out) = Command::new("curl")
+            .args(["-s", "--max-time", "4", "https://ipinfo.io/json"])
+            .output()
+        {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                let ip = v.get("ip").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                if !ip.is_empty() {
+                    let city = v.get("city").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let region = v.get("region").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let country = v.get("country").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let loc = format!("{}, {}, {}", city, region, country)
+                        .trim_matches(|c: char| c == ',' || c == ' ')
+                        .to_string();
+                    return (ip, if loc.is_empty() { "Desconocida".into() } else { loc });
+                }
+            }
+        }
+
+        // 3) ip-api.com (HTTP, último recurso)
         if let Ok(out) = Command::new("curl").args([
-            "-s", "--max-time", "3", "https://ip-api.com/line/?fields=query,city,regionName,country",
+            "-s", "--max-time", "3", "http://ip-api.com/line/?fields=query,city,regionName,country",
         ]).output() {
             let res = String::from_utf8_lossy(&out.stdout);
             let lines: Vec<&str> = res.lines().collect();
             if lines.len() >= 4 {
                 let ip = lines[0].trim().to_string();
-                let loc = format!("{}, {}, {}", lines[1].trim(), lines[2].trim(), lines[3].trim());
-                return (ip, loc);
+                if !ip.is_empty() && !ip.eq_ignore_ascii_case("fail") {
+                    let loc = format!("{}, {}, {}", lines[1].trim(), lines[2].trim(), lines[3].trim());
+                    return (ip, loc);
+                }
             }
         }
+
         ("No disponible / Sin conexión".into(), "Desconocida".into())
     }
 
@@ -1127,17 +1219,17 @@ impl TetragonPrimarySensor {
 
     fn process_tetragon_json_event(json_line: &str) {
         let val: serde_json::Value = match serde_json::from_str(json_line) { Ok(v) => v, Err(_) => return };
-        let event_Node = if let Some(kp) = val.get("process_kprobe") { kp } else if let Some(ex) = val.get("process_exec") { ex } else { return };
-        let proc = match event_Node.get("process") { Some(p) => p, None => return };
+        let event_node = if let Some(kp) = val.get("process_kprobe") { kp } else if let Some(ex) = val.get("process_exec") { ex } else { return };
+        let proc = match event_node.get("process") { Some(p) => p, None => return };
         let pid = proc.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let uid = proc.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let binary = proc.get("binary").and_then(|v| v.as_str()).unwrap_or("");
         let args = proc.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
-        let parent_bin = event_Node.get("parent").and_then(|p| p.get("binary")).and_then(|v| v.as_str()).unwrap_or("unknown");
-        let ppid = event_Node.get("parent").and_then(|p| p.get("pid")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let func_name = event_Node.get("function_name").and_then(|v| v.as_str()).unwrap_or("process_exec");
+        let parent_bin = event_node.get("parent").and_then(|p| p.get("binary")).and_then(|v| v.as_str()).unwrap_or("unknown");
+        let ppid = event_node.get("parent").and_then(|p| p.get("pid")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let func_name = event_node.get("function_name").and_then(|v| v.as_str()).unwrap_or("process_exec");
         let mut target_res = String::new();
-        if let Some(kp_args) = event_Node.get("args").and_then(|a| a.as_array()) {
+        if let Some(kp_args) = event_node.get("args").and_then(|a| a.as_array()) {
             for arg in kp_args {
                 if let Some(f_arg) = arg.get("file_arg").and_then(|fa| fa.get("path")).and_then(|p| p.as_str()) { target_res = f_arg.to_string(); }
                 else if let Some(b_arg) = arg.get("linux_binprm_arg").and_then(|ba| ba.get("path")).and_then(|p| p.as_str()) { target_res = b_arg.to_string(); }
