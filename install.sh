@@ -421,10 +421,11 @@ release_apt_locks() {
         sleep 5
         if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
             echo "   -> Liberando procesos apt/dpkg huérfanos de sesiones interrumpidas..."
-            killall -q apt apt-get dpkg 2>/dev/null || true
-            sleep 2
-            rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+            # 🔴 MEJORA: Intentar configurar primero antes de matar procesos, para evitar corrupción de dpkg
             DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true
+            sleep 2
+            killall -q apt apt-get dpkg 2>/dev/null || true
+            rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
         fi
     fi
 }
@@ -942,9 +943,24 @@ systemctl enable --now wazuh-agent 2>/dev/null || true
 echo "[19/19] Compilando Constantine v3.2.7 y ejecutando validación inicial de integridad..."
 cd "$SCRIPT_DIR"
 echo "   -> Compilando binario optimizado en Rust (~30 a 60 segundos, por favor espere)..."
-cargo build --release -q
-cp -f "$SCRIPT_DIR/target/release/constantine" "$BIN_DIR/constantine" 
-chmod 755 "$BIN_DIR/constantine"
+
+# 🔴 MEJORA: Compilar como usuario normal para evitar advertencias de seguridad de Cargo y problemas de permisos en la carpeta target
+if [ -n "$SUDO_USER" ]; then
+    echo "   -> Ejecutando compilación como usuario '$SUDO_USER' para evitar conflictos de permisos..."
+    su - "$SUDO_USER" -c "cd '$SCRIPT_DIR' && cargo build --release -q"
+else
+    cargo build --release -q
+fi
+
+# 🔴 MEJORA: Validación explícita post-compilación
+if [ -f "$SCRIPT_DIR/target/release/constantine" ]; then
+    cp -f "$SCRIPT_DIR/target/release/constantine" "$BIN_DIR/constantine" 
+    chmod 755 "$BIN_DIR/constantine"
+    echo "   [✓] Binario compilado e instalado correctamente."
+else
+    echo "   [-] ERROR CRÍTICO: Fallo en la compilación de Rust. Verifique que Cargo y las dependencias estén instalados."
+    exit 1
+fi
 
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 mkdir -p "$ICON_DIR" /usr/share/applications "$USER_HOME/Desktop"
