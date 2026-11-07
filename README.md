@@ -51,3 +51,73 @@ El instalador automatizado gestiona dependencias, configura servicios, descarga 
    ```bash
    git clone https://github.com/AntonSiMal/Constantine-Antivirus-Linux.git
    cd Constantine-Antivirus-Linux
+   ```
+2. Otorga permisos de ejecución al instalador:
+   ```bash
+   chmod +x install.sh
+   ```
+3. Ejecuta el script de instalación con privilegios de superusuario:
+   ```bash
+   sudo ./install.sh
+   ```
+   > **Nota**: Si estás en un entorno gráfico con Wayland/X11 y Python 3 instalado, se abrirá automáticamente un asistente visual con terminal en vivo. De lo contrario, se ejecutará en modo terminal puro.
+
+---
+
+## 💻 Uso
+
+Una vez instalado, puedes iniciar la aplicación de las siguientes maneras:
+
+- **Desde el menú de aplicaciones**: Busca "Constantine Antivirus & EDR".
+- **Desde la terminal**:
+  ```bash
+  constantine
+  ```
+- **Gestión de servicios** (si necesitas verificar o reiniciar componentes manualmente):
+  ```bash
+  sudo systemctl status clamonacc tetragon falco wazuh-agent
+  ```
+
+---
+
+## 🗑️ Desinstalación Limpia
+
+Para revertir todos los cambios, eliminar servicios, purgar la cuarentena y restaurar las configuraciones originales de ClamAV y UFW:
+
+```bash
+sudo ./uninstall.sh
+```
+
+---
+
+## 📂 Estructura del Proyecto
+
+```text
+Constantine-Antivirus-Linux/
+├── install.sh              # Script de instalación y configuración automatizada
+├── uninstall.sh            # Script de desinstalación y limpieza forense
+├── Cargo.toml              # Manifiesto de dependencias de Rust
+├── constantine.rs          # Código fuente principal de la aplicación EDR (Rust + GTK4)
+└── README.md               # Documentación del proyecto
+```
+
+---
+
+## ⚠️ Aviso Legal y de Responsabilidad
+
+Este software es una herramienta de **seguridad defensiva** diseñada para proteger sistemas contra amenazas avanzadas. 
+- El uso de este software en sistemas que no son de tu propiedad o sin el consentimiento explícito del propietario está estrictamente prohibido.
+- El autor no se hace responsable de daños indirectos, pérdida de datos o interrupciones del servicio derivados del uso de este software. Úsalo bajo tu propia responsabilidad.
+
+---
+
+## 🤝 Contribuciones
+
+Las contribuciones, reportes de bugs y solicitudes de características son bienvenidas. Por favor, abre un [Issue](https://github.com/AntonSiMal/Constantine-Antivirus-Linux/issues) o un [Pull Request](https://github.com/AntonSiMal/Constantine-Antivirus-Linux/pulls) en el repositorio.
+
+---
+
+**Desarrollado con ❤️ y Rust por el Constantine Security Team.**  
+*Versión: 3.2.7 (Debian Edition)*  
+*Repositorio: [AntonSiMal/Constantine-Antivirus-Linux](https://github.com/AntonSiMal/Constantine-Antivirus-Linux)*
+n `git commit` y `git push` para que se actualice en tu repositorio.
