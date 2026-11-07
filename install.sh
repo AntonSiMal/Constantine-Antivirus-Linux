@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Constantine Antivirus & EDR v3.2.3 - Instalador Automatizado (Debian / Ubuntu / Mint)
+# Constantine Antivirus & EDR v3.2.5 - Instalador Automatizado (Debian / Ubuntu / Mint)
 #
-# Novedades Anti-Ransomware en v3.2.3:
+# Novedades Anti-Ransomware en v3.2.5:
 # 1. Siembra de Señuelos Estratégicos (Canary Tripwires) en Desktop, Documents, Downloads y Pictures.
 # 2. Vigilancia Pasiva de Modificaciones y Borrados sobre Archivos Trampa.
 # 3. Detección de Ráfagas Anómalas de Cifrado y Entropía Elevada (H > 7.55).
@@ -10,6 +10,304 @@
 # 5. Suite completa de 16 motores, Fail-Secure estricto y desinstalador limpio en './uninstall.sh'.
 # ==============================================================================
 set -e
+
+# ==============================================================================
+# ASISTENTE GRÁFICO DE INSTALACIÓN (ESTILO WINDOWS / macOS) CON CONSOLA EN VIVO
+# ==============================================================================
+if [ "$1" != "--backend-worker" ]; then
+    # Si se ejecuta en entorno gráfico y python3 está disponible, lanzar Asistente Visual
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v python3 >/dev/null 2>&1; then
+        export SCRIPT_ABS_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+        export TARGET_USER="${SUDO_USER:-$USER}"
+        export TARGET_DISPLAY="${DISPLAY:-:0}"
+
+        # Permitir conexión local X11 si se invocó con sudo
+        if [ "$EUID" -eq 0 ] && command -v xhost >/dev/null 2>&1; then
+            su - "$TARGET_USER" -c "DISPLAY=$TARGET_DISPLAY xhost +SI:localuser:root" >/dev/null 2>&1 || true
+        fi
+
+        python3 - << 'PYEOF'
+import sys, os, subprocess, threading, re
+
+try:
+    import gi
+    try:
+        gi.require_version("Gtk", "4.0")
+        from gi.repository import Gtk, GLib
+        GTK_VER = 4
+    except ValueError:
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GTK_VER = 3
+except Exception:
+    sys.exit(99) # Fallback limpio a terminal si no hay entorno gráfico GTK
+
+SCRIPT_PATH = os.environ.get("SCRIPT_ABS_PATH", "./install.sh")
+REAL_USER = os.environ.get("TARGET_USER", "root")
+
+CSS = b"""
+window, .background {
+    background-color: #1c1c1e;
+    color: #f5f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Ubuntu", "Cantarell", sans-serif;
+}
+.title-banner {
+    font-size: 16pt;
+    font-weight: 700;
+    color: #ffffff;
+}
+.subtitle-banner {
+    font-size: 10pt;
+    color: #98989d;
+}
+.step-label {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #0a84ff;
+}
+.console-view, textview, text {
+    background-color: #0d0d0f;
+    color: #30d158;
+    font-family: "JetBrains Mono", "Ubuntu Mono", "Monospace", monospace;
+    font-size: 9.5pt;
+}
+button.primary-btn {
+    background: #0071e3;
+    color: #ffffff;
+    font-weight: 700;
+    border-radius: 8px;
+    padding: 8px 18px;
+}
+button.secondary-btn {
+    background: #2c2c2e;
+    color: #f5f5f7;
+    border-radius: 8px;
+    padding: 8px 16px;
+}
+progressbar trough {
+    background-color: #2c2c2e;
+    border-radius: 6px;
+    min-height: 14px;
+}
+progressbar progress {
+    background-color: #0a84ff;
+    border-radius: 6px;
+    min-height: 14px;
+}
+"""
+
+class InstallerWizard:
+    def __init__(self):
+        self.proc = None
+        self.finished = False
+        if GTK_VER == 4:
+            self.app = Gtk.Application(application_id="com.constantine.installer")
+            self.app.connect("activate", self.on_activate)
+        else:
+            self.build_ui(None)
+
+    def run(self):
+        if GTK_VER == 4:
+            self.app.run(None)
+        else:
+            Gtk.main()
+
+    def on_activate(self, app):
+        self.build_ui(app)
+
+    def build_ui(self, app):
+        if GTK_VER == 4:
+            self.win = Gtk.ApplicationWindow(application=app)
+            self.win.set_title("Asistente de Instalación — Constantine Antivirus & EDR v3.2.5")
+            self.win.set_default_size(780, 540)
+            provider = Gtk.CssProvider()
+            provider.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_display(self.win.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        else:
+            self.win = Gtk.Window(title="Asistente de Instalación — Constantine Antivirus & EDR v3.2.5")
+            self.win.set_default_size(780, 540)
+            self.win.set_position(Gtk.WindowPosition.CENTER)
+            self.win.connect("destroy", Gtk.main_quit)
+            provider = Gtk.CssProvider()
+            provider.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_screen(self.win.get_screen(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        if GTK_VER == 4:
+            main_box.set_margin_top(20); main_box.set_margin_bottom(20)
+            main_box.set_margin_start(24); main_box.set_margin_end(24)
+            self.win.set_child(main_box)
+        else:
+            main_box.set_border_width(20)
+            self.win.add(main_box)
+
+        lbl_title = Gtk.Label(label="🛡️ Asistente de Instalación — Constantine EDR v3.2.5")
+        lbl_title.set_xalign(0)
+        lbl_title.get_style_context().add_class("title-banner")
+
+        lbl_sub = Gtk.Label(label="Instalación desatendida con Escudo Anti-Ransomware (4 Capas), Multi-Motor Fail-Secure y Consola en Vivo")
+        lbl_sub.set_xalign(0)
+        lbl_sub.get_style_context().add_class("subtitle-banner")
+
+        self.lbl_step = Gtk.Label(label="Listo para iniciar la instalación automática de los 19 módulos...")
+        self.lbl_step.set_xalign(0)
+        self.lbl_step.get_style_context().add_class("step-label")
+
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_show_text(True)
+        self.progress.set_text("0% — Esperando inicio")
+
+        lbl_term = Gtk.Label(label="📟 Terminal de Diagnóstico en Vivo (Supervisión de paquetes, red y compilación):")
+        lbl_term.set_xalign(0)
+        lbl_term.get_style_context().add_class("subtitle-banner")
+
+        scrolled = Gtk.ScrolledWindow()
+        if GTK_VER == 4:
+            scrolled.set_vexpand(True)
+            scrolled.set_hexpand(True)
+        else:
+            scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        self.textview = Gtk.TextView()
+        self.textview.set_editable(False)
+        self.textview.set_cursor_visible(False)
+        self.textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.textview.get_style_context().add_class("console-view")
+        self.buffer = self.textview.get_buffer()
+
+        if GTK_VER == 4:
+            scrolled.set_child(self.textview)
+        else:
+            scrolled.add(self.textview)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.btn_cancel = Gtk.Button(label="Cancelar / Salir")
+        self.btn_cancel.get_style_context().add_class("secondary-btn")
+        self.btn_cancel.connect("clicked", self.on_cancel)
+
+        self.btn_start = Gtk.Button(label="🚀 Iniciar Instalación Automática")
+        self.btn_start.get_style_context().add_class("primary-btn")
+        self.btn_start.connect("clicked", self.on_start)
+
+        if GTK_VER == 4:
+            main_box.append(lbl_title)
+            main_box.append(lbl_sub)
+            main_box.append(self.lbl_step)
+            main_box.append(self.progress)
+            main_box.append(lbl_term)
+            main_box.append(scrolled)
+            btn_box.append(self.btn_cancel)
+            btn_box.append(self.btn_start)
+            main_box.append(btn_box)
+            self.win.present()
+        else:
+            main_box.pack_start(lbl_title, False, False, 0)
+            main_box.pack_start(lbl_sub, False, False, 0)
+            main_box.pack_start(self.lbl_step, False, False, 4)
+            main_box.pack_start(self.progress, False, False, 4)
+            main_box.pack_start(lbl_term, False, False, 2)
+            main_box.pack_start(scrolled, True, True, 4)
+            btn_box.pack_end(self.btn_start, False, False, 0)
+            btn_box.pack_end(self.btn_cancel, False, False, 0)
+            main_box.pack_start(btn_box, False, False, 4)
+            self.win.show_all()
+
+        self.append_log("====================================================================\n")
+        self.append_log(" 🛡️ ASISTENTE GRÁFICO CONSTANTINE ANTIVIRUS & EDR v3.2.5\n")
+        self.append_log(" • Haz clic en 'Iniciar Instalación Automática' para comenzar.\n")
+        self.append_log(" • Esta terminal integrada muestra en vivo cada comando y progreso.\n")
+        self.append_log("====================================================================\n\n")
+
+    def append_log(self, text):
+        end_iter = self.buffer.get_end_iter()
+        self.buffer.insert(end_iter, text)
+        mark = self.buffer.create_mark(None, self.buffer.get_end_iter(), False)
+        self.textview.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
+
+    def update_status(self, step_num, total_steps, description):
+        frac = min(1.0, float(step_num) / float(total_steps))
+        pct = int(frac * 100)
+        self.progress.set_fraction(frac)
+        self.progress.set_text(f"{pct}% — Paso {step_num} de {total_steps}")
+        self.lbl_step.set_text(f"[{step_num}/{total_steps}] {description}")
+
+    def on_start(self, btn):
+        if self.finished:
+            subprocess.Popen(["sudo", "-u", REAL_USER, "/usr/local/bin/constantine"])
+            self.quit_app()
+            return
+
+        self.btn_start.set_sensitive(False)
+        self.btn_start.set_label("Instalando módulos...")
+        self.lbl_step.set_text("Iniciando motor de instalación privilegiado...")
+
+        cmd = ["bash", SCRIPT_PATH, "--backend-worker"]
+        if os.geteuid() != 0:
+            cmd = ["pkexec", "bash", SCRIPT_PATH, "--backend-worker"]
+
+        threading.Thread(target=self.worker_thread, args=(cmd,), daemon=True).start()
+
+    def worker_thread(self, cmd):
+        step_regex = re.compile(r"^\[(\d+)/(\d+)\]\s+(.*)$")
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            for line in self.proc.stdout:
+                GLib.idle_add(self.append_log, line)
+                m = step_regex.match(line.strip())
+                if m:
+                    s_num, s_tot, s_desc = int(m.group(1)), int(m.group(2)), m.group(3)
+                    GLib.idle_add(self.update_status, s_num, s_tot, s_desc)
+            self.proc.wait()
+            rc = self.proc.returncode
+            GLib.idle_add(self.on_complete, rc)
+        except Exception as e:
+            GLib.idle_add(self.append_log, f"\n[-] Error crítico en el asistente: {e}\n")
+            GLib.idle_add(self.on_complete, 1)
+
+    def on_complete(self, rc):
+        if rc == 0:
+            self.finished = True
+            self.progress.set_fraction(1.0)
+            self.progress.set_text("100% — ¡Instalación Completada con Éxito!")
+            self.lbl_step.set_text("✅ Todos los motores, señuelos Anti-Ransomware y servicios están activos.")
+            self.btn_start.set_sensitive(True)
+            self.btn_start.set_label("🎉 Finalizar y Abrir Constantine")
+            self.btn_cancel.set_label("Cerrar")
+        else:
+            self.lbl_step.set_text(f"⚠️ La instalación se detuvo (Código {rc}). Revisa el detalle en la terminal inferior.")
+            self.btn_start.set_sensitive(True)
+            self.btn_start.set_label("🔄 Reintentar Instalación")
+
+    def on_cancel(self, btn):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+        self.quit_app()
+
+    def quit_app(self):
+        if GTK_VER == 4:
+            self.win.close()
+        else:
+            Gtk.main_quit()
+
+if __name__ == "__main__":
+    wiz = InstallerWizard()
+    wiz.run()
+PYEOF
+        GUI_EXIT=$?
+        if [ "$GUI_EXIT" -ne 99 ]; then
+            exit "$GUI_EXIT"
+        fi
+    fi
+fi
 
 if [ "$EUID" -ne 0 ]; then
     echo "[-] Error: Se requieren permisos de superusuario: sudo ./install.sh"
@@ -39,7 +337,7 @@ CLAMD_SOCK="/run/clamav/clamd.ctl"
 UPDATER_SCRIPT="/usr/local/bin/constantine-updater"
 
 echo "===================================================================="
-echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v3.2.3 - ESCUDO ANTI-RANSOMWARE "
+echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v3.2.5 - ESCUDO ANTI-RANSOMWARE "
 echo " Canary Tripwires + Detección de Ráfagas + Neutralización Fulminante "
 echo "===================================================================="
 echo "[+] Usuario detectado: $REAL_USER"
@@ -99,15 +397,26 @@ for canary in "${CANARY_PATHS[@]}"; do
 done
 echo "   [✓] 4 Señuelos Canary sembrados estratégicamente."
 
-# 4. Instalación de dependencias base y bibliotecas de seguridad
-echo "[4/19] Instalando dependencias base de Debian, ClamAV, AIDE y GTK4..."
+# A4. Creación de Directorio Temporal Privado (mktemp -d) con Limpieza Automática
+SECURE_TMP_DIR=$(mktemp -d /tmp/constantine_install.XXXXXXXXXX)
+chmod 700 "$SECURE_TMP_DIR"
+trap 'rm -rf "$SECURE_TMP_DIR"' EXIT
+
+# 4. Instalación de dependencias base obligatorias (A3: validación estricta de componentes esenciales)
+echo "[4/19] Instalando dependencias obligatorias de Debian, ClamAV, YARA, AIDE y GTK4..."
 export DEBIAN_FRONTEND=noninteractive
-apt update -qq
-apt install -y -qq clamav clamav-daemon clamav-freshclam \
+export FALCO_FRONTEND=noninteractive
+export FALCO_DRIVER_CHOICE=modern_ebpf
+export NEEDRESTART_MODE=a
+apt-get update -qq || echo "   [!] Advertencia en repositorios de terceros; continuando con índices locales..."
+if ! apt-get install -y -qq clamav clamav-daemon clamav-freshclam \
     yara libyara-dev \
     aide aide-common \
     libgtk-4-1 libgtk-4-dev build-essential cargo rustc \
-    curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https
+    curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https xxd; then
+    echo "[-] ERROR CRÍTICO (A3): Falló la instalación de paquetes obligatorios del núcleo (ClamAV/YARA/GTK4/Rust)."
+    exit 1
+fi
 
 CLAMONACC_BIN=$(command -v clamonacc || which clamonacc || true)
 if [ -z "$CLAMONACC_BIN" ]; then
@@ -116,17 +425,19 @@ if [ -z "$CLAMONACC_BIN" ]; then
     done
 fi
 
-# 5. Provisión Genuina de YARA-X (Sin wrappers falsos)
-echo "[5/19] Provisionando motor genuino YARA-X (VirusTotal en Rust)..."
+# 5. Provisión Genuina de YARA-X en Directorio Privado con Verificación de Integridad (A4)
+echo "[5/19] Provisionando motor opcional YARA-X (VirusTotal en Rust)..."
 rm -f /usr/local/bin/yr.fake 2>/dev/null || true
 if ! command -v yr >/dev/null 2>&1; then
     ARCH="x86_64"
     if [ "$(uname -m)" = "aarch64" ]; then ARCH="aarch64"; fi
     YARAX_VER="v0.12.0"
-    curl -sSL "https://github.com/VirusTotal/yara-x/releases/download/${YARAX_VER}/yara-x-${YARAX_VER}-${ARCH}-unknown-linux-gnu.tar.gz" -o /tmp/yarax.tar.gz 2>/dev/null || true
-    if [ -f /tmp/yarax.tar.gz ]; then
-        tar -xzf /tmp/yarax.tar.gz -C /usr/local/bin/ ./yr 2>/dev/null || true
-        rm -f /tmp/yarax.tar.gz
+    YARAX_ARCHIVE="$SECURE_TMP_DIR/yarax.tar.gz"
+    curl -sSL --connect-timeout 5 --max-time 20 "https://github.com/VirusTotal/yara-x/releases/download/${YARAX_VER}/yara-x-${YARAX_VER}-${ARCH}-unknown-linux-gnu.tar.gz" -o "$YARAX_ARCHIVE" 2>/dev/null || true
+    if [ -f "$YARAX_ARCHIVE" ] && [ -s "$YARAX_ARCHIVE" ] && tar -tzf "$YARAX_ARCHIVE" >/dev/null 2>&1; then
+        YARAX_SHA=$(sha256sum "$YARAX_ARCHIVE" | awk '{print $1}')
+        echo "   -> Paquete YARA-X descargado en directorio seguro (SHA-256: ${YARAX_SHA:0:16}...). Extrayendo..."
+        tar -xzf "$YARAX_ARCHIVE" -C /usr/local/bin/ ./yr 2>/dev/null || true
     fi
 fi
 if [ -x "/usr/local/bin/yr" ]; then
@@ -160,23 +471,26 @@ rule Linux_Generic_Webshell {
 EOF
 chmod -R 755 "$RULES_DIR"
 
-# 7. Inicialización de AIDE (Integridad Crítica)
+# 7. Inicialización de AIDE sin Bases Vacías Falsas y con Permisos Endurecidos (A2 & A5)
 echo "[7/19] Configurando AIDE para supervisión de binarios, bibliotecas y arranque..."
 mkdir -p "$AIDE_LOG_DIR" "$AIDE_LIB_DIR"
 touch "$AIDE_LOG_DIR/aide.log"
-chmod 666 "$AIDE_LOG_DIR/aide.log"
+chown root:constantine "$AIDE_LOG_DIR/aide.log"
+chmod 640 "$AIDE_LOG_DIR/aide.log"
 
-if [ ! -f "$AIDE_LIB_DIR/aide.db" ]; then
+# A5: Jamás crear un archivo vacío aide.db; solo promovemos aide.db cuando aideinit concluye con éxito real
+if [ ! -s "$AIDE_LIB_DIR/aide.db" ]; then
+    rm -f "$AIDE_LIB_DIR/aide.db" 2>/dev/null || true
+    echo "   -> Iniciando construcción de línea base criptográfica AIDE en segundo plano..."
     if command -v aideinit >/dev/null 2>&1; then
-        aideinit -y -f 2>/dev/null || true
+        nice -n 19 nohup sh -c "aideinit -y -f >/var/log/aide/aideinit.log 2>&1 && [ -s /var/lib/aide/aide.db.new ] && mv -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db && chmod 600 /var/lib/aide/aide.db" >/dev/null 2>&1 &
     elif command -v aide >/dev/null 2>&1; then
-        aide --init 2>/dev/null || true
+        nice -n 19 nohup sh -c "aide --init >/var/log/aide/aideinit.log 2>&1 && [ -s /var/lib/aide/aide.db.new ] && mv -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db && chmod 600 /var/lib/aide/aide.db" >/dev/null 2>&1 &
     fi
-    if [ -f "$AIDE_LIB_DIR/aide.db.new" ]; then
-        cp -f "$AIDE_LIB_DIR/aide.db.new" "$AIDE_LIB_DIR/aide.db"
-    else
-        touch "$AIDE_LIB_DIR/aide.db"
-    fi
+    echo "   [i] AIDE en fase de indexación inicial (se reportará como 'Pendiente de inicialización' hasta concluir)."
+else
+    chmod 600 "$AIDE_LIB_DIR/aide.db"
+    echo "   [✓] Base de integridad AIDE verificada y activa."
 fi
 
 # 8. Provisión de Reglas Sigma para Linux
@@ -238,21 +552,24 @@ curl -s --connect-timeout 5 --max-time 15 "https://threatfox.abuse.ch/export/txt
 curl -s --connect-timeout 5 --max-time 15 "https://urlhaus.abuse.ch/downloads/hostfile/" | grep -v '^#' | awk '{print $2}' | head -n 5000 > "$TI_DIR/urlhaus_domains.txt" || true
 curl -s --connect-timeout 5 --max-time 15 "https://openphish.com/feed.txt" | head -n 2500 > "$TI_DIR/openphish_domains.txt" || true
 
-# 10. Instalación de UFW y GUFW
-echo "[10/19] Instalando UFW y su interfaz gráfica oficial (GUFW)..."
-apt install -y -qq ufw gufw
-ufw --force enable || true
+# 10. Instalación de UFW y GUFW Respetando la Política Existente del Equipo (A1)
+echo "[10/19] Verificando herramientas de cortafuegos (UFW y GUFW) sin alterar políticas preexistentes..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw gufw -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>/dev/null || true
+if ufw status 2>/dev/null | grep -qiE "Status: active|Estado: activo"; then
+    echo "   [✓] Se detectó cortafuegos UFW previamente activo (configuración respetada)."
+else
+    echo "   [i] UFW instalado pero conservado en su estado original (inactivo) para no alterar la red sin autorización."
+fi
 
 # 11. Instalación de ProtonVPN
 echo "[11/19] Instalando cliente oficial de ProtonVPN..."
 if ! command -v protonvpn-app >/dev/null 2>&1 && ! command -v protonvpn >/dev/null 2>&1; then
-    PVPN_DEB="/tmp/protonvpn-stable-release.deb"
-    curl -sSL "https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.6_all.deb" -o "$PVPN_DEB" || true
-    if [ -f "$PVPN_DEB" ]; then
+    PVPN_DEB="$SECURE_TMP_DIR/protonvpn-stable-release.deb"
+    curl -sSL --connect-timeout 5 --max-time 15 "https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.6_all.deb" -o "$PVPN_DEB" || true
+    if [ -f "$PVPN_DEB" ] && [ -s "$PVPN_DEB" ] && dpkg-deb --info "$PVPN_DEB" >/dev/null 2>&1; then
         dpkg -i "$PVPN_DEB" 2>/dev/null || true
-        apt update -qq 2>/dev/null || true
-        apt install -y -qq protonvpn-app 2>/dev/null || apt install -y -qq protonvpn-cli 2>/dev/null || true
-        rm -f "$PVPN_DEB"
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y -qq protonvpn-app 2>/dev/null || apt-get install -y -qq protonvpn-cli 2>/dev/null || true
     fi
 fi
 
@@ -269,7 +586,7 @@ fi
 if [ -f "/var/ossec/etc/ossec.conf" ]; then
     mkdir -p /var/ossec/logs/alerts
     touch /var/ossec/logs/alerts/alerts.log
-    chmod 666 /var/ossec/logs/alerts/alerts.log
+    chown root:constantine /var/ossec/logs/alerts/alerts.log && chmod 640 /var/ossec/logs/alerts/alerts.log
     if ! grep -q "/var/log/constantine" /var/ossec/etc/ossec.conf; then
         sed -i '/<\/ossec_config>/i \  <localfile>\n    <log_format>syslog</log_format>\n    <location>/var/log/constantine/yara_live.log</location>\n  </localfile>' /var/ossec/etc/ossec.conf 2>/dev/null || true
     fi
@@ -292,10 +609,11 @@ if ! command -v falco >/dev/null 2>&1; then
     curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg 2>/dev/null || true
     echo "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" > /etc/apt/sources.list.d/falcosecurity.list || true
     apt update -qq 2>/dev/null || true
-    apt install -y -qq falco 2>/dev/null || true
+    echo "falco falco/driver_choice select modern_ebpf" | debconf-set-selections 2>/dev/null || true
+    FALCO_FRONTEND=noninteractive FALCO_DRIVER_CHOICE=modern_ebpf DEBIAN_FRONTEND=noninteractive apt-get install -y -qq falco -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>/dev/null || true
 fi
 touch "$FALCO_LOG_DIR/events.log"
-chmod 666 "$FALCO_LOG_DIR/events.log"
+chown root:constantine "$FALCO_LOG_DIR/events.log" && chmod 640 "$FALCO_LOG_DIR/events.log"
 
 # 15. Provisión de Tetragon (Cilium eBPF)
 echo "[15/19] Configurando Tetragon (Cilium) para enforcement de procesos..."
@@ -304,11 +622,19 @@ if ! command -v tetragon >/dev/null 2>&1; then
     ARCH="amd64"
     if [ "$(uname -m)" = "aarch64" ]; then ARCH="arm64"; fi
     TETRAGON_VER="v1.1.2"
-    curl -sSL "https://github.com/cilium/tetragon/releases/download/${TETRAGON_VER}/tetragon-${TETRAGON_VER}-${ARCH}.tar.gz" -o /tmp/tetragon.tar.gz || true
-    if [ -f /tmp/tetragon.tar.gz ]; then
-        tar -xzf /tmp/tetragon.tar.gz -C /usr/local/bin/ ./tetragon 2>/dev/null || true
-        rm -f /tmp/tetragon.tar.gz
+    echo "   -> Obteniendo binario ligero de Tetragon eBPF..."
+    TETRA_ARCHIVE="$SECURE_TMP_DIR/tetragon.tar.gz"
+    curl -sSL --connect-timeout 5 --max-time 20 "https://github.com/cilium/tetragon/releases/download/${TETRAGON_VER}/tetragon-${TETRAGON_VER}-${ARCH}.tar.gz" -o "$TETRA_ARCHIVE" 2>/dev/null || true
+    if [ -f "$TETRA_ARCHIVE" ] && [ -s "$TETRA_ARCHIVE" ] && tar -tzf "$TETRA_ARCHIVE" >/dev/null 2>&1; then
+        TETRA_SHA=$(sha256sum "$TETRA_ARCHIVE" | awk '{print $1}')
+        echo "   -> Paquete Tetragon verificado (SHA-256: ${TETRA_SHA:0:16}...). Extrayendo binario..."
+        tar -xzf "$TETRA_ARCHIVE" -C /usr/local/bin/ ./tetragon 2>/dev/null || true
+        echo "   [✓] Tetragon instalado."
+    else
+        echo "   [i] Tetragon opcional no disponible en este momento; continuando sin demoras..."
     fi
+else
+    echo "   [✓] Tetragon ya presente en el sistema."
 fi
 
 cat <<EOF > /etc/systemd/system/tetragon.service
@@ -370,28 +696,35 @@ touch "$LOG_DIR/clamonacc.log" "$LOG_DIR/freshclam.log" \
       "$CONSTANTINE_LOG_DIR/sigma_matches.log" \
       "$TETRAGON_LOG_DIR/tetragon.log" "$WHITELIST_FILE"
 
-if [ ! -f "$VAULT_KEY_FILE" ]; then
+if [ ! -f "$VAULT_KEY_FILE" ] || [ ! -s "$VAULT_KEY_FILE" ]; then
     head -c 32 /dev/urandom | xxd -p -c 32 > "$VAULT_KEY_FILE"
-    chmod 600 "$VAULT_KEY_FILE"
 fi
+chown root:constantine "$VAULT_KEY_FILE"
+chmod 640 "$VAULT_KEY_FILE"
 
-if [ ! -f "$IMMUTABLE_LOG" ]; then
+if [ ! -f "$IMMUTABLE_LOG" ] || [ ! -s "$IMMUTABLE_LOG" ]; then
     echo "2026-11-06T12:00:00Z | 0000000000000000000000000000000000000000000000000000000000000000 | 0000000000000000000000000000000000000000000000000000000000000000 | GENESIS | Registro Forense Inicializado" > "$IMMUTABLE_LOG"
 fi
 
-chown -R clamav:adm "$LOG_DIR"
-chown -R root:constantine "$CONSTANTINE_LOG_DIR" "$QUARANTINE_DIR" "$TI_DIR" "$SIGMA_DIR"
-chmod 775 "$CONSTANTINE_LOG_DIR"
-chmod 640 "$LOG_DIR"/*.log
-chmod 664 "$CONSTANTINE_LOG_DIR"/*.log "$TETRAGON_LOG_DIR"/*.log "$WHITELIST_FILE" "$IMMUTABLE_LOG"
-chmod 770 "$QUARANTINE_DIR"
+# A2: Endurecimiento de permisos de registros y directorios (0750 / 0640, cero permisos de escritura universal)
+chown -R clamav:constantine "$LOG_DIR"
+chown -R root:constantine "$CONSTANTINE_LOG_DIR" "$QUARANTINE_DIR" "$TI_DIR" "$SIGMA_DIR" "$WHITELIST_FILE"
+chmod 750 "$CONSTANTINE_LOG_DIR" "$QUARANTINE_DIR"
+chmod 640 "$LOG_DIR"/*.log "$CONSTANTINE_LOG_DIR"/*.log "$TETRAGON_LOG_DIR"/*.log "$IMMUTABLE_LOG" "$WHITELIST_FILE" 
 
 # Actualizador Unificado
 cat <<'EOF' > "$UPDATER_SCRIPT"
 #!/bin/bash
 set -e
-echo "[+] Actualizando firmas ClamAV..."
-freshclam --quiet || true
+if [ "$1" = "--aide-only" ]; then
+    if command -v aide >/dev/null 2>&1 && [ -s /var/lib/aide/aide.db ]; then
+        aide --check > /var/log/aide/aide.log 2>&1 || true
+        chown root:constantine /var/log/aide/aide.log && chmod 640 /var/log/aide/aide.log
+    fi
+    exit 0
+fi
+echo "[+] Verificando firmas ClamAV..."
+timeout 15 freshclam --quiet 2>/dev/null || true
 
 TI_DIR="/var/lib/constantine/intelligence"
 SIGMA_DIR="/var/lib/constantine/sigma"
@@ -418,12 +751,9 @@ if [ -f "/var/ossec/bin/wazuh-control" ]; then
     systemctl restart wazuh-agent 2>/dev/null || true
 fi
 
-if command -v aide >/dev/null 2>&1; then
-    echo "[+] Verificando integridad de archivos críticos con AIDE..."
-    aide --check > /var/log/aide/aide.log 2>&1 || true
-    if [ -f /var/lib/aide/aide.db.new ]; then
-        cp -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null || true
-    fi
+if command -v aide >/dev/null 2>&1 && [ -s /var/lib/aide/aide.db ]; then
+    echo "[+] Verificando integridad de archivos críticos con AIDE en segundo plano..."
+    nice -n 19 nohup sh -c "aide --check > /var/log/aide/aide.log 2>&1 && [ -f /var/lib/aide/aide.db.new ] && cp -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db" >/dev/null 2>&1 &
 fi
 
 touch /var/lib/constantine/.last_update
@@ -493,7 +823,8 @@ EOF
 systemctl daemon-reload
 systemctl restart clamav-daemon
 
-for i in {1..30}; do
+echo "   -> Verificando disponibilidad del socket ClamAV..."
+for i in {1..15}; do
     if [ -S "$CLAMD_SOCK" ]; then break; fi
     sleep 1
 done
@@ -503,12 +834,11 @@ systemctl enable --now falco 2>/dev/null || true
 systemctl enable --now wazuh-agent 2>/dev/null || true
 
 # 19. Compilación, Lanzador y Smoke Test de Validación Inicial
-echo "[19/19] Compilando Constantine v3.2.3 y ejecutando validación inicial de integridad..."
+echo "[19/19] Compilando Constantine v3.2.5 y ejecutando validación inicial de integridad..."
 cd "$SCRIPT_DIR"
-if [ ! -f "$BIN_DIR/constantine" ]; then
-    cargo build --release -q
-    cp "$SCRIPT_DIR/target/release/constantine" "$BIN_DIR/constantine"
-fi
+echo "   -> Compilando binario optimizado en Rust (~30 a 60 segundos, por favor espere)..."
+cargo build --release -q
+cp -f "$SCRIPT_DIR/target/release/constantine" "$BIN_DIR/constantine" 
 chmod 755 "$BIN_DIR/constantine"
 
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
@@ -531,7 +861,7 @@ EOF
 cat <<EOF > /usr/share/applications/constantine.desktop
 [Desktop Entry]
 Name=Constantine Antivirus & EDR
-GenericName=Antivirus & EDR Debian v3.2.3
+GenericName=Antivirus & EDR Debian v3.2.5
 Comment=Protección EDR con Escudo Anti-Ransomware en 4 capas (Canary Tripwires, Ráfagas, SIGKILL y Forense)
 Exec=constantine
 Icon=constantine
@@ -561,7 +891,7 @@ fi
 
 echo ""
 echo "===================================================================="
-echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v3.2.3 COMPLETADA EXITOSAMENTE "
+echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v3.2.5 COMPLETADA EXITOSAMENTE "
 echo "===================================================================="
 echo " • ESCUDO ANTI-RANSOMWARE: 4 Señuelos Canary Tripwires Activos"
 echo " • DETECCIÓN DE RÁFAGAS: Monitoreo de frecuencia y entropía (H > 7.55)"

@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v3.2.3 - Aplicación Nativa en Rust (GTK4 Cupertino v2.7)
+// Constantine Antivirus & EDR v3.2.5 - Aplicación Nativa en Rust (GTK4 Cupertino v2.7)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -27,8 +27,11 @@ use gtk4::{
     HeaderBar, Label, Orientation, ProgressBar, ScrolledWindow,
     Stack, Switch, TextView
 };
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -325,10 +328,17 @@ scrolledwindow {
 "#;
 
 // ==============================================================================
-// 1. Módulo de Protección Anti-Ransomware en 4 Capas
+// 1. Módulo de Protección Anti-Ransomware con Correlación Multivariable (D & C4)
 // ==============================================================================
+pub struct ProcessBurstMetrics {
+    pub window_start: Instant,
+    pub mod_count: usize,
+    pub high_entropy_hits: usize,
+    pub suspicious_ext_hits: usize,
+}
+
 pub struct AntiRansomwareShield {
-    process_rate_tracker: Mutex<HashMap<u32, (Instant, usize)>>,
+    process_rate_tracker: Mutex<HashMap<u32, ProcessBurstMetrics>>,
 }
 
 impl AntiRansomwareShield {
@@ -359,6 +369,18 @@ impl AntiRansomwareShield {
         count
     }
 
+    /// Comprueba cuántos señuelos están íntegros actualmente en el disco
+    pub fn verify_active_canaries(user_home: &str) -> usize {
+        let mut active = 0;
+        for rel in &CANARY_FILES {
+            let full_path = format!("{}/{}", user_home, rel);
+            if Path::new(&full_path).is_file() {
+                active += 1;
+            }
+        }
+        active
+    }
+
     /// Comprueba si la ruta corresponde a un archivo trampa
     pub fn is_canary_file(path: &Path) -> bool {
         let path_str = path.to_string_lossy();
@@ -370,28 +392,58 @@ impl AntiRansomwareShield {
         path_str.contains("!000_canary_")
     }
 
-    /// Detección de ráfagas anómalas de modificación y cifrado
+    /// Correlación multivariable con poda periódica de memoria (TTL > 30s)
     pub fn track_process_burst(&self, pid: u32, path: &Path, data: &[u8]) -> bool {
-        let now = Instant::now();
-        let mut map = self.process_rate_tracker.lock().unwrap();
-        let entry = map.entry(pid).or_insert((now, 0));
+        // Señal 1: Alteración directa de un archivo trampa Canary Honeypot (certeza inmediata)
+        if Self::is_canary_file(path) {
+            return true;
+        }
 
-        if now.duration_since(entry.0) < Duration::from_secs(2) {
-            entry.1 += 1;
-            // Más de 6 modificaciones en 2 segundos con entropía alta indica ráfaga de cifrado hostil
-            if entry.1 >= 6 {
-                let entropy = ThreatAnalysisEngine::calculate_shannon_entropy(data);
-                if entropy > 7.55 || Self::is_ransomware_extension(path) {
-                    return true;
-                }
+        let now = Instant::now();
+        let mut map = match self.process_rate_tracker.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        // Política de limpieza de HashMap para evitar fugas de memoria
+        if map.len() > 128 {
+            map.retain(|_, m| now.duration_since(m.window_start) < Duration::from_secs(30));
+        }
+
+        let entry = map.entry(pid).or_insert(ProcessBurstMetrics {
+            window_start: now,
+            mod_count: 0,
+            high_entropy_hits: 0,
+            suspicious_ext_hits: 0,
+        });
+
+        if now.duration_since(entry.window_start) <= Duration::from_secs(3) {
+            entry.mod_count += 1;
+            let entropy = ThreatAnalysisEngine::calculate_shannon_entropy(data);
+            if entropy > 7.55 {
+                entry.high_entropy_hits += 1;
+            }
+            if Self::is_ransomware_extension(path) {
+                entry.suspicious_ext_hits += 1;
+            }
+
+            // Correlación multivariable: exige combinación de ráfaga sostenida + múltiples señales
+            let burst_and_entropy = entry.mod_count >= 8 && entry.high_entropy_hits >= 4;
+            let burst_and_ext = entry.mod_count >= 4 && entry.suspicious_ext_hits >= 2 && entry.high_entropy_hits >= 2;
+            if burst_and_entropy || burst_and_ext {
+                return true;
             }
         } else {
-            *entry = (now, 1);
+            *entry = ProcessBurstMetrics {
+                window_start: now,
+                mod_count: 1,
+                high_entropy_hits: if ThreatAnalysisEngine::calculate_shannon_entropy(data) > 7.55 { 1 } else { 0 },
+                suspicious_ext_hits: if Self::is_ransomware_extension(path) { 1 } else { 0 },
+            };
         }
         false
     }
 
-    /// Comprueba extensiones comúnmente asociadas con familias de ransomware
     pub fn is_ransomware_extension(path: &Path) -> bool {
         let s = path.to_string_lossy().to_lowercase();
         let suspicious = [".locked", ".crypto", ".enc", ".crypted", ".ransom", ".locky", ".wcry", ".wncry", ".darkside"];
@@ -401,41 +453,59 @@ impl AntiRansomwareShield {
         false
     }
 
-    /// Neutralización fulminante del proceso ransomware
+    /// Contención segura del proceso agresor (C4 corregido):
+    /// 1. Resuelve /proc/PID/exe ANTES de terminar el proceso.
+    /// 2. Congela con SIGSTOP, verifica que sea un ejecutable no-sistema y nunca secuestra el documento de la víctima.
+    /// 3. No aplica bloqueos globales destructivos de red.
     pub fn neutralize_attack(pid: u32, offending_path: &Path, reason: &str) {
-        // 1. SIGKILL atómico
-        let _ = SecurityAuth::privileged_action(&["kill", "-9", &pid.to_string()]);
+        if pid <= 1 { return; }
 
-        // 2. Corte perimetral de red en UFW
-        let _ = SecurityAuth::privileged_action(&["ufw", "insert", "1", "deny", "out", "proto", "tcp"]);
+        // 1. Capturar identidad y ruta del ejecutable ANTES de enviar señal letal
+        let proc_exe_link = format!("/proc/{}/exe", pid);
+        let resolved_exe = fs::read_link(&proc_exe_link).ok();
 
-        // 3. Aislamiento del binario ejecutor en el baúl
-        let proc_exe = format!("/proc/{}/exe", pid);
-        if let Ok(target) = fs::read_link(&proc_exe) {
-            ContainmentEngine::isolate_to_vault(&target);
-        } else {
-            ContainmentEngine::isolate_to_vault(offending_path);
+        // 2. Contención inicial del proceso (SIGSTOP para congelar actividad en kernel, luego SIGKILL)
+        let pid_str = pid.to_string();
+        let _ = SecurityAuth::privileged_action(&["kill", "-STOP", &pid_str]);
+        let _ = SecurityAuth::privileged_action(&["kill", "-KILL", &pid_str]);
+
+        // 3. Aislar ÚNICAMENTE el binario ejecutor verificado (jamás aislar offending_path que es el documento del usuario)
+        let mut isolated_exe_msg = String::from("Ejecutable en memoria detenido (documentos del usuario preservados)");
+        if let Some(exe_path) = resolved_exe {
+            let exe_str = exe_path.to_string_lossy();
+            // Evitar aislar intérpretes o binarios base del sistema operativo
+            if !exe_str.starts_with("/usr/bin/") && !exe_str.starts_with("/bin/") && !exe_str.starts_with("/sbin/") && !exe_str.starts_with("/lib") {
+                if ContainmentEngine::isolate_to_vault(&exe_path) {
+                    isolated_exe_msg = format!("Binario agresor aislado en baúl AES-256-GCM: {}", exe_str);
+                }
+            }
         }
 
         // 4. Registro forense inmutable y alerta crítica
-        ImmutableAuditLog::append_event("RANSOMWARE_ATTACK_NEUTRALIZED", &format!("PID {}: {} en {}", pid, reason, offending_path.display()));
+        ImmutableAuditLog::append_event(
+            "RANSOMWARE_CONTAINED",
+            &format!("PID {} neutralizado ({}) sobre {} | {}", pid, reason, offending_path.display(), isolated_exe_msg),
+        );
         let _ = Command::new("notify-send")
             .args([
                 "-u", "critical", "-i", "security-high",
-                "¡ALERTA CRÍTICA: RANSOMWARE NEUTRALIZADO!",
-                &format!("Se detuvo un intento de secuestro de datos por PID {}.\nMotivo: {}\nSus archivos personales permanecen a salvo.", pid, reason)
+                "¡ALERTA CRÍTICA: RANSOMWARE CONTENIDO!",
+                &format!("Proceso PID {} detenido.\nMotivo: {}\n{}", pid, reason, isolated_exe_msg)
             ])
             .status();
     }
 }
 
 // ==============================================================================
-// 2. Veredicto Formal y Pipeline de Análisis Multi-Motor Riguroso (Fail-Secure)
+// 2. Veredicto Formal y Pipeline Multi-Motor con Separación Obligatorio/Opcional (G1)
 // ==============================================================================
 #[derive(Debug, PartialEq, Clone)]
 pub enum FileVerdict {
-    Clean,
+    /// Archivo certificado limpio por todos los motores obligatorios; incluye detalle de cobertura (ej. si YARA-X opcional está presente o no).
+    Clean(String),
+    /// Amenaza confirmada por al menos una capa de detección.
     Threat(String),
+    /// Fallo en un motor obligatorio (ClamAV o YARA base) o error de lectura física (Fail-Secure).
     Indeterminate(String),
 }
 
@@ -480,13 +550,14 @@ impl ThreatAnalysisEngine {
             return FileVerdict::Indeterminate("El archivo no existe o fue movido.".into());
         }
 
-        // 1. Cotejo contra Lista Blanca
-        if let Ok(hash) = Self::compute_sha256(path) {
-            if Self::is_whitelisted(&hash) {
-                return FileVerdict::Clean;
-            }
-        } else {
-            return FileVerdict::Indeterminate("Error de I/O: no se pudo calcular huella SHA-256.".into());
+        // 1. Cálculo único de SHA-256 y Cotejo contra Lista Blanca (por hash criptográfico)
+        let file_hash = match Self::compute_sha256(path) {
+            Ok(h) => h,
+            Err(_) => return FileVerdict::Indeterminate("Error de I/O: no se pudo calcular huella SHA-256.".into()),
+        };
+
+        if Self::is_whitelisted(&file_hash) {
+            return FileVerdict::Clean("Excluido por firma SHA-256 en Lista Blanca".into());
         }
 
         // 2. Comprobación de Bomba de Descompresión
@@ -500,29 +571,27 @@ impl ThreatAnalysisEngine {
             if let Ok(n) = f.read(&mut buffer) {
                 let entropy = Self::calculate_shannon_entropy(&buffer[..n]);
                 if entropy > 7.45 && Self::is_executable(path) {
-                    return FileVerdict::Threat(format!("Código empaquetado/cifrado sospechoso (Entropía: {:.2}).", entropy));
+                    return FileVerdict::Threat(format!("Ejecutable empaquetado/cifrado sospechoso (Entropía: {:.2}).", entropy));
                 }
             }
         } else {
             return FileVerdict::Indeterminate("Acceso denegado temporalmente por error físico de lectura.".into());
         }
 
-        // 4. Contrastación con Indicadores de Compromiso Locales
-        if let Ok(hash) = Self::compute_sha256(path) {
-            if Self::is_known_malware_hash(&hash) {
-                return FileVerdict::Threat(format!("Huella coincidente con muestra hostil en TI: {}.", &hash[..12]));
-            }
+        // 4. Contrastación con Indicadores de Compromiso Locales (MISP, MalwareBazaar, ThreatFox)
+        if Self::is_known_malware_hash(&file_hash) {
+            return FileVerdict::Threat(format!("Huella SHA-256 coincidente con muestra hostil en TI: {}.", &file_hash[..12]));
         }
 
-        // 5. Análisis mediante ClamAV Socket (Fail-Secure)
+        // 5. Motor Obligatorio 1: ClamAV Socket (Fail-Secure)
         if !Path::new(CLAMD_SOCKET).exists() {
-            return FileVerdict::Indeterminate("Motor ClamAV no disponible (socket /run/clamav/clamd.ctl ausente): análisis incompleto.".into());
+            return FileVerdict::Indeterminate("Motor obligatorio ClamAV no disponible (socket /run/clamav/clamd.ctl ausente).".into());
         }
         match UnixStream::connect(CLAMD_SOCKET) {
             Ok(mut stream) => {
                 let cmd = format!("SCAN {}\n", path.to_string_lossy());
                 if let Err(e) = stream.write_all(cmd.as_bytes()) {
-                    return FileVerdict::Indeterminate(format!("Fallo de comunicación con clamd socket: {}", e));
+                    return FileVerdict::Indeterminate(format!("Fallo de escritura en clamd socket: {}", e));
                 }
                 let mut resp = String::new();
                 if let Err(e) = stream.read_to_string(&mut resp) {
@@ -531,18 +600,16 @@ impl ThreatAnalysisEngine {
                 let trimmed_resp = resp.trim();
                 if trimmed_resp.contains("FOUND") {
                     return FileVerdict::Threat(format!("ClamAV Detección: {}", trimmed_resp));
-                } else if trimmed_resp.contains("OK") {
-                    // ClamAV completó satisfactoriamente
-                } else {
-                    return FileVerdict::Indeterminate(format!("ClamAV devolvió error durante el análisis: {}", trimmed_resp));
+                } else if !trimmed_resp.contains("OK") {
+                    return FileVerdict::Indeterminate(format!("ClamAV devolvió respuesta de error: {}", trimmed_resp));
                 }
             }
             Err(e) => {
-                return FileVerdict::Indeterminate(format!("No se pudo conectar al daemon clamd: {}", e));
+                return FileVerdict::Indeterminate(format!("No se pudo conectar al daemon obligatorio clamd: {}", e));
             }
         }
 
-        // 6. Selección de Reglas YARA Verificadas
+        // 6. Selección Comprobada de Reglas YARA
         let mut verified_rules = Vec::new();
         if let Ok(entries) = fs::read_dir(YARA_RULES_DIR) {
             for entry in entries.flatten() {
@@ -553,12 +620,12 @@ impl ThreatAnalysisEngine {
             }
         }
         if verified_rules.is_empty() {
-            return FileVerdict::Indeterminate("No existen archivos de reglas YARA comprobados en /var/lib/constantine/rules: análisis incompleto.".into());
+            return FileVerdict::Indeterminate("No existen archivos de reglas YARA comprobados en /var/lib/constantine/rules.".into());
         }
 
-        // 7. YARA Tradicional
+        // 7. Motor Obligatorio 2: YARA Tradicional
         if !Command::new("which").arg("yara").output().map(|o| o.status.success()).unwrap_or(false) {
-            return FileVerdict::Indeterminate("Motor YARA no instalado o no ejecutable en PATH: análisis incompleto.".into());
+            return FileVerdict::Indeterminate("Motor obligatorio YARA no instalado en PATH.".into());
         }
         for rule_path in &verified_rules {
             let output = match Command::new("yara")
@@ -566,7 +633,7 @@ impl ThreatAnalysisEngine {
                 .output()
             {
                 Ok(o) => o,
-                Err(e) => return FileVerdict::Indeterminate(format!("Fallo al ejecutar binario yara: {}", e)),
+                Err(e) => return FileVerdict::Indeterminate(format!("Fallo al invocar motor obligatorio yara: {}", e)),
             };
 
             if !output.status.success() {
@@ -592,51 +659,56 @@ impl ThreatAnalysisEngine {
             }
         }
 
-        // 8. YARA-X Genuino
-        let yr_bin = if Path::new("/usr/local/bin/yr").is_file() {
-            "/usr/local/bin/yr"
+        // 8. Motor Complementario Opcional: YARA-X (G1 corregido)
+        // Si YARA-X está instalado, se ejecuta con rigor total (si falla devuelve Indeterminate).
+        // Si no está instalado en el sistema, se reporta cobertura estándar verificada (ClamAV + YARA + TI) sin bloquear falsamente.
+        let yr_bin_opt = if Path::new("/usr/local/bin/yr").is_file() {
+            Some("/usr/local/bin/yr")
         } else if Command::new("which").arg("yr").output().map(|o| o.status.success()).unwrap_or(false) {
-            "yr"
+            Some("yr")
         } else {
-            return FileVerdict::Indeterminate("Motor YARA-X no disponible en el sistema (binario 'yr' ausente): análisis incompleto.".into());
+            None
         };
 
-        for rule_path in &verified_rules {
-            let output = match Command::new(yr_bin)
-                .args(["scan", rule_path.to_str().unwrap_or(""), path.to_str().unwrap_or("")])
-                .output()
-            {
-                Ok(o) => o,
-                Err(e) => return FileVerdict::Indeterminate(format!("Fallo al ejecutar binario yr (YARA-X): {}", e)),
-            };
+        if let Some(yr_bin) = yr_bin_opt {
+            for rule_path in &verified_rules {
+                let output = match Command::new(yr_bin)
+                    .args(["scan", rule_path.to_str().unwrap_or(""), path.to_str().unwrap_or("")])
+                    .output()
+                {
+                    Ok(o) => o,
+                    Err(e) => return FileVerdict::Indeterminate(format!("Fallo al ejecutar binario yr (YARA-X): {}", e)),
+                };
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return FileVerdict::Indeterminate(format!(
-                    "Error de ejecución en YARA-X con regla {} (código {}): {}",
-                    rule_path.file_name().and_then(|n| n.to_str()).unwrap_or("regla"),
-                    output.status.code().unwrap_or(-1),
-                    stderr.trim()
-                ));
-            }
-
-            let res = String::from_utf8_lossy(&output.stdout);
-            for line in res.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return FileVerdict::Threat(format!(
-                        "YARA-X Coincidencia [{}]: {}",
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return FileVerdict::Indeterminate(format!(
+                        "Error de ejecución en YARA-X con regla {} (código {}): {}",
                         rule_path.file_name().and_then(|n| n.to_str()).unwrap_or("regla"),
-                        trimmed
+                        output.status.code().unwrap_or(-1),
+                        stderr.trim()
                     ));
                 }
-            }
-        }
 
-        FileVerdict::Clean
+                let res = String::from_utf8_lossy(&output.stdout);
+                for line in res.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        return FileVerdict::Threat(format!(
+                            "YARA-X Coincidencia [{}]: {}",
+                            rule_path.file_name().and_then(|n| n.to_str()).unwrap_or("regla"),
+                            trimmed
+                        ));
+                    }
+                }
+            }
+            FileVerdict::Clean("Cobertura Completa (ClamAV + YARA + YARA-X + Heurística + TI)".into())
+        } else {
+            FileVerdict::Clean("Cobertura Estándar Verificada (ClamAV + YARA + Heurística + TI; YARA-X opcional no instalado)".into())
+        }
     }
 
-    fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
+    pub fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
         let mut f = File::open(path)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 8192];
@@ -648,10 +720,10 @@ impl ThreatAnalysisEngine {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    fn is_whitelisted(hash: &str) -> bool {
+    pub fn is_whitelisted(hash: &str) -> bool {
         if let Ok(f) = File::open(WHITELIST_FILE) {
             for l in BufReader::new(f).lines().flatten() {
-                if l.trim() == hash { return true; }
+                if l.trim().eq_ignore_ascii_case(hash) { return true; }
             }
         }
         false
@@ -679,63 +751,184 @@ impl ThreatAnalysisEngine {
 }
 
 // ==============================================================================
-// 3. Contención Inmediata y Baúl Criptográfico Blindado
+// 3. Baúl Criptográfico Autenticado con AES-256-GCM y CSPRNG (B, C1, C2 y C3)
 // ==============================================================================
+// Formato binario de archivo .vault:
+// [0..9]   Magic Header: b"CSTVAULT1" (9 bytes)
+// [9..21]  Nonce aleatorio CSPRNG de 96 bits (12 bytes)
+// [21..53] Hash SHA-256 original del archivo en crudo (32 bytes)
+// [53..]   Ciphertext + Poly1305 Tag de 128 bits generado por AES-256-GCM
+// AAD (Additional Authenticated Data): Hash SHA-256 de 32 bytes para vincular integridad.
+const VAULT_MAGIC: &[u8; 9] = b"CSTVAULT1";
+
 pub struct ContainmentEngine;
 
 impl ContainmentEngine {
+    /// Aísla y cifra un archivo mediante AES-256-GCM autenticado de forma transaccional:
+    /// 1. Carga o genera una clave de 256 bits vía CSPRNG del sistema (sin claves constantes).
+    /// 2. Cifra con nonce único de 96 bits y AAD vinculado al hash SHA-256 original.
+    /// 3. Escribe y sincroniza en el baúl, verifica que pueda autenticarse, y SOLO entonces elimina el original.
     pub fn isolate_to_vault(source_path: &Path) -> bool {
-        if !source_path.exists() { return false; }
-        let file_name = source_path.file_name().and_then(|n| n.to_str()).unwrap_or("amenaza_detectada");
-        let dest_path = format!("{}/{}.vault", QUARANTINE_DIR, file_name);
+        if !source_path.exists() || !source_path.is_file() { return false; }
 
-        if let Ok(bytes) = fs::read(source_path) {
-            let key = Self::get_or_create_vault_key();
-            let mut encrypted = Vec::with_capacity(bytes.len());
-            for (i, &b) in bytes.iter().enumerate() {
-                encrypted.push(b ^ key[i % key.len()]);
+        let key_bytes = match Self::load_or_generate_csprng_key() {
+            Ok(k) => k,
+            Err(e) => {
+                ImmutableAuditLog::append_event("VAULT_ERROR", &format!("Fallo crítico de clave CSPRNG: {}", e));
+                return false;
             }
-            if fs::write(&dest_path, &encrypted).is_ok() {
-                let _ = fs::remove_file(source_path);
-                let _ = Command::new("chmod").args(["000", &dest_path]).status();
-                ImmutableAuditLog::append_event("QUARANTINE_ENCRYPTED", &format!("Aislado y cifrado en baúl blindado: {}", file_name));
+        };
+
+        let plaintext = match fs::read(source_path) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        // Calcular SHA-256 de 32 bytes del contenido original
+        let mut hasher = Sha256::new();
+        hasher.update(&plaintext);
+        let orig_sha256: [u8; 32] = hasher.finalize().into();
+
+        // Generar Nonce de 96 bits (12 bytes) mediante CSPRNG del sistema operativo
+        let mut nonce_bytes = [0u8; 12];
+        if getrandom::getrandom(&mut nonce_bytes).is_err() {
+            return false;
+        }
+
+        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+        let cipher = Aes256Gcm::new(key);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let payload = Payload {
+            msg: &plaintext,
+            aad: &orig_sha256,
+        };
+
+        let ciphertext = match cipher.encrypt(nonce, payload) {
+            Ok(ct) => ct,
+            Err(_) => return false,
+        };
+
+        // Ensamblar contenedor autenticado
+        let mut vault_blob = Vec::with_capacity(9 + 12 + 32 + ciphertext.len());
+        vault_blob.extend_from_slice(VAULT_MAGIC);
+        vault_blob.extend_from_slice(&nonce_bytes);
+        vault_blob.extend_from_slice(&orig_sha256);
+        vault_blob.extend_from_slice(&ciphertext);
+
+        let raw_name = source_path.file_name().and_then(|n| n.to_str()).unwrap_or("amenaza_detectada");
+        let safe_name: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-').collect();
+        let final_name = if safe_name.is_empty() { "muestra_aislada" } else { &safe_name };
+        let dest_path = Path::new(QUARANTINE_DIR).join(format!("{}.vault", final_name));
+
+        // Escritura transaccional con sincronización en disco antes de borrar el original
+        let write_ok = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&dest_path)
+            .and_then(|mut f| {
+                f.write_all(&vault_blob)?;
+                f.sync_all()
+            })
+            .is_ok();
+
+        if write_ok {
+            let _ = fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600));
+            // Solo eliminamos el archivo original tras confirmar escritura y sync_all del contenedor cifrado
+            if fs::remove_file(source_path).is_ok() {
+                let hex_hash = hex::encode(orig_sha256);
+                ImmutableAuditLog::append_event(
+                    "QUARANTINE_AES256GCM",
+                    &format!("Aislado y autenticado con AES-256-GCM: {} (SHA-256: {})", final_name, &hex_hash[..16]),
+                );
                 return true;
             }
         }
         false
     }
 
-    fn get_or_create_vault_key() -> Vec<u8> {
-        if let Ok(k) = fs::read(VAULT_KEY_FILE) {
-            if !k.is_empty() { return k; }
+    /// Obtiene o genera la clave de 256 bits (32 bytes) exclusivamente en VAULT_KEY_FILE (/var/lib/constantine/.vault.key)
+    /// usando el generador aleatorio criptográfico del kernel (CSPRNG). Sin claves constantes de respaldo.
+    pub fn load_or_generate_csprng_key() -> Result<[u8; 32], String> {
+        let key_path = Path::new(VAULT_KEY_FILE);
+        if key_path.exists() {
+            let content = fs::read(key_path).map_err(|e| format!("No se pudo leer {}: {}", VAULT_KEY_FILE, e))?;
+            // Soportar tanto 32 bytes crudos como 64 caracteres hexadecimales
+            if content.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&content);
+                return Ok(arr);
+            }
+            let trimmed = String::from_utf8_lossy(&content).trim().to_string();
+            if let Ok(decoded) = hex::decode(&trimmed) {
+                if decoded.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&decoded);
+                    return Ok(arr);
+                }
+            }
         }
-        vec![0x43, 0x6F, 0x6E, 0x73, 0x74, 0x61, 0x6E, 0x74, 0x69, 0x6E, 0x65, 0x4B, 0x65, 0x79, 0x32, 0x36]
+
+        // Generar nueva clave CSPRNG de 256 bits
+        let mut new_key = [0u8; 32];
+        getrandom::getrandom(&mut new_key).map_err(|e| format!("Error de entropía CSPRNG: {}", e))?;
+
+        if let Some(parent) = key_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let hex_key = hex::encode(new_key);
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(key_path)
+            .map_err(|e| format!("No se pudo crear {}: {}", VAULT_KEY_FILE, e))?;
+        f.write_all(hex_key.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+        let _ = fs::set_permissions(key_path, fs::Permissions::from_mode(0o640));
+        Ok(new_key)
     }
 }
 
 // ==============================================================================
-// 4. Registro Inmutable Encadenado Criptográficamente (Hash Chaining SHA-256)
+// 4. Registro Forense con Verificación Criptográfica Completa y Mutex (C5)
 // ==============================================================================
+static AUDIT_LOG_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
 pub struct ImmutableAuditLog;
 
 impl ImmutableAuditLog {
+    fn lock_guard() -> &'static Mutex<()> {
+        AUDIT_LOG_MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Escritura atómica protegida por Mutex para evitar condiciones de carrera entre hilos
     pub fn append_event(event_type: &str, details: &str) {
+        let _guard = match Self::lock_guard().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
         let now = chrono_free_timestamp();
-        let prev_hash = Self::get_last_hash();
-        let payload = format!("{}|{}|{}|{}", prev_hash, now, event_type, details);
-        
+        let clean_event = event_type.replace('|', "/").replace('\n', " ");
+        let clean_details = details.replace('|', "/").replace('\n', " ");
+        let prev_hash = Self::get_last_hash_unlocked();
+        let payload = format!("{}|{}|{}|{}", prev_hash, now, clean_event, clean_details);
+
         let mut hasher = Sha256::new();
         hasher.update(payload.as_bytes());
         let current_hash = format!("{:x}", hasher.finalize());
 
-        let log_line = format!("{} | {} | {} | {} | {}\n", now, current_hash, prev_hash, event_type, details);
-        
+        let log_line = format!("{} | {} | {} | {} | {}\n", now, current_hash, prev_hash, clean_event, clean_details);
+
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(IMMUTABLE_AUDIT_LOG) {
             let _ = f.write_all(log_line.as_bytes());
+            let _ = f.sync_data();
         }
     }
 
-    fn get_last_hash() -> String {
+    fn get_last_hash_unlocked() -> String {
         if let Ok(f) = File::open(IMMUTABLE_AUDIT_LOG) {
             if let Some(last_line) = BufReader::new(f).lines().flatten().last() {
                 let parts: Vec<&str> = last_line.split('|').collect();
@@ -747,24 +940,58 @@ impl ImmutableAuditLog {
         "0000000000000000000000000000000000000000000000000000000000000000".into()
     }
 
+    /// Verificación criptográfica real:
+    /// 1. Comprueba el encadenamiento con el hash previo (`prev_in_log == expected_prev`).
+    /// 2. Recalcula el SHA-256 de cada evento (`SHA256(prev_hash|timestamp|event_type|details)`)
+    ///    para detectar cualquier alteración del texto, fecha o detalles del evento.
     pub fn verify_integrity() -> (bool, usize) {
+        let _guard = match Self::lock_guard().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
         if !Path::new(IMMUTABLE_AUDIT_LOG).exists() {
             return (true, 0);
         }
         let mut count = 0;
         let mut expected_prev = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
-        
+
         if let Ok(f) = File::open(IMMUTABLE_AUDIT_LOG) {
             for line in BufReader::new(f).lines().flatten() {
-                let parts: Vec<&str> = line.split('|').collect();
-                if parts.len() >= 5 {
-                    let prev_in_log = parts[2].trim();
-                    if prev_in_log != expected_prev && count > 0 {
-                        return (false, count);
-                    }
-                    expected_prev = parts[1].trim().to_string();
-                    count += 1;
+                if line.trim().is_empty() { continue; }
+                let parts: Vec<&str> = line.splitn(5, '|').collect();
+                if parts.len() < 5 {
+                    return (false, count);
                 }
+                let timestamp = parts[0].trim();
+                let current_in_log = parts[1].trim();
+                let prev_in_log = parts[2].trim();
+                let ev_type = parts[3].trim();
+                let details = parts[4].trim();
+
+                if prev_in_log != expected_prev {
+                    return (false, count);
+                }
+
+                // En el bloque GENESIS inicial sembrado por el instalador, aceptamos la semilla si coincide con 0000...
+                if count == 0 && ev_type == "GENESIS" && current_in_log == "0000000000000000000000000000000000000000000000000000000000000000" {
+                    expected_prev = current_in_log.to_string();
+                    count += 1;
+                    continue;
+                }
+
+                // Recalcular SHA-256 del contenido del evento
+                let payload = format!("{}|{}|{}|{}", prev_in_log, timestamp, ev_type, details);
+                let mut hasher = Sha256::new();
+                hasher.update(payload.as_bytes());
+                let recalculated = format!("{:x}", hasher.finalize());
+
+                if recalculated != current_in_log {
+                    return (false, count);
+                }
+
+                expected_prev = current_in_log.to_string();
+                count += 1;
             }
         }
         (true, count)
@@ -780,27 +1007,61 @@ fn chrono_free_timestamp() -> String {
 }
 
 // ==============================================================================
-// 5. Motor de Análisis Manual Recursivo Real (Archivo por Archivo)
+// 5. Motor de Análisis Manual Recursivo sin Seguir Symlinks y con Control de Ciclo (G2)
 // ==============================================================================
+const MAX_SCAN_DEPTH: usize = 24;
+
 pub struct ManualScanEngine;
 
 impl ManualScanEngine {
     pub fn collect_files(dir: &Path, list: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    Self::collect_files(&p, list);
-                } else if p.is_file() {
-                    list.push(p);
+        let mut skipped_errors = 0usize;
+        Self::collect_bounded(dir, list, 0, &mut skipped_errors);
+    }
+
+    pub fn collect_bounded(dir: &Path, list: &mut Vec<PathBuf>, depth: usize, skipped_errors: &mut usize) {
+        if depth > MAX_SCAN_DEPTH {
+            return;
+        }
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => {
+                *skipped_errors += 1;
+                return;
+            }
+        };
+
+        for entry_res in entries {
+            let entry = match entry_res {
+                Ok(e) => e,
+                Err(_) => {
+                    *skipped_errors += 1;
+                    continue;
                 }
+            };
+            let p = entry.path();
+            // Usar symlink_metadata para NO seguir enlaces simbólicos y evitar bucles infinitos
+            let meta = match fs::symlink_metadata(&p) {
+                Ok(m) => m,
+                Err(_) => {
+                    *skipped_errors += 1;
+                    continue;
+                }
+            };
+            let ftype = meta.file_type();
+            if ftype.is_symlink() {
+                continue;
+            } else if ftype.is_dir() {
+                Self::collect_bounded(&p, list, depth + 1, skipped_errors);
+            } else if ftype.is_file() {
+                list.push(p);
             }
         }
     }
 }
 
 // ==============================================================================
-// 6. Gestor del Baúl de Cuarentena
+// 6. Gestor Transaccional del Baúl de Cuarentena sin Inyección de Comandos (C2 y C3)
 // ==============================================================================
 pub struct VaultManager;
 
@@ -810,49 +1071,145 @@ impl VaultManager {
         if let Ok(entries) = fs::read_dir(QUARANTINE_DIR) {
             for entry in entries.flatten() {
                 if let Ok(name) = entry.file_name().into_string() {
-                    files.push(name);
+                    if name.ends_with(".vault") {
+                        files.push(name);
+                    }
                 }
             }
         }
+        files.sort();
         files
     }
 
+    /// Eliminación nativa en Rust sin invocar shells (`sh -c`)
     pub fn delete_from_vault(filename: &str) -> bool {
-        let target = format!("{}/{}", QUARANTINE_DIR, filename);
-        let ok = SecurityAuth::privileged_action(&["rm", "-f", &target]);
-        if ok {
-            ImmutableAuditLog::append_event("VAULT_FILE_DELETED", &format!("Eliminada muestra: {}", filename));
+        let safe_name = match Path::new(filename).file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => return false,
+        };
+        let target = Path::new(QUARANTINE_DIR).join(safe_name);
+        let removed = if fs::remove_file(&target).is_ok() {
+            true
+        } else {
+            // Fallback privilegiado con argumentos posicionales seguros (sin sh -c)
+            if let Some(target_str) = target.to_str() {
+                SecurityAuth::privileged_action(&["rm", "-f", "--", target_str])
+            } else {
+                false
+            }
+        };
+
+        if removed {
+            ImmutableAuditLog::append_event("VAULT_FILE_DELETED", &format!("Muestra eliminada permanentemente: {}", safe_name));
         }
-        ok
+        removed
     }
 
+    /// Procedimiento de restauración transaccional (C2 y C3 corregidos):
+    /// Autenticar AES-256-GCM -> Descifrar -> Verificar Hash SHA-256 -> Restaurar con APIs nativas de Rust -> Registrar SHA-256 en Lista Blanca.
+    /// Cero uso de `sh -c` para erradicar vulnerabilidades de inyección de comandos.
     pub fn restore_to_whitelist(filename: &str, user_home: &str) -> bool {
-        let vault_path = format!("{}/{}", QUARANTINE_DIR, filename);
-        let clean_name = filename.replace(".vault", "");
-        let restored_path = format!("{}/Desktop/{}", user_home, clean_name);
+        let safe_name = match Path::new(filename).file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => return false,
+        };
+        let vault_path = Path::new(QUARANTINE_DIR).join(safe_name);
+        let blob = match fs::read(&vault_path) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
 
-        if let Ok(mut wl) = OpenOptions::new().create(true).append(true).open(WHITELIST_FILE) {
-            let _ = writeln!(wl, "{}", clean_name);
+        // Validar cabecera mágica y longitud mínima (9 magic + 12 nonce + 32 sha256 + 16 tag = 69 bytes)
+        if blob.len() < 69 || &blob[0..9] != VAULT_MAGIC {
+            ImmutableAuditLog::append_event("VAULT_RESTORE_FAILED", &format!("Formato de baúl inválido o corrupto: {}", safe_name));
+            return false;
         }
 
-        let script = format!("mv '{}' '{}' && chmod 644 '{}'", vault_path, restored_path, restored_path);
-        let ok = SecurityAuth::privileged_action(&["sh", "-c", &script]);
-        if ok {
-            ImmutableAuditLog::append_event("VAULT_RESTORE_WHITELIST", &format!("Restaurado a escritorio: {}", clean_name));
+        let nonce_bytes = &blob[9..21];
+        let expected_sha256 = &blob[21..53];
+        let ciphertext = &blob[53..];
+
+        let key_bytes = match ContainmentEngine::load_or_generate_csprng_key() {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
+
+        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+        let cipher = Aes256Gcm::new(key);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let payload = Payload {
+            msg: ciphertext,
+            aad: expected_sha256,
+        };
+
+        // 1. Autenticar y descifrar con AES-256-GCM
+        let plaintext = match cipher.decrypt(nonce, payload) {
+            Ok(pt) => pt,
+            Err(_) => {
+                ImmutableAuditLog::append_event("VAULT_AUTH_FAILED", &format!("Fallo de autenticación GCM al restaurar: {}", safe_name));
+                return false;
+            }
+        };
+
+        // 2. Verificar hash SHA-256 del archivo descifrado frente al hash autenticado
+        let mut hasher = Sha256::new();
+        hasher.update(&plaintext);
+        let actual_sha256: [u8; 32] = hasher.finalize().into();
+        if actual_sha256.as_slice() != expected_sha256 {
+            ImmutableAuditLog::append_event("VAULT_HASH_MISMATCH", &format!("Discrepancia de hash SHA-256 al restaurar: {}", safe_name));
+            return false;
         }
-        ok
+
+        // 3. Escribir archivo restaurado de forma segura usando std::fs
+        let clean_name = safe_name.trim_end_matches(".vault");
+        let desktop_dir = Path::new(user_home).join("Desktop");
+        let _ = fs::create_dir_all(&desktop_dir);
+        let restored_path = desktop_dir.join(clean_name);
+
+        let write_ok = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&restored_path)
+            .and_then(|mut f| {
+                f.write_all(&plaintext)?;
+                f.sync_all()
+            })
+            .is_ok();
+
+        if !write_ok {
+            return false;
+        }
+        let _ = fs::set_permissions(&restored_path, fs::Permissions::from_mode(0o644));
+
+        // 4. Registrar el hash SHA-256 hexadecimal en la Lista Blanca (no el nombre del archivo)
+        let sha256_hex = hex::encode(actual_sha256);
+        if !ThreatAnalysisEngine::is_whitelisted(&sha256_hex) {
+            if let Ok(mut wl) = OpenOptions::new().create(true).append(true).open(WHITELIST_FILE) {
+                let _ = writeln!(wl, "{}", sha256_hex);
+            }
+        }
+
+        // 5. Eliminar contenedor del baúl tras confirmar restauración íntegra
+        let _ = fs::remove_file(&vault_path);
+        ImmutableAuditLog::append_event(
+            "VAULT_RESTORE_VERIFIED",
+            &format!("Restaurado y verificado con AES-256-GCM: {} (SHA-256: {})", clean_name, &sha256_hex[..16]),
+        );
+        true
     }
 }
 
 // ==============================================================================
-// 7. Control de Seguridad, Privilegios y Verificación de Grupo
+// 7. Control de Seguridad y Privilegios sin Ejecución de Shell Arbitrario
 // ==============================================================================
 pub struct SecurityAuth;
 
 impl SecurityAuth {
     pub fn is_in_constantine_group() -> bool {
         Command::new("id").arg("-nG").output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("constantine"))
+            .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|g| g == "constantine"))
             .unwrap_or(false)
     }
 
@@ -876,13 +1233,16 @@ impl SecurityAuth {
 }
 
 // ==============================================================================
-// 8. Auditoría de Versiones y Módulos
+// 8. Telemetría Dinámica Real de Versiones, Servicios y Salud (G3 corregido)
 // ==============================================================================
 pub struct ModuleVersionAudit;
 
 impl ModuleVersionAudit {
     pub fn get_file_mtime(path: &str) -> String {
         if let Ok(metadata) = fs::metadata(path) {
+            if metadata.len() == 0 && path.ends_with(".db") {
+                return "Base vacía (Pendiente de inicialización)".into();
+            }
             if let Ok(mtime) = metadata.modified() {
                 if let Ok(dur) = mtime.elapsed() {
                     let secs = dur.as_secs();
@@ -898,24 +1258,46 @@ impl ModuleVersionAudit {
                 }
             }
         }
-        "No registrado / Opcional".into()
+        "No disponible".into()
+    }
+
+    /// Calcula dinámicamente el porcentaje de salud operativa del EDR verificando servicios, sockets y bases reales
+    pub fn compute_real_health_score(user_home: &str) -> (u8, usize, usize) {
+        let checks = [
+            Path::new(CLAMD_SOCKET).exists(),
+            get_service_active("clamonacc"),
+            Command::new("which").arg("yara").output().map(|o| o.status.success()).unwrap_or(false),
+            AntiRansomwareShield::verify_active_canaries(user_home) == CANARY_FILES.len(),
+            ImmutableAuditLog::verify_integrity().0,
+            fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false),
+            get_service_active("falco") || get_service_active("falco-modern-ebpf"),
+            get_service_active("tetragon"),
+        ];
+        let total = checks.len();
+        let active = checks.iter().filter(|&&ok| ok).count();
+        let pct = ((active * 100) / total) as u8;
+        (pct, active, total)
     }
 
     pub fn get_modules_status() -> Vec<(&'static str, String, String)> {
+        let user_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let active_canaries = AntiRansomwareShield::verify_active_canaries(&user_home);
+        let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
+
         vec![
             (
                 "Constantine Core EDR",
-                "v3.2.3 (Debian Edition)".into(),
-                "Al día (Activo)".into(),
+                "v3.2.5 (Debian Edition)".into(),
+                "Binario Nativo Rust Activo".into(),
             ),
             (
                 "Escudo Anti-Ransomware",
-                "Canary Tripwires & Ráfagas".into(),
-                "4 Señuelos Sembrados".into(),
+                format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
+                if active_canaries == CANARY_FILES.len() { "Operativo (Correlación Multivariable)".into() } else { "Cobertura Parcial".into() },
             ),
             (
                 "1. ClamAV Engine (clamd)",
-                Self::cmd_version("clamd", &["-V"]),
+                Self::cmd_version_with_service("clamd", &["-V"], "clamav-daemon"),
                 Self::get_file_mtime("/var/lib/clamav/daily.cvd"),
             ),
             (
@@ -930,17 +1312,17 @@ impl ModuleVersionAudit {
             ),
             (
                 "4. ClamOnAcc (fanotify Shield)",
-                "fanotify FAN_DENY Activo".into(),
+                if get_service_active("clamonacc") { "Servicio Activo (FAN_DENY)".into() } else { "Servicio Detenido".into() },
                 Self::get_file_mtime(LOG_FILE),
             ),
             (
                 "5. Tetragon (Cilium eBPF)",
-                Self::cmd_version("tetragon", &["--version"]),
+                Self::cmd_version_with_service("tetragon", &["--version"], "tetragon"),
                 Self::get_file_mtime("/usr/local/bin/tetragon"),
             ),
             (
                 "6. Falco Behavioral Engine",
-                Self::cmd_version("falco", &["--version"]),
+                Self::cmd_version_with_service("falco", &["--version"], "falco"),
                 Self::get_file_mtime("/etc/falco/falco_rules.yaml"),
             ),
             (
@@ -955,124 +1337,198 @@ impl ModuleVersionAudit {
             ),
             (
                 "9. AIDE Critical Integrity",
-                Self::cmd_version("aide", &["-v"]),
+                if aide_ready { Self::cmd_version("aide", &["-v"]) } else { "Instalado (Base aún no inicializada)".into() },
                 Self::get_file_mtime(AIDE_DB_FILE),
             ),
             (
                 "10. MISP Threat Sharing",
-                "IoCs Sincronizados".into(),
+                Self::feed_line_count(MISP_IOC_FILE),
                 Self::get_file_mtime(MISP_IOC_FILE),
             ),
             (
                 "11. MalwareBazaar Feed",
-                "Hashes SHA-256 Recientes".into(),
+                Self::feed_line_count(&format!("{}/malwarebazaar_hashes.txt", TI_DIR)),
                 Self::get_file_mtime(&format!("{}/malwarebazaar_hashes.txt", TI_DIR)),
             ),
             (
                 "12. ThreatFox Feed",
-                "IoCs & Servidores C2".into(),
+                Self::feed_line_count(&format!("{}/threatfox_iocs.txt", TI_DIR)),
                 Self::get_file_mtime(&format!("{}/threatfox_iocs.txt", TI_DIR)),
             ),
             (
                 "13. URLhaus Feed",
-                "URLs de Distribución Malware".into(),
+                Self::feed_line_count(&format!("{}/urlhaus_domains.txt", TI_DIR)),
                 Self::get_file_mtime(&format!("{}/urlhaus_domains.txt", TI_DIR)),
             ),
             (
                 "14. OpenPhish Feed",
-                "Sitios de Phishing Activos".into(),
+                Self::feed_line_count(&format!("{}/openphish_domains.txt", TI_DIR)),
                 Self::get_file_mtime(&format!("{}/openphish_domains.txt", TI_DIR)),
             ),
             (
                 "15. Sigma Detection Rules",
-                "Reglas YAML Activas".into(),
+                Self::dir_file_count(SIGMA_RULES_DIR),
                 Self::get_file_mtime(SIGMA_RULES_DIR),
             ),
             (
                 "16. YARA-Rules Comunitarias",
-                "Repositorio Comunitario".into(),
+                Self::dir_file_count(YARA_COMMUNITY_DIR),
                 Self::get_file_mtime(YARA_COMMUNITY_DIR),
             ),
             (
                 "Cortafuegos UFW / GUFW",
-                Self::cmd_version("ufw", &["--version"]),
+                if NetworkPrivacyAudit::is_ufw_active() { "UFW Activo".into() } else { "UFW Inactivo".into() },
                 Self::get_file_mtime("/etc/ufw/ufw.conf"),
             ),
             (
                 "ProtonVPN Client",
-                Self::cmd_version("protonvpn-app", &["--version"]),
-                "Cliente Oficial".into(),
+                if NetworkPrivacyAudit::is_protonvpn_active() { "Túnel ProtonVPN Activo".into() } else { Self::cmd_version("protonvpn-app", &["--version"]) },
+                "Verificación de Interfaz".into(),
             ),
         ]
     }
 
+    fn feed_line_count(path: &str) -> String {
+        if let Ok(f) = File::open(path) {
+            let count = BufReader::new(f).lines().count();
+            if count > 0 {
+                return format!("{} indicadores cargados", count);
+            }
+        }
+        "0 indicadores (Vacío / Sin sincronizar)".into()
+    }
+
+    fn dir_file_count(dir: &str) -> String {
+        if let Ok(entries) = fs::read_dir(dir) {
+            let count = entries.flatten().count();
+            if count > 0 {
+                return format!("{} elementos instalados", count);
+            }
+        }
+        "No disponible".into()
+    }
+
     fn get_real_yarax_version() -> String {
         if let Ok(out) = Command::new("yr").arg("--version").output() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if s.contains("yara-x") || s.contains("yr") {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
                 if let Some(line) = s.lines().next() {
-                    return line.trim().to_string();
+                    return format!("Instalado ({})", line.trim());
                 }
             }
         }
-        "No instalado (Opcional)".into()
+        "No disponible (Módulo Opcional)".into()
     }
 
     fn get_wazuh_version() -> String {
         if Path::new("/var/ossec/bin/wazuh-control").exists() {
+            let svc = if get_service_active("wazuh-agent") { "Activo" } else { "Detenido" };
             if let Ok(out) = Command::new("/var/ossec/bin/wazuh-control").arg("info").output() {
                 let s = String::from_utf8_lossy(&out.stdout);
                 for l in s.lines() {
                     if l.contains("WAZUH_VERSION") {
-                        return l.replace("WAZUH_VERSION=\"", "v").replace('"', "");
+                        let ver = l.replace("WAZUH_VERSION=\"", "").replace('"', "");
+                        return format!("{} (Servicio {})", ver.trim(), svc);
                     }
                 }
             }
-            return "Wazuh Agent Instalado".into();
+            return format!("Instalado (Servicio {})", svc);
         }
-        "No instalado (Opcional)".into()
+        "No disponible".into()
     }
 
     fn cmd_version(cmd: &str, args: &[&str]) -> String {
         if let Ok(out) = Command::new(cmd).args(args).output() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(line) = s.lines().next() {
-                return line.trim().to_string();
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if let Some(line) = s.lines().next() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+                return "Instalado".into();
             }
         }
-        "Instalado / Activo".into()
+        "No disponible".into()
+    }
+
+    fn cmd_version_with_service(cmd: &str, args: &[&str], service: &str) -> String {
+        let base = Self::cmd_version(cmd, args);
+        if base == "No disponible" {
+            return base;
+        }
+        let svc_state = if get_service_active(service) { "Activo" } else { "Inactivo" };
+        format!("{} [{}]", base, svc_state)
     }
 
     pub fn update_all_modules() -> bool {
         if Path::new(UPDATER_SCRIPT).exists() {
             Command::new("pkexec").arg(UPDATER_SCRIPT).status().map(|s| s.success()).unwrap_or(false)
         } else {
-            Command::new("pkexec").args(["sh", "-c", "freshclam --quiet; systemctl restart clamonacc"]).status().map(|s| s.success()).unwrap_or(false)
+            false
         }
     }
 
     pub fn run_aide_check() -> bool {
-        Command::new("pkexec").args(["sh", "-c", "aide --check > /var/log/aide/aide.log 2>&1 || true"]).status().map(|s| s.success()).unwrap_or(false)
+        if Path::new(UPDATER_SCRIPT).exists() {
+            Command::new("pkexec").args([UPDATER_SCRIPT, "--aide-only"]).status().map(|s| s.success()).unwrap_or(false)
+        } else {
+            false
+        }
     }
 }
 
 // ==============================================================================
-// 9. Auditoría de Red y Privacidad
+// 9. Auditoría Exacta de Firewall y VPN sin Falsos Positivos (G4 y G5 corregidos)
 // ==============================================================================
 pub struct NetworkPrivacyAudit;
 
 impl NetworkPrivacyAudit {
+    /// G4 corregido: Evita falso positivo porque "inactive" contiene la subcadena "active".
     pub fn is_ufw_active() -> bool {
-        Command::new("ufw").arg("status").output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("active")).unwrap_or(false)
+        if let Ok(out) = Command::new("ufw").arg("status").output() {
+            let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
+            for line in s.lines() {
+                let t = line.trim();
+                if t.starts_with("status:") || t.starts_with("estado:") {
+                    if t.contains("inactive") || t.contains("inactivo") {
+                        return false;
+                    }
+                    if t.contains("active") || t.contains("activo") {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Fallback no privilegiado leyendo /etc/ufw/ufw.conf
+        if let Ok(conf) = fs::read_to_string("/etc/ufw/ufw.conf") {
+            for line in conf.lines() {
+                if line.trim().eq_ignore_ascii_case("ENABLED=yes") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
+    /// G5 corregido: Comprueba específicamente interfaces de ProtonVPN (proton0 / pvpn) y no cualquier interfaz tun genérica.
     pub fn is_protonvpn_active() -> bool {
-        if let Ok(out) = Command::new("ip").args(["link", "show"]).output() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if s.contains("proton") || s.contains("tun") { return true; }
+        if let Ok(out) = Command::new("ip").args(["-o", "link", "show"]).output() {
+            let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
+            for line in s.lines() {
+                if (line.contains("proton") || line.contains("pvpn")) && line.contains("state up") {
+                    return true;
+                }
+            }
         }
-        Command::new("pgrep").args(["-f", "proton"]).output().map(|o| o.status.success()).unwrap_or(false)
+        if let Ok(out) = Command::new("nmcli").args(["-t", "-f", "NAME,TYPE,STATE", "connection", "show", "--active"]).output() {
+            let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
+            if s.contains("protonvpn") && s.contains("activated") {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn get_public_ip_info() -> (String, String) {
@@ -1149,7 +1605,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
 
-    let badge_lbl = Label::new(Some("v3.2.3 Debian Edition"));
+    let badge_lbl = Label::new(Some("v3.2.5 Debian Edition"));
     badge_lbl.add_css_class("badge-version");
     title_box.append(&title_lbl);
     title_box.append(&badge_lbl);
@@ -1169,7 +1625,8 @@ fn build_ui(app: &Application) {
 
     let health_box = Box::new(Orientation::Horizontal, 4);
     health_box.add_css_class("health-box");
-    let health_lbl = Label::new(Some("● Salud EDR: 100%"));
+    let (init_pct, init_act, init_tot) = ModuleVersionAudit::compute_real_health_score(&user_home);
+    let health_lbl = Label::new(Some(&format!("● Salud EDR: {}% ({}/{} controles)", init_pct, init_act, init_tot)));
     health_lbl.add_css_class("health-score");
     health_box.append(&health_lbl);
     header.pack_end(&health_box);
@@ -1249,7 +1706,7 @@ fn build_ui(app: &Application) {
 
     let card_overview = Box::new(Orientation::Vertical, 12);
     card_overview.add_css_class("macos-card");
-    let t_ov = Label::new(Some("Panel de Estado Operativo Unificado (EDR v3.2.3)"));
+    let t_ov = Label::new(Some("Panel de Estado Operativo Unificado (EDR v3.2.5)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     card_overview.append(&t_ov);
@@ -1366,7 +1823,7 @@ fn build_ui(app: &Application) {
                     FileVerdict::Indeterminate(_msg) => {
                         indeterminate_count += 1;
                     }
-                    FileVerdict::Clean => {}
+                    FileVerdict::Clean(_) => {}
                 }
 
                 if idx % 10 == 0 || idx == total - 1 {
@@ -1430,7 +1887,7 @@ fn build_ui(app: &Application) {
                     FileVerdict::Indeterminate(_) => {
                         indets += 1;
                     }
-                    FileVerdict::Clean => {}
+                    FileVerdict::Clean(_) => {}
                 }
                 let frac = if total > 0 { (idx + 1) as f64 / total as f64 } else { 1.0 };
                 let pb_up = pb.clone();
@@ -1456,7 +1913,7 @@ fn build_ui(app: &Application) {
         let result = ThreatAnalysisEngine::evaluate_file(sample);
         pb_f.set_fraction(1.0);
         match result {
-            FileVerdict::Clean => st_f.set_text("✓ Archivo analizado (/bin/bash): Limpio por todos los motores verificados."),
+            FileVerdict::Clean(_) => st_f.set_text("✓ Archivo analizado (/bin/bash): Limpio por todos los motores verificados."),
             FileVerdict::Threat(t) => st_f.set_text(&format!("⚠️ Amenaza en muestra: {}", t)),
             FileVerdict::Indeterminate(i) => st_f.set_text(&format!("ℹ️ Análisis Incompleto (Fail-Secure): {}", i)),
         }
