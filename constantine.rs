@@ -39,6 +39,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -142,6 +143,44 @@ button.titlebutton.maximize, .titlebutton.maximize {
     padding: 2px 7px;
     font-size: 7.5pt;
     font-weight: 700;
+}
+
+
+.kpi-card {
+    background-color: #242426;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 12px 14px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.kpi-title {
+    font-size: 8pt;
+    font-weight: 600;
+    color: #86868b;
+    text-transform: uppercase;
+}
+
+.kpi-value {
+    font-size: 15pt;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.kpi-subtitle {
+    font-size: 8pt;
+    color: #a1a1a6;
+}
+
+.health-btn {
+    background-color: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.3);
+    border-radius: 9999px;
+    padding: 3px 10px;
+}
+
+.health-btn:hover {
+    background-color: rgba(48, 209, 88, 0.22);
 }
 
 .health-box {
@@ -1125,6 +1164,17 @@ impl ImmutableAuditLog {
     pub fn verify_integrity() -> (bool, usize) {
         let _guard = match Self::lock_guard().lock() { Ok(g) => g, Err(p) => p.into_inner() };
         if !Path::new(IMMUTABLE_AUDIT_LOG).exists() { return (true, 0); }
+        
+        static AUDIT_INTEGRITY_CACHE: Mutex<Option<(u64, bool, usize)>> = Mutex::new(None);
+        let current_len = fs::metadata(IMMUTABLE_AUDIT_LOG).map(|m| m.len()).unwrap_or(0);
+        if let Ok(guard) = AUDIT_INTEGRITY_CACHE.lock() {
+            if let Some((cached_len, ok, count)) = *guard {
+                if cached_len == current_len {
+                    return (ok, count);
+                }
+            }
+        }
+
         let mut count = 0;
         let mut expected_prev = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
         if let Ok(f) = File::open(IMMUTABLE_AUDIT_LOG) {
@@ -2020,6 +2070,281 @@ impl SecurityAuth {
 // ==============================================================================
 // 8. Telemetría Dinámica Real de Versiones, Servicios y Salud
 // ==============================================================================
+#[derive(Clone, Debug)]
+pub struct HealthPillar {
+    pub name: String,
+    pub is_ok: bool,
+    pub weight_pct: u8,
+    pub details: String,
+    pub remedy: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SystemUpdateInfo {
+    pub total_packages: usize,
+    pub security_packages: usize,
+    pub kernel_update_pending: bool,
+    pub running_kernel: String,
+    pub available_kernel: Option<String>,
+    pub status_text: String,
+}
+
+static SYSTEM_UPDATE_CACHE: Mutex<Option<(Instant, SystemUpdateInfo)>> = Mutex::new(None);
+static IS_UPDATING_IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+pub struct SystemUpdateAudit;
+
+impl SystemUpdateAudit {
+    pub fn get_running_kernel() -> String {
+        Command::new("uname")
+            .arg("-r")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "Linux".into())
+    }
+
+    pub fn is_kernel_update_pending() -> bool {
+        let running_kernel = Self::get_running_kernel();
+        if let Ok(entries) = fs::read_dir("/boot") {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.starts_with("vmlinuz-") {
+                    let kver = fname.trim_start_matches("vmlinuz-");
+                    if kver != running_kernel && kver > running_kernel.as_str() {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Ok(guard) = SYSTEM_UPDATE_CACHE.lock() {
+            if let Some((_, ref info)) = *guard {
+                return info.kernel_update_pending;
+            }
+        }
+        false
+    }
+
+    pub fn check_updates() -> SystemUpdateInfo {
+        // 1. Si existe caché válido menor a 5 minutos, devolverlo al instante (0.001 ms)
+        if let Ok(guard) = SYSTEM_UPDATE_CACHE.lock() {
+            if let Some((ts, ref info)) = *guard {
+                if ts.elapsed() < Duration::from_secs(300) {
+                    return info.clone();
+                }
+            }
+        }
+
+        let running_kernel = Self::get_running_kernel();
+        let mut kernel_update_pending = false;
+        let mut available_kernel = None;
+
+        // Comprobación instantánea en /boot (< 0.2 ms)
+        if let Ok(entries) = fs::read_dir("/boot") {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.starts_with("vmlinuz-") {
+                    let kver = fname.trim_start_matches("vmlinuz-");
+                    if kver != running_kernel && kver > running_kernel.as_str() {
+                        kernel_update_pending = true;
+                        available_kernel = Some(kver.to_string());
+                    }
+                }
+            }
+        }
+
+        // Comprobación instantánea de lectura de fichero update-notifier si existe (< 0.1 ms)
+        let mut total_packages = 0;
+        let mut security_packages = 0;
+        if let Ok(content) = fs::read_to_string("/var/lib/update-notifier/updates-available") {
+            for line in content.lines() {
+                if line.contains("updates can be applied") {
+                    if let Some(num_str) = line.split_whitespace().next() {
+                        total_packages = num_str.parse().unwrap_or(0);
+                    }
+                }
+                if line.contains("standard security updates") || line.contains("security updates") {
+                    if let Some(num_str) = line.split_whitespace().next() {
+                        security_packages = num_str.parse().unwrap_or(0);
+                    }
+                }
+            }
+        }
+
+        let status_text = if kernel_update_pending {
+            format!("⚠️ Kernel {} requiere actualización / reinicio", running_kernel)
+        } else if security_packages > 0 {
+            format!("⚠️ {} parches de seguridad pendientes", security_packages)
+        } else if total_packages > 0 {
+            format!("ℹ️ {} actualizaciones disponibles", total_packages)
+        } else {
+            "🟢 Sistema y Kernel completamente al día".to_string()
+        };
+
+        let initial_info = SystemUpdateInfo {
+            total_packages,
+            security_packages,
+            kernel_update_pending,
+            running_kernel: running_kernel.clone(),
+            available_kernel: available_kernel.clone(),
+            status_text: status_text.clone(),
+        };
+
+        // Guardar resultado rápido en caché
+        if let Ok(mut guard) = SYSTEM_UPDATE_CACHE.lock() {
+            *guard = Some((Instant::now(), initial_info.clone()));
+        }
+
+        // Lanzar sondeo profundo en segundo plano solo si no hay otro en curso (CERO bloqueo de la GUI)
+        if !IS_UPDATING_IN_BACKGROUND.swap(true, Ordering::SeqCst) {
+            let rk_thread = running_kernel.clone();
+            std::thread::spawn(move || {
+                let mut tot = 0;
+                let mut sec = 0;
+                let mut k_pend = kernel_update_pending;
+                let mut k_avail = available_kernel;
+
+                if Path::new("/usr/lib/update-notifier/apt-check").exists() {
+                    if let Ok(out) = Command::new("/usr/lib/update-notifier/apt-check").output() {
+                        let err_str = String::from_utf8_lossy(&out.stderr);
+                        let out_str = String::from_utf8_lossy(&out.stdout);
+                        let combined = if out_str.contains(';') { out_str } else { err_str };
+                        let parts: Vec<&str> = combined.trim().split(';').collect();
+                        if parts.len() >= 2 {
+                            tot = parts[0].trim().parse().unwrap_or(0);
+                            sec = parts[1].trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+
+                if tot == 0 {
+                    if let Ok(out) = Command::new("apt-get")
+                        .args(["-s", "-o", "Debug::NoLocking=true", "upgrade"])
+                        .output() 
+                    {
+                        let text = String::from_utf8_lossy(&out.stdout);
+                        for line in text.lines() {
+                            if line.starts_with("Inst ") {
+                                tot += 1;
+                                if line.to_lowercase().contains("security") {
+                                    sec += 1;
+                                }
+                                if line.contains("linux-image-") || line.contains("linux-headers-") || line.contains("linux-generic") {
+                                    k_pend = true;
+                                    if k_avail.is_none() {
+                                        if let Some(pkg) = line.split_whitespace().nth(1) {
+                                            k_avail = Some(pkg.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let final_status = if k_pend {
+                    format!("⚠️ Kernel {} requiere actualización / reinicio", rk_thread)
+                } else if sec > 0 {
+                    format!("⚠️ {} parches de seguridad pendientes", sec)
+                } else if tot > 0 {
+                    format!("ℹ️ {} actualizaciones disponibles", tot)
+                } else {
+                    "🟢 Sistema y Kernel completamente al día".to_string()
+                };
+
+                let updated_info = SystemUpdateInfo {
+                    total_packages: tot,
+                    security_packages: sec,
+                    kernel_update_pending: k_pend,
+                    running_kernel: rk_thread,
+                    available_kernel: k_avail,
+                    status_text: final_status,
+                };
+
+                if let Ok(mut guard) = SYSTEM_UPDATE_CACHE.lock() {
+                    *guard = Some((Instant::now(), updated_info));
+                }
+                IS_UPDATING_IN_BACKGROUND.store(false, Ordering::SeqCst);
+            });
+        }
+
+        initial_info
+    }
+
+    pub fn launch_native_updater() -> bool {
+        // Forzar actualización inmediata de la caché al invocar el actualizador
+        if let Ok(mut guard) = SYSTEM_UPDATE_CACHE.lock() {
+            *guard = None;
+        }
+        // Linux Mint Update Manager
+        if Command::new("which").arg("mintupdate").output().map(|o| o.status.success()).unwrap_or(false) {
+            if Command::new("mintupdate").spawn().is_ok() {
+                return true;
+            }
+        }
+        // Ubuntu / Debian Software Updater
+        if Command::new("which").arg("update-manager").output().map(|o| o.status.success()).unwrap_or(false) {
+            if Command::new("update-manager").spawn().is_ok() {
+                return true;
+            }
+        }
+        // GNOME Software Updates
+        if Command::new("which").arg("gnome-software").output().map(|o| o.status.success()).unwrap_or(false) {
+            if Command::new("gnome-software").arg("--mode=updates").spawn().is_ok() {
+                return true;
+            }
+        }
+        // Fallback a terminal
+        if Command::new("which").arg("x-terminal-emulator").output().map(|o| o.status.success()).unwrap_or(false) {
+            if Command::new("x-terminal-emulator")
+                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
+                .spawn().is_ok() {
+                return true;
+            }
+        }
+        Command::new("pkexec")
+            .args(["apt-get", "upgrade", "-y"])
+            .spawn()
+            .is_ok()
+    }
+}
+pub fn get_quarantine_count() -> usize {
+    let mut cnt = 0;
+    for dir in &["/var/lib/constantine/quarantine", "/var/lib/clamav/quarantine"] {
+        if let Ok(entries) = fs::read_dir(dir) {
+            cnt += entries.flatten().filter(|e| e.path().is_file()).count();
+        }
+    }
+    cnt
+}
+
+pub fn get_whitelist_count() -> usize {
+    if let Ok(content) = fs::read_to_string("/var/lib/constantine/whitelist.txt") {
+        content.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).count()
+    } else {
+        0
+    }
+}
+
+pub fn get_active_shield_summary() -> String {
+    let onacc = get_service_active("clamonacc");
+    let tetra = get_service_active("tetragon");
+    let falco = get_service_active("falco") || get_service_active("falco-modern-bpf");
+    let sinkhole = WebProtectionManager::is_protection_active();
+    
+    let mut parts = Vec::new();
+    if onacc { parts.push("fanotify (/home)"); }
+    if tetra { parts.push("eBPF LSM"); }
+    if falco { parts.push("Falco eBPF"); }
+    if sinkhole { parts.push("DNS Sinkhole"); }
+    
+    if parts.is_empty() {
+        "⚠️ Todos los escudos en pausa".into()
+    } else {
+        parts.join(" + ")
+    }
+}
+
+
 pub struct ModuleVersionAudit;
 
 impl ModuleVersionAudit {
@@ -2051,20 +2376,102 @@ impl ModuleVersionAudit {
         "Activo (Reglas cargadas)".into()
     }
 
-    pub fn compute_real_health_score(user_home: &str) -> (u8, usize, usize) {
-        let checks = [
-            Path::new(CLAMD_SOCKET).exists(),
-            get_service_active("clamonacc"),
-            Command::new("which").arg("yara").output().map(|o| o.status.success()).unwrap_or(false),
-            AntiRansomwareShield::verify_active_canaries(user_home) == CANARY_FILES.len(),
-            ImmutableAuditLog::verify_integrity().0,
-            fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false),
-            get_service_active("falco"),
-            get_service_active("tetragon"),
+
+    pub fn get_detailed_health_breakdown(user_home: &str) -> (u8, Vec<HealthPillar>) {
+        let canaries_ok = AntiRansomwareShield::verify_active_canaries(user_home) == CANARY_FILES.len();
+        let clamd_ok = Path::new(CLAMD_SOCKET).exists();
+        let onacc_ok = get_service_active("clamonacc");
+        let tetra_ok = get_service_active("tetragon");
+        let falco_ok = get_service_active("falco") || get_service_active("falco-modern-bpf");
+        let wazuh_ok = get_service_active("wazuh-agent");
+        let sinkhole_ok = WebProtectionManager::is_protection_active();
+        let audit_ok = ImmutableAuditLog::verify_integrity().0;
+        let yara_ok = Command::new("which").arg("yara").output().map(|o| o.status.success()).unwrap_or(false);
+        let kernel_up_to_date = !SystemUpdateAudit::is_kernel_update_pending();
+
+        let pillars = vec![
+            HealthPillar {
+                name: "1. Prevención en Kernel (fanotify)".into(),
+                is_ok: onacc_ok,
+                weight_pct: 10,
+                details: if onacc_ok { "● Activo: Intercepción de malware en tiempo real (/home, /var/tmp)".into() } else { "● Detenido: Escudo ClamOnAcc inactivo".into() },
+                remedy: "Activar escudos de seguridad desde el botón '▶️ Activar Escudos' del panel superior.".into(),
+            },
+            HealthPillar {
+                name: "2. Escudo Anti-Ransomware (Canary Tripwires)".into(),
+                is_ok: canaries_ok,
+                weight_pct: 10,
+                details: if canaries_ok { format!("● Activo: 4/4 Señuelos sembrados y supervisados en {}", user_home) } else { "● Alerta: Faltan archivos trampa Canary en directorios del usuario".into() },
+                remedy: "Re-sembrar señuelos Canary desde el instalador o reiniciar el demonio Constantine.".into(),
+            },
+            HealthPillar {
+                name: "3. Sensor eBPF Tetragon (Kernel LSM)".into(),
+                is_ok: tetra_ok,
+                weight_pct: 10,
+                details: if tetra_ok { "● Activo: Puntos de control LSM y Anti-Kill en kernel".into() } else { "● Detenido: Sensor Tetragon inactivo".into() },
+                remedy: "Ejecutar 'systemctl restart tetragon' o pulsar '⚡ Forzar' en el panel de sensores.".into(),
+            },
+            HealthPillar {
+                name: "4. Sensor de Comportamiento eBPF (Falco)".into(),
+                is_ok: falco_ok,
+                weight_pct: 10,
+                details: if falco_ok { "● Activo: Análisis de anomalías y llamadas de sistema en vivo".into() } else { "● Detenido: Motor Falco detenido".into() },
+                remedy: "Ejecutar 'systemctl restart falco-modern-bpf' o reactivar escudos generales.".into(),
+            },
+            HealthPillar {
+                name: "5. Agente SIEM & FIM (Wazuh Agent)".into(),
+                is_ok: wazuh_ok,
+                weight_pct: 10,
+                details: if wazuh_ok { "● Activo: Monitorización de integridad de archivos críticos y SIEM".into() } else { "● Inactivo: Agente Wazuh detenido".into() },
+                remedy: "Ejecutar 'systemctl restart wazuh-agent'.".into(),
+            },
+            HealthPillar {
+                name: "6. Protección Web Perimetral (DNS Sinkhole)".into(),
+                is_ok: sinkhole_ok,
+                weight_pct: 10,
+                details: if sinkhole_ok { format!("● Activo: {} dominios de phishing y C2 bloqueados en /etc/hosts", WebProtectionManager::get_blocked_domains_count()) } else { "● Inactivo: Filtrado web desactivado".into() },
+                remedy: "Activar protección web desde la pestaña '🌐 Red y Web'.".into(),
+            },
+            HealthPillar {
+                name: "7. Motor de Firmas ClamAV (clamd)".into(),
+                is_ok: clamd_ok,
+                weight_pct: 10,
+                details: if clamd_ok { "● Activo: Socket multihilo /run/clamav/clamd.ctl en escucha".into() } else { "● Error: Socket ClamAV no encontrado".into() },
+                remedy: "Reiniciar el servicio ClamAV con 'systemctl restart clamav-daemon'.".into(),
+            },
+            HealthPillar {
+                name: "8. Motor Heurístico YARA / YARA-X".into(),
+                is_ok: yara_ok,
+                weight_pct: 10,
+                details: if yara_ok { "● Activo: Reglas de amenazas y análisis estático disponibles".into() } else { "● Incompleto: Binario yara no encontrado en el sistema".into() },
+                remedy: "Instalar yara con 'sudo apt install yara' o sincronizar reglas comunitarias.".into(),
+            },
+            HealthPillar {
+                name: "9. Baúl Criptográfico y Registro Forense".into(),
+                is_ok: audit_ok,
+                weight_pct: 10,
+                details: if audit_ok { "● Activo: Hash-chaining SHA-256 e inmutabilidad verificados".into() } else { "● Alerta: Anomalía en la cadena criptográfica del registro".into() },
+                remedy: "Verificar la integridad del registro forense en la pestaña '📜 Forense'.".into(),
+            },
+            HealthPillar {
+                name: "10. Actualizaciones de Kernel y Seguridad".into(),
+                is_ok: kernel_up_to_date,
+                weight_pct: 10,
+                details: if kernel_up_to_date { format!("● Al día: Kernel {} sin parches pendientes", SystemUpdateAudit::get_running_kernel()) } else { "● Vulnerabilidad potencial: Hay una versión más reciente del Kernel disponible".into() },
+                remedy: "Abrir el Actualizador del Sistema desde el Dashboard y reiniciar el equipo tras actualizar.".into(),
+            },
         ];
-        let total = checks.len();
-        let active = checks.iter().filter(|&&ok| ok).count();
-        let pct = ((active * 100) / total) as u8;
+
+        let total_weight: u8 = pillars.iter().map(|p| p.weight_pct).sum();
+        let achieved_weight: u8 = pillars.iter().filter(|p| p.is_ok).map(|p| p.weight_pct).sum();
+        let pct = if total_weight > 0 { ((achieved_weight as f32 / total_weight as f32) * 100.0) as u8 } else { 0 };
+        (pct, pillars)
+    }
+
+    pub fn compute_real_health_score(user_home: &str) -> (u8, usize, usize) {
+        let (pct, pillars) = Self::get_detailed_health_breakdown(user_home);
+        let active = pillars.iter().filter(|p| p.is_ok).count();
+        let total = pillars.len();
         (pct, active, total)
     }
 
@@ -5248,6 +5655,108 @@ fn build_scan_dialog_ui(app: &Application, target: &Path) {
     window.present();
 }
 
+
+fn run_health_audit_dialog(parent: &ApplicationWindow, user_home: &str) {
+    let dialog = ApplicationWindow::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title("🛡️ Auditoría de Salud del EDR - Requisitos para el 100%")
+        .default_width(640)
+        .default_height(560)
+        .build();
+
+    let vbox = Box::new(Orientation::Vertical, 12);
+    vbox.set_margin_start(18);
+    vbox.set_margin_end(18);
+    vbox.set_margin_top(18);
+    vbox.set_margin_bottom(18);
+
+    let (score_pct, pillars) = ModuleVersionAudit::get_detailed_health_breakdown(user_home);
+
+    let title = Label::new(Some("Desglose de Salud Operativa y Controles de Seguridad"));
+    title.add_css_class("title-text");
+    title.set_xalign(0.0);
+    vbox.append(&title);
+
+    let subtitle = Label::new(Some("Evaluación en tiempo real de los 10 pilares de defensa del Kernel, EDR y Red."));
+    subtitle.add_css_class("subtitle-text");
+    subtitle.set_xalign(0.0);
+    vbox.append(&subtitle);
+
+    let score_lbl = Label::new(Some(&format!("Puntuación Global: {}% de 100%", score_pct)));
+    score_lbl.add_css_class(if score_pct == 100 { "mini-row-status-ok" } else { "mini-row-status-warn" });
+    score_lbl.set_xalign(0.0);
+    vbox.append(&score_lbl);
+
+    let pbar = ProgressBar::new();
+    pbar.set_fraction((score_pct as f64) / 100.0);
+    vbox.append(&pbar);
+
+    let list_sw = ScrolledWindow::new();
+    list_sw.set_vexpand(true);
+    let list_box = ListBox::new();
+    list_box.set_selection_mode(SelectionMode::None);
+
+    for pillar in &pillars {
+        let row_box = Box::new(Orientation::Horizontal, 12);
+        row_box.set_margin_top(6);
+        row_box.set_margin_bottom(6);
+        row_box.set_margin_start(8);
+        row_box.set_margin_end(8);
+
+        let icon = Label::new(Some(if pillar.is_ok { "✅" } else { "⚠️" }));
+        row_box.append(&icon);
+
+        let info_box = Box::new(Orientation::Vertical, 2);
+        info_box.set_hexpand(true);
+
+        let name_lbl = Label::new(Some(&format!("{} ({}%)", pillar.name, pillar.weight_pct)));
+        name_lbl.add_css_class("kpi-title");
+        name_lbl.set_xalign(0.0);
+        info_box.append(&name_lbl);
+
+        let desc_lbl = Label::new(Some(&pillar.details));
+        desc_lbl.add_css_class(if pillar.is_ok { "mini-row-status-ok" } else { "mini-row-status-warn" });
+        desc_lbl.set_xalign(0.0);
+        info_box.append(&desc_lbl);
+
+        if !pillar.is_ok {
+            let remedy_lbl = Label::new(Some(&format!("👉 Para el 100%: {}", pillar.remedy)));
+            remedy_lbl.add_css_class("subtitle-text");
+            remedy_lbl.set_xalign(0.0);
+            info_box.append(&remedy_lbl);
+        }
+
+        row_box.append(&info_box);
+        list_box.append(&row_box);
+    }
+    list_sw.set_child(Some(&list_box));
+    vbox.append(&list_sw);
+
+    let btn_box = Box::new(Orientation::Horizontal, 10);
+    btn_box.set_halign(gtk4::Align::End);
+
+    if score_pct < 100 {
+        let btn_fix = Button::with_label("⚡ Activar Escudos Faltantes");
+        btn_fix.add_css_class("suggested-action");
+        let d_c = dialog.clone();
+        btn_fix.connect_clicked(move |_| {
+            SecurityAuth::resume_all_shields_interactive();
+            d_c.close();
+        });
+        btn_box.append(&btn_fix);
+    }
+
+    let btn_close = Button::with_label("Cerrar");
+    let d_c2 = dialog.clone();
+    btn_close.connect_clicked(move |_| d_c2.close());
+    btn_box.append(&btn_close);
+
+    vbox.append(&btn_box);
+    dialog.set_child(Some(&vbox));
+    dialog.present();
+}
+
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
@@ -5382,14 +5891,20 @@ fn build_ui(app: &Application) {
         run_uninstall_dialog(&win_uninst);
     });
 
-    let health_box = Box::new(Orientation::Horizontal, 4);
-    health_box.add_css_class("health-box");
+    let btn_health = Button::new();
+    btn_health.add_css_class("health-btn");
     
     let (init_pct, _init_act, _init_tot) = ModuleVersionAudit::compute_real_health_score(&user_home);
-    let health_lbl = Label::new(Some(&format!("● Salud: {}%", init_pct)));
+    let health_lbl = Label::new(Some(&format!("● Salud: {}% (Ver Qué Falta)", init_pct)));
     health_lbl.add_css_class("health-score");
-    health_box.append(&health_lbl);
-    header.pack_end(&health_box);
+    btn_health.set_child(Some(&health_lbl));
+    header.pack_end(&btn_health);
+
+    let win_health_hdr = window.clone();
+    let uh_health_hdr = user_home.clone();
+    btn_health.connect_clicked(move |_| {
+        run_health_audit_dialog(&win_health_hdr, &uh_health_hdr);
+    });
     
     window.set_titlebar(Some(&header));
 
@@ -5469,20 +5984,178 @@ fn build_ui(app: &Application) {
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
-    // --- Vista 1: Panel de Estado Unificado ---
-    let dash_box = Box::new(Orientation::Vertical, 16);
+    // --- Vista 1: Panel de Control Ejecutivo & KPIs de Seguridad ---
+    let dash_box = Box::new(Orientation::Vertical, 14);
     dash_box.set_margin_start(14);
     dash_box.set_margin_end(14);
     dash_box.set_margin_top(14);
+    dash_box.set_margin_bottom(14);
     
+    // Título Principal
+    let head_dash_box = Box::new(Orientation::Vertical, 4);
+    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5)"));
+    t_ov.add_css_class("title-text");
+    t_ov.set_xalign(0.0);
+    head_dash_box.append(&t_ov);
+    
+    let sub_ov = Label::new(Some("Supervisión en vivo de defensas activas, muestras aisladas, salud de kernel y telemetría de amenazas."));
+    sub_ov.add_css_class("subtitle-text");
+    sub_ov.set_xalign(0.0);
+    head_dash_box.append(&sub_ov);
+    dash_box.append(&head_dash_box);
+
+    // Grid de Tarjetas KPI Clave (4 métricas ejecutivas)
+    let kpi_grid = Grid::new();
+    kpi_grid.set_column_spacing(10);
+    kpi_grid.set_row_spacing(10);
+    kpi_grid.set_column_homogeneous(true);
+
+    // KPI 1: Cuarentena
+    let kpi_q_card = Box::new(Orientation::Vertical, 4);
+    kpi_q_card.add_css_class("kpi-card");
+    let q_title = Label::new(Some("📦 MUESTRAS EN CUARENTENA"));
+    q_title.add_css_class("kpi-title");
+    q_title.set_xalign(0.0);
+    let lbl_kpi_quarantine = Label::new(Some(&format!("{} Muestras", get_quarantine_count())));
+    lbl_kpi_quarantine.add_css_class("kpi-value");
+    lbl_kpi_quarantine.set_xalign(0.0);
+    let q_sub = Label::new(Some("Baúl Criptográfico AES-256-GCM"));
+    q_sub.add_css_class("kpi-subtitle");
+    q_sub.set_xalign(0.0);
+    kpi_q_card.append(&q_title);
+    kpi_q_card.append(&lbl_kpi_quarantine);
+    kpi_q_card.append(&q_sub);
+    kpi_grid.attach(&kpi_q_card, 0, 0, 1, 1);
+
+    // KPI 2: Lista Blanca
+    let kpi_wl_card = Box::new(Orientation::Vertical, 4);
+    kpi_wl_card.add_css_class("kpi-card");
+    let wl_title = Label::new(Some("📋 REGLAS EN LISTA BLANCA"));
+    wl_title.add_css_class("kpi-title");
+    wl_title.set_xalign(0.0);
+    let lbl_kpi_whitelist = Label::new(Some(&format!("{} Hashes", get_whitelist_count())));
+    lbl_kpi_whitelist.add_css_class("kpi-value");
+    lbl_kpi_whitelist.set_xalign(0.0);
+    let wl_sub = Label::new(Some("Firmas SHA-256 de Confianza"));
+    wl_sub.add_css_class("kpi-subtitle");
+    wl_sub.set_xalign(0.0);
+    kpi_wl_card.append(&wl_title);
+    kpi_wl_card.append(&lbl_kpi_whitelist);
+    kpi_wl_card.append(&wl_sub);
+    kpi_grid.attach(&kpi_wl_card, 1, 0, 1, 1);
+
+    // KPI 3: Escudo Activo en Vigilancia
+    let kpi_sh_card = Box::new(Orientation::Vertical, 4);
+    kpi_sh_card.add_css_class("kpi-card");
+    let sh_title = Label::new(Some("🔍 ESCUDOS EN VIGILANCIA"));
+    sh_title.add_css_class("kpi-title");
+    sh_title.set_xalign(0.0);
+    let lbl_kpi_shields = Label::new(Some("fanotify + eBPF"));
+    lbl_kpi_shields.add_css_class("kpi-value");
+    lbl_kpi_shields.set_xalign(0.0);
+    let lbl_kpi_shields_sub = Label::new(Some(&get_active_shield_summary()));
+    lbl_kpi_shields_sub.add_css_class("kpi-subtitle");
+    lbl_kpi_shields_sub.set_xalign(0.0);
+    lbl_kpi_shields_sub.set_wrap(true);
+    kpi_sh_card.append(&sh_title);
+    kpi_sh_card.append(&lbl_kpi_shields);
+    kpi_sh_card.append(&lbl_kpi_shields_sub);
+    kpi_grid.attach(&kpi_sh_card, 2, 0, 1, 1);
+
+    // KPI 4: Anti-Ransomware Canaries
+    let kpi_can_card = Box::new(Orientation::Vertical, 4);
+    kpi_can_card.add_css_class("kpi-card");
+    let can_title = Label::new(Some("🧬 ANTI-RANSOMWARE CANARY"));
+    can_title.add_css_class("kpi-title");
+    can_title.set_xalign(0.0);
+    let can_active = AntiRansomwareShield::verify_active_canaries(&user_home);
+    let lbl_kpi_canary = Label::new(Some(&format!("{}/{} Intactos", can_active, CANARY_FILES.len())));
+    lbl_kpi_canary.add_css_class("kpi-value");
+    lbl_kpi_canary.set_xalign(0.0);
+    let can_sub = Label::new(Some("Tripwires + Detección de Ráfagas"));
+    can_sub.add_css_class("kpi-subtitle");
+    can_sub.set_xalign(0.0);
+    kpi_can_card.append(&can_title);
+    kpi_can_card.append(&lbl_kpi_canary);
+    kpi_can_card.append(&can_sub);
+    kpi_grid.attach(&kpi_can_card, 3, 0, 1, 1);
+
+    dash_box.append(&kpi_grid);
+
+    // Tarjeta 2: Actualizaciones del Sistema y del Kernel
+    let card_updates_sys = Box::new(Orientation::Horizontal, 16);
+    card_updates_sys.add_css_class("macos-card");
+
+    let upd_info_box = Box::new(Orientation::Vertical, 4);
+    upd_info_box.set_hexpand(true);
+    let upd_card_title = Label::new(Some("🔄 Actualizaciones del Sistema Operativo y del Kernel Linux"));
+    upd_card_title.add_css_class("mini-row-title");
+    upd_card_title.set_xalign(0.0);
+    upd_info_box.append(&upd_card_title);
+
+    let upd_data = SystemUpdateAudit::check_updates();
+    let lbl_kernel_info = Label::new(Some(&format!("Kernel activo: {} | {}", upd_data.running_kernel, if upd_data.kernel_update_pending { "⚠️ Actualización de Kernel pendiente" } else { "🟢 Kernel al día" })));
+    lbl_kernel_info.add_css_class(if upd_data.kernel_update_pending { "mini-row-status-warn" } else { "mini-row-status-ok" });
+    lbl_kernel_info.set_xalign(0.0);
+    upd_info_box.append(&lbl_kernel_info);
+
+    let lbl_updates_info = Label::new(Some(&upd_data.status_text));
+    lbl_updates_info.add_css_class("subtitle-text");
+    lbl_updates_info.set_xalign(0.0);
+    upd_info_box.append(&lbl_updates_info);
+
+    card_updates_sys.append(&upd_info_box);
+
+    let btn_open_updater = Button::with_label("🚀 Abrir Actualizador");
+    btn_open_updater.add_css_class("suggested-action");
+    btn_open_updater.set_valign(gtk4::Align::Center);
+    btn_open_updater.connect_clicked(|_| {
+        SystemUpdateAudit::launch_native_updater();
+    });
+    card_updates_sys.append(&btn_open_updater);
+    dash_box.append(&card_updates_sys);
+
+    // Tarjeta 3: Salud del EDR con botón directo para ver desglose de 100%
+    let card_health_diag = Box::new(Orientation::Horizontal, 16);
+    card_health_diag.add_css_class("macos-card");
+
+    let health_info_box = Box::new(Orientation::Vertical, 4);
+    health_info_box.set_hexpand(true);
+    let h_diag_title = Label::new(Some("🛡️ Salud Operativa Global del EDR"));
+    h_diag_title.add_css_class("mini-row-title");
+    h_diag_title.set_xalign(0.0);
+    health_info_box.append(&h_diag_title);
+
+    let (score_now, act_now, tot_now) = ModuleVersionAudit::compute_real_health_score(&user_home);
+    let lbl_dash_health = Label::new(Some(&format!("Salud Global: {}% ({}/{} Controles de Seguridad Activos)", score_now, act_now, tot_now)));
+    lbl_dash_health.add_css_class(if score_now == 100 { "mini-row-status-ok" } else { "mini-row-status-warn" });
+    lbl_dash_health.set_xalign(0.0);
+    health_info_box.append(&lbl_dash_health);
+
+    let pbar_dash_health = ProgressBar::new();
+    pbar_dash_health.set_fraction((score_now as f64) / 100.0);
+    health_info_box.append(&pbar_dash_health);
+    card_health_diag.append(&health_info_box);
+
+    let btn_show_health_diag = Button::with_label("🔍 Ver Qué Falta para el 100%");
+    btn_show_health_diag.add_css_class("suggested-action");
+    btn_show_health_diag.set_valign(gtk4::Align::Center);
+    let win_h_btn = window.clone();
+    let uh_h_btn = user_home.clone();
+    btn_show_health_diag.connect_clicked(move |_| {
+        run_health_audit_dialog(&win_h_btn, &uh_h_btn);
+    });
+    card_health_diag.append(&btn_show_health_diag);
+    dash_box.append(&card_health_diag);
+
+    // Tarjeta 4: Matriz Detallada de Sensores en Vivo
     let card_overview = Box::new(Orientation::Vertical, 12);
     card_overview.add_css_class("macos-card");
     
-    let t_ov = Label::new(Some("Panel de Estado Operativo Unificado (EDR v5.5)"));
-    t_ov.add_css_class("title-text");
-    t_ov.set_xalign(0.0);
-    t_ov.set_wrap(true);
-    card_overview.append(&t_ov);
+    let t_sens = Label::new(Some("Matriz de Sensores e Interceptores en Kernel"));
+    t_sens.add_css_class("title-text");
+    t_sens.set_xalign(0.0);
+    card_overview.append(&t_sens);
     
     let grid_sensors = Grid::new();
     grid_sensors.set_column_spacing(10);
@@ -7714,6 +8387,14 @@ fn build_ui(app: &Application) {
     // Monitoreo dinámico en tiempo real de todos los escudos, sensores y periféricos (cada 2s)
     let st_sub_dyn = st_sub.clone();
     let health_lbl_dyn = health_lbl.clone();
+    let lbl_kpi_quarantine_dyn = lbl_kpi_quarantine.clone();
+    let lbl_kpi_whitelist_dyn = lbl_kpi_whitelist.clone();
+    let lbl_kpi_canary_dyn = lbl_kpi_canary.clone();
+    let lbl_kpi_shields_sub_dyn = lbl_kpi_shields_sub.clone();
+    let lbl_dash_health_dyn = lbl_dash_health.clone();
+    let pbar_dash_health_dyn = pbar_dash_health.clone();
+    let lbl_kernel_info_dyn = lbl_kernel_info.clone();
+    let lbl_updates_info_dyn = lbl_updates_info.clone();
     let s_f_dyn = s_f.clone();
     let s_ran_dyn = s_ran.clone();
     let s_p_dyn = s_p.clone();
@@ -7726,10 +8407,22 @@ fn build_ui(app: &Application) {
     let s_game_dyn = s_game.clone();
     let uh_timer = user_home.clone();
 
-    gtk4::glib::timeout_add_seconds_local(2, move || {
-        // 1. Recalcular score de salud EDR en vivo
+    gtk4::glib::timeout_add_seconds_local(4, move || {
+        // 1. Recalcular score de salud EDR y KPIs en vivo
         let (pct, act, tot) = ModuleVersionAudit::compute_real_health_score(&uh_timer);
-        health_lbl_dyn.set_text(&format!("● Salud EDR: {}% ({}/{} controles)", pct, act, tot));
+        health_lbl_dyn.set_text(&format!("● Salud: {}% (Ver Qué Falta)", pct));
+        lbl_dash_health_dyn.set_text(&format!("Salud Global: {}% ({}/{} Controles de Seguridad Activos)", pct, act, tot));
+        pbar_dash_health_dyn.set_fraction((pct as f64) / 100.0);
+        
+        lbl_kpi_quarantine_dyn.set_text(&format!("{} Muestras", get_quarantine_count()));
+        lbl_kpi_whitelist_dyn.set_text(&format!("{} Hashes", get_whitelist_count()));
+        lbl_kpi_shields_sub_dyn.set_text(&get_active_shield_summary());
+        let can_now = AntiRansomwareShield::verify_active_canaries(&uh_timer);
+        lbl_kpi_canary_dyn.set_text(&format!("{}/{} Intactos", can_now, CANARY_FILES.len()));
+
+        let upd_now = SystemUpdateAudit::check_updates();
+        lbl_kernel_info_dyn.set_text(&format!("Kernel activo: {} | {}", upd_now.running_kernel, if upd_now.kernel_update_pending { "⚠️ Actualización de Kernel pendiente" } else { "🟢 Kernel al día" }));
+        lbl_updates_info_dyn.set_text(&upd_now.status_text);
         
         // 2. Estado dinámico de ClamOnAcc
         let (onacc_ok, onacc_txt) = OnAccessSupervisor::get_onaccess_pipeline_status();

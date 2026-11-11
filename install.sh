@@ -825,28 +825,6 @@ fi
 
 # 15. Instalación de Falco
 echo "[14/19] Configurando Falco para detección de comportamiento..."
-mkdir -p /etc/falco
-# Escribir reglas locales compatibles con macros oficiales de Falco
-cat <<'FALCOEOF' > /etc/falco/falco_rules.local.yaml
-# Excepciones locales para Constantine EDR, GUFW y Wazuh
-- macro: user_known_read_sensitive_files_activities
-  append: true
-  condition: or proc.name in (constantine, gufw, gufw-pkexec, wazuh-modulesd, ossec-syscheckd) or proc.pname in (constantine, gufw, gufw-pkexec)
-
-- macro: user_known_log_file_tampering_activities
-  append: true
-  condition: or (proc.name in (gufw, gufw-pkexec, python3) and fd.name startswith /var/log/gufw.log)
-FALCOEOF
-chmod 644 /etc/falco/falco_rules.local.yaml 2>/dev/null || true
-
-# Validación de seguridad: si las reglas locales causan error de sintaxis en esta versión de Falco, retirarlas de inmediato para no romper el demonio
-if command -v falco >/dev/null 2>&1; then
-    if ! falco -c /etc/falco/falco.yaml --dry-run >/dev/null 2>&1; then
-        echo "   [!] Advertencia: La versión instalada de Falco requiere sintaxis base estándar. Retirando archivo local para garantizar arranque."
-        rm -f /etc/falco/falco_rules.local.yaml 2>/dev/null || true
-    fi
-fi
-
 mkdir -p "$FALCO_LOG_DIR" /etc/falco
 if ! command -v falco >/dev/null 2>&1; then
     curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg 2>/dev/null || true
@@ -862,6 +840,65 @@ chown root:constantine "$FALCO_LOG_DIR/events.log" 2>/dev/null || true; chmod 64
 if [ -f /etc/falco/falco.yaml ]; then
     sed -i 's/^file_output:.*/file_output:\n  enabled: true\n  keep_alive: false\n  filename: \/var\/log\/falco\/events.log/' /etc/falco/falco.yaml 2>/dev/null || true
 fi
+
+# Escribir reglas locales compatibles con macros oficiales de Falco (sin append: true para evitar fallos de parseo)
+# Crear regla personalizada específica en rules.d para silenciar lecturas de PAM por pkexec bajo Constantine
+mkdir -p /etc/falco/rules.d
+cat <<'FALCOEOF' > /etc/falco/rules.d/constantine-exceptions.yaml
+- rule: Trusted Constantine Management Action
+  desc: Ignore PAM file reads when pkexec is invoked by the constantine parent process for system management or uninstallation.
+  condition: (evt.type=openat or evt.type=openat2) and fd.name startswith /etc/pam.d and proc.name=pkexec and proc.pname=constantine
+  output: Ignored trusted constantine action (user=%user.name command=%proc.cmdline file=%fd.name)
+  priority: INFO
+  tags: [constantine, exception, host]
+FALCOEOF
+chmod 644 /etc/falco/rules.d/constantine-exceptions.yaml 2>/dev/null || true
+
+cat <<'FALCOEOF' > /etc/falco/falco_rules.local.yaml
+# ==============================================================================
+# REGLAS LOCALES Y AFINAMIENTO DE EXCEPCIONES PARA CONSTANTINE ANTIVIRUS & EDR
+# ==============================================================================
+
+# 1. Lista de binarios del ecosistema de Constantine, GUFW y Wazuh
+- list: constantine_trusted_binaries
+  items: [constantine, constantine-daemon, constantine-dns-sinkhole, constantine-uninstall, gufw, gufw-pkexec, wazuh-modulesd, ossec-syscheckd]
+
+- macro: constantine_or_trusted_proc
+  condition: (proc.name in (constantine_trusted_binaries) or proc.pname in (constantine_trusted_binaries) or proc.aname[2] in (constantine_trusted_binaries) or proc.aname[3] in (constantine_trusted_binaries) or proc.cmdline contains "constantine" or proc.cmdline contains "gufw")
+
+# 2. Excepción para lectura de archivos confidenciales (/etc/shadow, /etc/pam.d/)
+#    Elimina falsos positivos de Wazuh Agent, GUFW y Constantine
+- macro: user_known_read_sensitive_files_activities
+  condition: (constantine_or_trusted_proc or (proc.name in (python3, python3.12, pkexec) and (proc.pname in (gufw, gufw-pkexec, constantine) or proc.cmdline contains "gufw" or proc.cmdline contains "constantine")))
+
+# 3. Excepción para alteración de logs (Log files were tampered)
+#    Permite que GUFW y Constantine gestionen /var/log/gufw.log y sus registros
+- macro: allowed_clear_log_files
+  condition: ((proc.name in (gufw, gufw-pkexec, python3, python3.12, constantine) and fd.name startswith /var/log/gufw) or constantine_or_trusted_proc)
+
+# 4. Excepción para gestión de servicios, usuarios y procesos del sistema
+- macro: user_known_user_management_activities
+  condition: constantine_or_trusted_proc
+
+# 5. Excepción para operaciones chmod y control de hardware /dev/video (Kill-Switch V4L2)
+- list: user_known_chmod_applications
+  items: [constantine, pkexec, chmod, fuser]
+
+- macro: user_known_change_thread_namespace_activities
+  condition: constantine_or_trusted_proc
+FALCOEOF
+chmod 644 /etc/falco/falco_rules.local.yaml 2>/dev/null || true
+
+# Validación preventiva de compatibilidad de reglas de Falco
+if command -v falco >/dev/null 2>&1 && [ -f /etc/falco/falco_rules.local.yaml ]; then
+    if ! falco -c /etc/falco/falco.yaml --dry-run >/dev/null 2>&1 && ! falco --validate /etc/falco/falco.yaml >/dev/null 2>&1; then
+        echo "   [!] Advertencia: Incompatibilidad detectada en reglas locales de Falco. Retirando para asegurar arranque del servicio."
+        rm -f /etc/falco/falco_rules.local.yaml 2>/dev/null || true
+    else
+        echo "   [✓] Reglas locales de Falco validadas: Whitelist para Constantine, GUFW y Wazuh activa."
+    fi
+fi
+
 if systemctl list-unit-files | grep -q "falco-modern-bpf.service"; then
     systemctl unmask falco-modern-bpf.service 2>/dev/null || true
     systemctl enable falco-modern-bpf.service 2>/dev/null || true
@@ -1057,6 +1094,7 @@ sed -i '/^OnAccessExtraScanning/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExcludeRootUID/d' "$CLAMD_CONF"
 sed -i '/^OnAccessMaxFileSize/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExcludePath/d' "$CLAMD_CONF" 2>/dev/null || true
+sed -i '/^ExcludePath/d' "$CLAMD_CONF" 2>/dev/null || true
 sed -i '/^TemporaryDirectory/d' "$CLAMD_CONF" 2>/dev/null || true
 
 # Configurar User root y directorio temporal propio aislado de /tmp
@@ -1081,13 +1119,34 @@ chmod -R 770 /var/lib/clamav/tmp 2>/dev/null || true
     echo "PhishingScanURLs yes"
     echo "PhishingAlwaysBlockCloak yes"
     echo "PhishingAlwaysBlockSSLMismatch no"
-    # Exclusiones del directorio temporal propio y rutas críticas de escritorio
+    
+    # Exclusiones regex de alto rendimiento para clamd (ignora directorios de desarrollo pesados y temporales)
+    echo "ExcludePath ^/home/[^/]+/\.cargo/"
+    echo "ExcludePath ^/home/[^/]+/\.cache/pip/"
+    echo "ExcludePath ^/home/[^/]+/\.cache/"
+    echo "ExcludePath ^/tmp/"
+    echo "ExcludePath ^/var/lib/clamav/tmp/"
+    echo "ExcludePath ^/var/tmp/"
+
+    # Exclusiones específicas por cada usuario del sistema en /home (OnAccessExcludePath y ExcludePath directos)
+    for u_dir in /home/*; do
+        if [ -d "$u_dir" ]; then
+            u_name=$(basename "$u_dir")
+            echo "ExcludePath ^/home/$u_name/\.cargo/"
+            echo "ExcludePath ^/home/$u_name/\.cache/pip/"
+            echo "ExcludePath ^/home/$u_name/\.cache/"
+            echo "OnAccessExcludePath /home/$u_name/.cargo"
+            echo "OnAccessExcludePath /home/$u_name/.cache"
+            echo "OnAccessExcludePath /home/$u_name/.config"
+            echo "OnAccessExcludePath /home/$u_name/.local"
+            echo "OnAccessExcludePath /home/$u_name/.Xauthority"
+            echo "OnAccessExcludePath /home/$u_name/.dbus"
+        fi
+    done
+
+    # Exclusiones de sistema para OnAccess
+    echo "OnAccessExcludePath /tmp"
     echo "OnAccessExcludePath /var/lib/clamav/tmp"
-    echo "OnAccessExcludePath /home/*/.cache"
-    echo "OnAccessExcludePath /home/*/.Xauthority"
-    echo "OnAccessExcludePath /home/*/.config"
-    echo "OnAccessExcludePath /home/*/.local"
-    echo "OnAccessExcludePath /home/*/.dbus"
     echo "OnAccessExcludePath /proc"
     echo "OnAccessExcludePath /sys"
     echo "OnAccessExcludePath /dev"
@@ -1096,10 +1155,25 @@ chmod -R 770 /var/lib/clamav/tmp 2>/dev/null || true
     echo "OnAccessExcludePath /var/log"
     echo "OnAccessExcludePath /var/lib"
 } >> "$CLAMD_CONF"
+
+    # Exclusiones imperativas de desarrollo solicitadas para rendimiento óptimo
+    echo "# Excluir directorios de desarrollo y caché para evitar bucles de escaneo y alto uso de CPU"
+    echo "ExcludePath ^/home/apple/\.cargo/"
+    echo "ExcludePath ^/home/apple/\.cache/pip/"
+    [ -n "$REAL_USER" ] && [ "$REAL_USER" != "apple" ] && [ "$REAL_USER" != "root" ] && {
+        echo "ExcludePath ^/home/$REAL_USER/\.cargo/"
+        echo "ExcludePath ^/home/$REAL_USER/\.cache/pip/"
+    }
+    echo "ExcludePath ^/tmp/"
+    echo "ExcludePath ^/var/tmp/"
+# Replicar configuración exacta en /etc/clamav/clamonacc.conf para compatibilidad total
+cp -f "$CLAMD_CONF" /etc/clamav/clamonacc.conf 2>/dev/null || true
+chmod 644 /etc/clamav/clamonacc.conf 2>/dev/null || true
+
 # Autorizar a clamd para leer /home/$REAL_USER sin errores de "Permission denied"
 usermod -a -G "$REAL_USER" "$CLAMAV_SERVICE_USER" 2>/dev/null || true
 chmod g+rx "$USER_HOME" 2>/dev/null || true
-echo "   [✓] clamd.conf actualizado (AllowSupplementaryGroups=yes; clamd integrado en grupo $REAL_USER)." 
+echo "   [✓] clamd.conf y clamonacc.conf actualizados con exclusiones de desarrollo (.cargo, .cache/pip, /tmp)." 
 
 # 18. Inicialización del Baúl Criptográfico y Registro Forense Inmutable
 
@@ -1364,8 +1438,7 @@ chown root:constantine "$SINKHOLE_SCRIPT" 2>/dev/null || true
 # Autorización sin contraseña para el actualizador (Sudoers y Polkit)
 mkdir -p /etc/sudoers.d /etc/polkit-1/rules.d /etc/xdg/autostart
 {
-    echo "%constantine ALL=(ALL) NOPASSWD: /usr/local/bin/constantine-updater, /usr/local/bin/constantine-tray, /usr/local/bin/constantine-dns-sinkhole, /bin/systemctl, /usr/bin/systemctl, /bin/pkill, /usr/bin/pkill, /bin/resolvectl, /usr/bin/resolvectl, /bin/nmcli, /usr/bin/nmcli"
-    [ -n "$REAL_USER" ] && echo "$REAL_USER ALL=(ALL) NOPASSWD: /usr/local/bin/constantine-updater, /usr/local/bin/constantine-tray, /usr/local/bin/constantine-dns-sinkhole, /bin/systemctl, /usr/bin/systemctl, /bin/pkill, /usr/bin/pkill, /bin/resolvectl, /usr/bin/resolvectl, /bin/nmcli, /usr/bin/nmcli"
+    echo "%constantine ALL=(ALL) NOPASSWD: /usr/local/bin/constantine-updater, /usr/local/bin/constantine-tray, /usr/local/bin/constantine-dns-sinkhole, /bin/systemctl, /usr/bin/systemctl, /bin/pkill, /usr/bin/pkill, /bin/resolvectl, /usr/bin/resolvectl, /bin/nmcli, /usr/bin/nmcli, /bin/chmod, /usr/bin/chmod, /bin/fuser, /usr/bin/fuser"
 } > /etc/sudoers.d/constantine
 chmod 0440 /etc/sudoers.d/constantine 2>/dev/null || true
 
@@ -1698,7 +1771,7 @@ PrivateTmp=true
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_KILL CAP_NET_ADMIN
 ExecStartPre=/bin/sh -c 'timeout 45 sh -c "while [ ! -S $CLAMD_SOCK ]; do sleep 1; done" || exit 1'
-ExecStart=$CLAMONACC_BIN --foreground --log=$LOG_DIR/clamonacc.log
+ExecStart=$CLAMONACC_BIN --foreground --log=$LOG_DIR/clamonacc.log --config-file=/etc/clamav/clamonacc.conf
 Restart=always
 RestartSec=5
 
@@ -1784,7 +1857,7 @@ if [ -f "$SCRIPT_DIR/target/release/constantine" ]; then
     if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
         cp -f "$SCRIPT_DIR/uninstall.sh" "$BIN_DIR/constantine-uninstall"
         cp -f "$SCRIPT_DIR/uninstall.sh" "$BIN_DIR/uninstall.sh"
-        chmod 750 "$BIN_DIR/constantine-uninstall" "$BIN_DIR/uninstall.sh"
+        chmod 755 "$BIN_DIR/constantine-uninstall" "$BIN_DIR/uninstall.sh"
         echo "   [✓] Desinstalador instalado en $BIN_DIR/constantine-uninstall."
     fi
 else
