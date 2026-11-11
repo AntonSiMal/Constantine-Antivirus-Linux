@@ -61,30 +61,8 @@ Un dashboard unificado en **GTK4 con estética Cupertino**. Desde portátiles co
 
 El dashboard de Constantine está diseñado para que un solo vistazo te diga todo lo que necesitas saber. Sin ruido, solo información accionable.
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Constantine EDR v5.5                            ● Salud: 100% (10/10)       │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  📦 MUESTRAS      📋 LISTA BLANCA   🔍 ESCUDOS        🧬 ANTI-RANSOMWARE    │
-│  0 Muestras       14 Hashes         fanotify + eBPF   4/4 Canary Intactos  │
-│  Baúl AES-256     Firmas SHA-256    Vigilando /home   Tripwires + Ráfagas  │
-│                                                                              │
-│  🔄 SISTEMA Y KERNEL                                                         │
-│  Kernel activo: 6.8.0-generic | 🟢 Kernel y Sistema completamente al día    │
-│  0 parches críticos pendientes                      [🚀 Abrir Actualizador] │
-│                                                                              │
-│  ⚙️ MATRIZ DE SENSORES                                                       │
-│  1. fanotify (ClamOnAcc)     ● Activo    6. Registro Forense   ● SHA-256   │
-│  2. Canary Anti-Ransomware   ● 4/4       7. Escudo USB         ● P&P       │
-│  3. Tetragon eBPF (LSM)      ● Activo    8. DNS Sinkhole       ● 78k dom.  │
-│  4. Periféricos V4L2         ● Blindado  9. Tamper Protection  ● Anti-Kill │
-│  5. UFW Firewall             ● Activo    10. Modo Juego / DND  ● Listo     │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+<img width="1173" height="606" alt="Captura de pantalla de 2026-11-11 09-57-00" src="https://github.com/user-attachments/assets/de7392cc-b11e-433a-a4f4-55b907738c8e" />
 
----
 
 ## Arquitectura Multicapa Fail-Secure.
 
