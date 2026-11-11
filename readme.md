@@ -1,17 +1,18 @@
-# &lt;p align=&quot;center&quot;&gt;🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5&lt;/p&gt;
 
-&lt;p align=&quot;center&quot;&gt;
-  &lt;strong&gt;La primera suite EDR nativa en Rust con intercepción en Kernel (eBPF + fanotify) diseñada para el escritorio Linux.&lt;/strong&gt;
-&lt;/p&gt;
+<h1 align="center">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5</h1>
 
-&lt;p align=&quot;center&quot;&gt;
-  &lt;a href=&quot;https://www.rust-lang.org/&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/Language-Rust_1.70+-orange.svg?style=for-the-badge&amp;logo=rust&quot; alt=&quot;Rust&quot;&gt;&lt;/a&gt;
-  &lt;a href=&quot;https://gtk.org/&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/GUI-GTK4_Cupertino-blue.svg?style=for-the-badge&amp;logo=gnome&quot; alt=&quot;GTK4&quot;&gt;&lt;/a&gt;
-  &lt;a href=&quot;https://ebpf.io/&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/Kernel-eBPF_LSM_+_fanotify-red.svg?style=for-the-badge&amp;logo=linux&quot; alt=&quot;eBPF&quot;&gt;&lt;/a&gt;
-  &lt;a href=&quot;https://www.gnu.org/licenses/gpl-3.0&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/License-GPL_v3.0-green.svg?style=for-the-badge&quot; alt=&quot;GPL-3.0&quot;&gt;&lt;/a&gt;
-  &lt;img src=&quot;https://img.shields.io/badge/Telemetry-0%25_Soberano-purple.svg?style=for-the-badge&quot; alt=&quot;Zero Telemetry&quot;&gt;
-  &lt;img src=&quot;https://img.shields.io/badge/Platform-Debian_%7C_Ubuntu_%7C_Mint-lightgrey.svg?style=for-the-badge&amp;logo=debian&quot; alt=&quot;Distros&quot;&gt;
-&lt;/p&gt;
+<p align="center">
+  <strong>La primera suite EDR nativa en Rust con intercepción en Kernel (eBPF + fanotify) diseñada para el escritorio Linux.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Language-Rust_1.70+-orange.svg?style=for-the-badge&logo=rust" alt="Rust"></a>
+  <a href="https://gtk.org/"><img src="https://img.shields.io/badge/GUI-GTK4_Cupertino-blue.svg?style=for-the-badge&logo=gnome" alt="GTK4"></a>
+  <a href="https://ebpf.io/"><img src="https://img.shields.io/badge/Kernel-eBPF_LSM_+_fanotify-red.svg?style=for-the-badge&logo=linux" alt="eBPF"></a>
+  <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPL_v3.0-green.svg?style=for-the-badge" alt="GPL-3.0"></a>
+  <img src="https://img.shields.io/badge/Telemetry-0%25_Soberano-purple.svg?style=for-the-badge" alt="Zero Telemetry">
+  <img src="https://img.shields.io/badge/Platform-Debian_%7C_Ubuntu_%7C_Mint-lightgrey.svg?style=for-the-badge&logo=debian" alt="Distros">
+</p>
 
 ---
 
@@ -32,7 +33,7 @@ Durante décadas, la seguridad en el escritorio Linux ha estado fragmentada entr
 
 Constantine v5.5 estrena una interfaz unificada donde cada aspecto de la seguridad de tu estación de trabajo es visible y accionable de un vistazo:
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │ 🛡️ CONSTANTINE EDR v5.5   [🛑 Apagar]  [⏸️ Pausar Escudos]  [🗑️ Desinstalar]  [● Salud: 100%] │
 ├────────────────────────────────────────────────────────────────────────────────────────┤
@@ -66,7 +67,7 @@ Constantine v5.5 estrena una interfaz unificada donde cada aspecto de la segurid
 
 ## 🏛️ Arquitectura Multicapa Fail-Secure
 
-```
+```text
                      ┌────────────────────────────────────────────────────────┐
                      │       Constantine GUI (GTK4 Cupertino Responsive)      │
                      │        [800x600 - 4K | Cero Contraseñas de Usuario]     │
@@ -242,3 +243,9 @@ Constantine Antivirus & EDR se construye sobre los hombros de gigantes. Reconoce
 Distribuido bajo la licencia **GNU General Public License v3.0 (GPL-3.0)**. Consulta el archivo `LICENSE` para el texto completo.
 
 > **Aviso de responsabilidad**: Constantine interactúa a bajo nivel con el kernel Linux mediante controladores de seguridad (`fanotify`, `eBPF`, `chattr`). El software se proporciona "TAL CUAL" (*AS IS*), sin garantías de ningún tipo. Al instalarlo, el usuario asume los riesgos técnicos inherentes a la administración de bajo nivel del sistema operativo.
+```
+
+### 💡 Consejos adicionales:
+- Si vas a subir esto a GitHub, asegúrate de que el archivo se llame exactamente `README.md`.
+- El bloque de arte ASCII está envuelto en ````text` para evitar que los motores de Markdown intenten interpretarlo como código de programación y alteren su alineación.
+- Las fórmulas matemáticas usan sintaxis LaTeX estándar (`$$...$$`), que GitHub y GitLab renderizan nativamente de forma correcta.
