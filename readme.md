@@ -89,26 +89,8 @@ El dashboard de Constantine está diseñado para que un solo vistazo te diga tod
 ## Arquitectura Multicapa Fail-Secure.
 
 Constantine no es un simple script. Es una arquitectura cliente-servidor empresarial donde el demonio con privilegios root (`constantine-daemon`) expone un socket IPC seguro (`/run/constantine.sock`) a la interfaz gráfica.
+<img width="2752" height="1536" alt="Gemini_Generated_Image_3zon5z3zon5z3zon" src="https://github.com/user-attachments/assets/fb800142-224d-4914-bbd3-cbe2fd04237c" />
 
-```text
-                     ┌────────────────────────────────────────────┐
-                     │   Constantine GUI (GTK4 Cupertino)         │
-                     │   [800x600 → 4K | Polkit | Cero sudo]      │
-                     └────────────────────┬───────────────────────┘
-                                          │ Unix Socket IPC
-                     ┌────────────────────▼───────────────────────┐
-                     │   constantine-daemon (Root Supervisor)     │
-                     └──┬─────────────┬─────────────┬─────────────┘
-                        │             │             │
-   ┌────────────────────▼──┐  ┌───────▼─────────┐  ┌▼────────────────────┐
-   │  Kernel & eBPF        │  │  Motores & TI   │  │  Hardware & Red     │
-   │  • fanotify           │  │  • ClamAV       │  │  • UDisks2 (USB)    │
-   │  • Tetragon LSM       │  │  • YARA / YARA-X│  │  • V4L2 (Cámara)    │
-   │  • Falco Behavioral   │  │  • MISP / Sigma │  │  • pactl (Mic)      │
-   │  • Anti-Kill          │  │  • AES-256-GCM  │  │  • DNS Sinkhole     │
-   │  • Hash Chain SHA-256 │  │  • StevenBlack  │  │  • UFW / iptables   │
-   └───────────────────────┘  └─────────────────┘  └─────────────────────┘
-```
 
 **Política Fail-Secure estricta:** Si durante la instalación o ejecución un módulo crítico falla, el sistema revierte limpiamente todos los cambios para no dejar residuos ni un estado de falsa seguridad.
 
