@@ -185,73 +185,8 @@ Cualquier alteración rompe la cadena y genera una alarma pericial crítica. Exp
 ---
 
 ## Instalación en un solo paso.<p align="center">
-  <h1 align="center">Constantine EDR</h1>
-  <p align="center" style="font-size: 1.2em; color: #666;">
-    La suite de seguridad más avanzada para Linux.<br>
-    Diseñada en Rust. Integrada en el Kernel. Invisible para ti, impenetrable para ellos.
-  </p>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.70+-black?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/GPL_3.0-Open_Source-black?style=flat-square" alt="License">
-  <img src="https://img.shields.io/badge/Linux-Debian_%7C_Ubuntu_%7C_Mint-black?style=flat-square&logo=linux" alt="Linux">
-</p>
-
-<p align="center">
-  <em>0% Telemetría. 100% Soberanía.</em>
-</p>
-
----
-
-## Seguridad. Redefinida.
-
-Durante años, la seguridad en el escritorio Linux ha exigido compromisos. O sacrificas rendimiento con escaneos lentos, o sacrificas protección con herramientas reactivas. Constantine elimina esa elección.
-
-Ofrecemos protección preventiva en tiempo real, control de periféricos y defensa anti-ransomware de nivel empresarial, con la elegancia y simplicidad que esperas de tu escritorio.
-
----
-
-## Potente. Elegante. Invisible.
-
-### 🛡️ Protección preventiva en el Kernel
-Constantine no espera a que el malware se ejecute. Mediante `eBPF LSM` y `fanotify`, interceptamos y neutralizamos las amenazas en milisegundos, antes de que toquen el disco o la memoria.
-
-### 🧠 Prevención inteligente de Ransomware
-No solo detectamos firmas. Analizamos el comportamiento en tiempo real:
-- **Señuelos invisibles (Canary Tripwires):** Archivos trampa estratégicamente ubicados.
-- **Análisis de entropía de Shannon:** Diferencia matemáticamente entre una compresión legítima y un cifrado hostil ($H > 7.55$).
-- **Aislamiento atómico:** Congelación instantánea del proceso y corte de red perimetral.
-
-### 🔒 Privacidad por diseño
-Tu privacidad es un derecho fundamental. Constantine no recoge datos, no envía telemetría y no depende de la nube. Tu código, tus reglas, tu máquina. Los registros forenses se almacenan localmente con una cadena criptográfica SHA-256 inmutable.
-
-### ✨ Una interfaz que se siente como en casa
-Un dashboard unificado en GTK4 con una estética limpia y adaptable. Desde portátiles compactos hasta monitores 4K, la operación es fluida, intuitiva y no requiere contraseñas de `sudo` para el uso diario.
-
----
-
-## Tu seguridad, de un vistazo.
-
-El dashboard de Constantine está diseñado para que un solo vistazo te diga todo lo que necesitas saber. Sin ruido, solo información accionable.
-
-
----
-
-## Ingenieria de vanguardia.
-
-Constantine no es un simple script. Es una arquitectura multicapa diseñada para ser *fail-secure* (segura ante fallos).
 
 ```text
-                         ┌────────────────────────────────────┐
-                         │  Constantine GUI (GTK4 Responsive) │
-                         │  Interfaz fluida, sin fricción     │
-                         └────────────────┬───────────────────┘
-                                          │ IPC / D-Bus Seguro
-
-
-Creemos que la seguridad de nivel empresarial no debería requerir un manual de instrucciones.
-
 1. Clona el repositorio:
    ```bash
    git clone https://github.com/tonsimaltine-Antivirus-Linux
