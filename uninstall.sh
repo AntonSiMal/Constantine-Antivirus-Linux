@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Constantine Antivirus & EDR v5.5 - Desinstalador Completo y Reversión Total
+# Constantine Antivirus & EDR v5.5.1 - Desinstalador Completo y Reversión Total
 # Purga exhaustiva de configuraciones, servicios, binarios y carpetas residuales
 # ==============================================================================
 set -e
@@ -16,7 +16,7 @@ CLAMD_CONF="/etc/clamav/clamd.conf"
 [ ! -f "$CLAMD_CONF" ] && CLAMD_CONF="/usr/local/etc/clamd.conf"
 
 echo "===================================================================="
-echo " 🛑 DESINSTALADOR OFICIAL CONSTANTINE ANTIVIRUS & EDR v5.5 "
+echo " 🛑 DESINSTALADOR OFICIAL CONSTANTINE ANTIVIRUS & EDR v5.5.1 "
 echo "===================================================================="
 echo "[+] Iniciando purga completa y reversión total del sistema..."
 echo ""
@@ -124,7 +124,7 @@ systemctl restart clamav-daemon 2>/dev/null || true
 
 # Retirar políticas de Tetragon y Falco
 rm -rf /etc/tetragon /var/log/tetragon /var/lib/tetragon 2>/dev/null || true
-rm -f /etc/falco/falco_rules.local.yaml /var/log/falco/events.log 2>/dev/null || true
+rm -f /etc/falco/falco_rules.local.yaml /etc/falco/rules.d/constantine-exceptions.yaml /var/log/falco/events.log 2>/dev/null || true
 rm -rf /var/log/falco 2>/dev/null || true
 if [ -f /etc/falco/falco.yaml ]; then
     sed -i 's/^file_output:.*/file_output:\n  enabled: false/' /etc/falco/falco.yaml 2>/dev/null || true
@@ -235,7 +235,7 @@ rm -rf /var/lib/constantine \
        /tmp/tetragon* 2>/dev/null || true
 
 # Limpiar carpetas vacías residuales en el sistema
-rmdir /var/log/falco /var/log/tetragon /etc/tetragon /var/lib/tetragon 2>/dev/null || true
+rmdir /etc/falco/rules.d /etc/falco /var/log/falco /var/log/tetragon /etc/tetragon /var/lib/tetragon 2>/dev/null || true
 find /etc/skel -type d -empty -delete 2>/dev/null || true
 
 gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
@@ -243,7 +243,7 @@ update-desktop-database 2>/dev/null || true
 
 echo ""
 echo "===================================================================="
-echo " 🎉 DESINSTALACIÓN COMPLETA Y PURGA TOTAL DE CONSTANTINE v5.5 "
+echo " 🎉 DESINSTALACIÓN COMPLETA Y PURGA TOTAL DE CONSTANTINE v5.5.1 "
 echo "===================================================================="
 echo " • Interceptores en Kernel y Socket IPC: Desvinculados limpiamente"
 echo " • Señuelos Canary Tripwires: Retirados de todos los usuarios e idiomas"

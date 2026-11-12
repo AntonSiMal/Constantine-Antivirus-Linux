@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v5.5 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5)
+// Constantine Antivirus & EDR v5.5.3 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.3)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -1146,12 +1146,127 @@ impl ImmutableAuditLog {
         hasher.update(payload.as_bytes());
         let current_hash = format!("{:x}", hasher.finalize());
         let log_line = format!("{} | {} | {} | {} | {}\n", now, current_hash, prev_hash, clean_event, clean_details);
+        let mut wrote_ok = false;
         TamperProtectionManager::unlock_for_write(IMMUTABLE_AUDIT_LOG, || {
             if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(IMMUTABLE_AUDIT_LOG) {
-                let _ = f.write_all(log_line.as_bytes());
-                let _ = f.sync_data();
+                if f.write_all(log_line.as_bytes()).is_ok() {
+                    let _ = f.sync_data();
+                    wrote_ok = true;
+                }
             }
         });
+        if !wrote_ok {
+            let cmd = serde_json::json!({
+                "action": "append_audit_log",
+                "event_type": clean_event,
+                "details": clean_details
+            });
+            let _ = ConstantineIpcClient::send_command(&cmd);
+        }
+    }
+
+    fn parse_utc_epoch(ts: &str) -> Option<i64> {
+        // Parses YYYY-MM-DDTHH:MM:SSZ
+        let s = ts.trim().trim_end_matches('Z');
+        let (date_part, time_part) = s.split_once('T')?;
+        let mut d = date_part.split('-');
+        let y: i64 = d.next()?.parse().ok()?;
+        let m: i64 = d.next()?.parse().ok()?;
+        let day: i64 = d.next()?.parse().ok()?;
+        let mut t = time_part.split(':');
+        let hh: i64 = t.next()?.parse().ok()?;
+        let mm: i64 = t.next()?.parse().ok()?;
+        let ss: i64 = t.next().unwrap_or("0").split('.').next().unwrap_or("0").parse().ok()?;
+        // Howard Hinnant civil-from-days inverse
+        let y_adj = if m <= 2 { y - 1 } else { y };
+        let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+        let yoe = y_adj - era * 400;
+        let m_adj = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * m_adj + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146097 + doe - 719468;
+        Some(days * 86400 + hh * 3600 + mm * 60 + ss)
+    }
+
+    pub fn purge_older_than_24h() -> Result<usize, String> {
+        let cmd = serde_json::json!({"action": "purge_audit_log_24h"});
+        if let Some(resp) = ConstantineIpcClient::send_command(&cmd) {
+            if resp.get("status").and_then(|x| x.as_str()) == Some("ok") {
+                let removed = resp.get("removed").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                return Ok(removed);
+            }
+        }
+        Self::purge_older_than_24h_local()
+    }
+
+    pub fn purge_older_than_24h_local() -> Result<usize, String> {
+        let _guard = match Self::lock_guard().lock() { Ok(g) => g, Err(p) => p.into_inner() };
+        if !Path::new(IMMUTABLE_AUDIT_LOG).exists() {
+            return Ok(0);
+        }
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let cutoff = now_epoch - 86400;
+
+        let raw = fs::read_to_string(IMMUTABLE_AUDIT_LOG).map_err(|e| format!("Error leyendo registro: {}", e))?;
+        let mut kept_records: Vec<(String, String, String)> = Vec::new();
+        let mut genesis_line: Option<String> = None;
+        let mut removed = 0usize;
+
+        for line in raw.lines() {
+            if line.trim().is_empty() { continue; }
+            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            if parts.len() < 5 { continue; }
+            let ts = parts[0].trim();
+            let cur_hash = parts[1].trim();
+            let ev_type = parts[3].trim();
+            let details = parts[4].trim();
+
+            if ev_type == "GENESIS" && cur_hash == "0000000000000000000000000000000000000000000000000000000000000000" {
+                genesis_line = Some(format!("{} | {} | {} | {} | {}
+", ts, cur_hash, cur_hash, ev_type, details));
+                continue;
+            }
+            if let Some(ep) = Self::parse_utc_epoch(ts) {
+                if ep < cutoff {
+                    removed += 1;
+                    continue;
+                }
+            }
+            kept_records.push((ts.to_string(), ev_type.to_string(), details.to_string()));
+        }
+
+        if removed == 0 {
+            return Ok(0);
+        }
+
+        let mut rebuilt = String::new();
+        let mut prev_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        if let Some(g) = genesis_line {
+            rebuilt.push_str(&g);
+        }
+        for (ts, ev_type, details) in kept_records {
+            let payload = format!("{}|{}|{}|{}", prev_hash, ts, ev_type, details);
+            let mut hasher = Sha256::new();
+            hasher.update(payload.as_bytes());
+            let cur_hash = format!("{:x}", hasher.finalize());
+            rebuilt.push_str(&format!("{} | {} | {} | {} | {}
+", ts, cur_hash, prev_hash, ev_type, details));
+            prev_hash = cur_hash;
+        }
+
+        let mut write_err: Option<String> = None;
+        TamperProtectionManager::unlock_for_write(IMMUTABLE_AUDIT_LOG, || {
+            if let Err(e) = fs::write(IMMUTABLE_AUDIT_LOG, rebuilt.as_bytes()) {
+                write_err = Some(format!("Permiso denegado al purgar registro (inicia constantine-daemon): {}", e));
+            }
+        });
+        if let Some(err) = write_err {
+            return Err(err);
+        }
+        Ok(removed)
     }
 
     fn get_last_hash_unlocked() -> String {
@@ -1658,7 +1773,19 @@ impl ConstantineIpcServer {
         let action = val.get("action").and_then(|x| x.as_str()).unwrap_or("");
         match action {
             "ping" => {
-                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5"}).to_string()
+                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.3"}).to_string()
+            }
+            "append_audit_log" => {
+                let ev = val.get("event_type").and_then(|x| x.as_str()).unwrap_or("SYSTEM_EVENT");
+                let det = val.get("details").and_then(|x| x.as_str()).unwrap_or("");
+                ImmutableAuditLog::append_event(ev, det);
+                serde_json::json!({"status": "ok"}).to_string()
+            }
+            "purge_audit_log_24h" => {
+                match ImmutableAuditLog::purge_older_than_24h_local() {
+                    Ok(removed) => serde_json::json!({"status": "ok", "removed": removed}).to_string(),
+                    Err(e) => serde_json::json!({"status": "error", "message": e}).to_string(),
+                }
             }
             "service_action" => {
                 let service = val.get("service").and_then(|x| x.as_str()).unwrap_or("");
@@ -2299,7 +2426,7 @@ impl SystemUpdateAudit {
         // Fallback a terminal
         if Command::new("which").arg("x-terminal-emulator").output().map(|o| o.status.success()).unwrap_or(false) {
             if Command::new("x-terminal-emulator")
-                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
+                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.3'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
                 .spawn().is_ok() {
                 return true;
             }
@@ -2484,7 +2611,7 @@ impl ModuleVersionAudit {
         let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
         
         vec![
-            ("Constantine Core EDR", "v5.5 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
+            ("Constantine Core EDR", "v5.5.3 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
             (
                 "Escudo Anti-Ransomware",
                 format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
@@ -3568,7 +3695,7 @@ impl ExecutiveReportGenerator {
 <body>
     <div class="header">
         <div>
-            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5</h1>
+            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.3</h1>
             <div class="subtitle">Informe Ejecutivo de Auditoría y Seguridad del Endpoint</div>
         </div>
         <div style="text-align: right;">
@@ -4554,6 +4681,13 @@ impl MemoryScannerEngine {
             }
         }
 
+        for (pid, exe_path, reason) in &threats {
+            ImmutableAuditLog::append_event(
+                "RAM_THREAT_ALERT",
+                &format!("Alerta en Memoria RAM — PID {} ({}): {}", pid, exe_path, reason),
+            );
+        }
+
         ProcessMemScanResult {
             total_procs_scanned: count,
             threats_found: threats,
@@ -4650,27 +4784,243 @@ impl PeripheralAudit {
 // ==============================================================================
 // 14. Actualizador de Constantine desde Repositorio / GitHub
 // ==============================================================================
+pub const APP_VERSION: &str = "5.5.3";
+pub const GITHUB_REPO_URL: &str = "https://github.com/AntonSiMal/Constantine-Antivirus-Linux";
+
+#[derive(Clone, Debug)]
+pub enum UpdateCheckStatus {
+    UpdateAvailable { remote_version: String, url: String },
+    UpToDate(String),
+    Error(String),
+}
+
 pub struct SelfUpdater;
 
 impl SelfUpdater {
-    pub fn check_and_update_from_repo() -> (bool, String) {
-        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/usr/local/bin"));
-        if Path::new(&current_dir).join(".git").exists() {
-            if let Ok(out) = Command::new("git").args(["-C", &current_dir.to_string_lossy(), "pull"]).output() {
-                if out.status.success() {
-                    let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    return (true, format!("Repositorio actualizado: {}", msg));
+    fn parse_semver(raw: &str) -> Option<(u64, u64, u64)> {
+        let cleaned = raw.trim().trim_start_matches('v').trim_start_matches('V');
+        let core = cleaned.split(['-', '+']).next().unwrap_or(cleaned);
+        let mut parts = core.split('.');
+        let major: u64 = parts.next()?.parse().ok()?;
+        let minor: u64 = parts.next().unwrap_or("0").parse().ok()?;
+        let patch: u64 = parts.next().unwrap_or("0").parse().ok()?;
+        Some((major, minor, patch))
+    }
+
+    pub fn check_remote_version() -> UpdateCheckStatus {
+        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 3));
+        let mut remote_tag: Option<String> = None;
+        let mut target_url = GITHUB_REPO_URL.to_string();
+
+        // 0. Prioritario: consultar version.txt en la rama main de GitHub
+        if let Ok(out) = Command::new("curl")
+            .args([
+                "-sSL",
+                "--connect-timeout", "5",
+                "--max-time", "8",
+                "-H", "Cache-Control: no-cache",
+                "https://raw.githubusercontent.com/AntonSiMal/Constantine-Antivirus-Linux/main/version.txt",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let raw_ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let cleaned = raw_ver.trim_start_matches('v').trim_start_matches('V').to_string();
+                if Self::parse_semver(&cleaned).is_some() {
+                    remote_tag = Some(cleaned);
                 }
             }
         }
-        
-        if let Ok(out) = Command::new("curl").args(["-s", "--connect-timeout", "4", "-I", "https://github.com/tonsimaltine-Antivirus-Linux"]).output() {
-            if out.status.success() {
-                return (true, "Conexión confirmada con el repositorio. Constantine EDR v5.5 está en la última versión.".into());
+
+        // 1. Respaldo: consultar última Release oficial en GitHub API
+        if remote_tag.is_none() {
+            if let Ok(out) = Command::new("curl")
+                .args([
+                    "-sSL",
+                    "--connect-timeout", "5",
+                    "--max-time", "10",
+                    "-H", "User-Agent: Constantine-EDR/5.5.3",
+                    "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/releases/latest",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                            if Self::parse_semver(tag).is_some() {
+                                remote_tag = Some(tag.trim_start_matches('v').trim_start_matches('V').to_string());
+                                if let Some(u) = json.get("html_url").and_then(|v| v.as_str()) {
+                                    target_url = u.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        (false, "No se pudo conectar al servidor central de actualización.".into())
+
+        // 2. Respaldo: consultar Tags si no hay Releases publicadas
+        if remote_tag.is_none() {
+            if let Ok(out) = Command::new("curl")
+                .args([
+                    "-sSL",
+                    "--connect-timeout", "5",
+                    "--max-time", "10",
+                    "-H", "User-Agent: Constantine-EDR/5.5.3",
+                    "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/tags",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(arr) = json.as_array() {
+                            for item in arr {
+                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                                    if Self::parse_semver(name).is_some() {
+                                        remote_tag = Some(name.trim_start_matches('v').trim_start_matches('V').to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Respaldo: consultar versión declarada en rama main (constantine.rs / Cargo.toml)
+        if remote_tag.is_none() {
+            if let Ok(out) = Command::new("curl")
+                .args([
+                    "-sSL",
+                    "--connect-timeout", "5",
+                    "--max-time", "10",
+                    "https://raw.githubusercontent.com/AntonSiMal/Constantine-Antivirus-Linux/main/constantine.rs",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    let body = String::from_utf8_lossy(&out.stdout);
+                    for line in body.lines().take(200) {
+                        if line.contains("APP_VERSION") {
+                            if let Some(start) = line.find('"') {
+                                if let Some(end) = line[start + 1..].find('"') {
+                                    let candidate = &line[start + 1..start + 1 + end];
+                                    if Self::parse_semver(candidate).is_some() {
+                                        remote_tag = Some(candidate.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        match remote_tag {
+            Some(ver_str) => {
+                if let Some(remote_ver) = Self::parse_semver(&ver_str) {
+                    if remote_ver != local_ver {
+                        UpdateCheckStatus::UpdateAvailable {
+                            remote_version: ver_str,
+                            url: target_url,
+                        }
+                    } else {
+                        UpdateCheckStatus::UpToDate(ver_str)
+                    }
+                } else {
+                    UpdateCheckStatus::UpToDate(APP_VERSION.to_string())
+                }
+            }
+            None => UpdateCheckStatus::Error(
+                "No se pudo obtener la versión remota desde GitHub (verifica tu conexión a internet).".into(),
+            ),
+        }
     }
+
+    pub fn launch_repo_update() {
+        let cmd = format!(
+            "echo '🔄 Actualizando Constantine Antivirus & EDR desde GitHub...';              rm -rf /tmp/constantine-update &&              git clone --depth 1 {} /tmp/constantine-update &&              cd /tmp/constantine-update &&              chmod +x install.sh &&              pkexec /tmp/constantine-update/install.sh;              echo 'Presiona Enter para cerrar...'; read line",
+            GITHUB_REPO_URL
+        );
+        for term in ["x-terminal-emulator", "gnome-terminal", "xfce4-terminal", "konsole", "mate-terminal"] {
+            if Command::new("which").arg(term).output().map(|o| o.status.success()).unwrap_or(false) {
+                let flag = if term == "gnome-terminal" { "--" } else { "-e" };
+                let _ = Command::new(term).args([flag, "sh", "-c", &cmd]).spawn();
+                return;
+            }
+        }
+        let _ = Command::new("xdg-open").arg(GITHUB_REPO_URL).spawn();
+    }
+}
+
+fn prompt_update_dialog(parent: &ApplicationWindow, remote_version: &str, repo_url: &str, status_lbl: Option<Label>) {
+    let dialog = ApplicationWindow::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title("🚀 Nueva Actualización Disponible — Constantine EDR")
+        .default_width(480)
+        .default_height(240)
+        .build();
+
+    let vbox = Box::new(Orientation::Vertical, 14);
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    vbox.set_margin_top(20);
+    vbox.set_margin_bottom(20);
+
+    let title = Label::new(Some(&format!("✨ Nueva versión disponible: v{}", remote_version)));
+    title.add_css_class("title-text");
+    title.set_xalign(0.0);
+    vbox.append(&title);
+
+    let body = Label::new(Some(&format!(
+        "Se encontró una versión más reciente en el repositorio oficial de GitHub:
+         • Versión instalada: v{}
+         • Nueva versión en GitHub: v{}
+
+         ¿Deseas descargar e instalar la actualización ahora?",
+        APP_VERSION, remote_version
+    )));
+    body.set_xalign(0.0);
+    body.set_wrap(true);
+    body.set_wrap_mode(gtk4::pango::WrapMode::Word);
+    vbox.append(&body);
+
+    let btn_box = Box::new(Orientation::Horizontal, 10);
+    btn_box.set_halign(gtk4::Align::End);
+
+    let btn_later = Button::with_label("Más Tarde");
+    let btn_web = Button::with_label("🌐 Ver en GitHub");
+    let btn_now = Button::with_label("⬇️ Actualizar y Sincronizar");
+    btn_now.add_css_class("suggested-action");
+
+    btn_box.append(&btn_later);
+    btn_box.append(&btn_web);
+    btn_box.append(&btn_now);
+    vbox.append(&btn_box);
+
+    let dlg_c1 = dialog.clone();
+    btn_later.connect_clicked(move |_| dlg_c1.close());
+
+    let url_c = repo_url.to_string();
+    btn_web.connect_clicked(move |_| {
+        let _ = Command::new("xdg-open").arg(&url_c).spawn();
+    });
+
+    let dlg_c2 = dialog.clone();
+    let r_ver = remote_version.to_string();
+    btn_now.connect_clicked(move |_| {
+        if let Some(ref lbl) = status_lbl {
+            lbl.set_text(&format!("⏳ Descargando e instalando v{} desde GitHub...", r_ver));
+        }
+        SelfUpdater::launch_repo_update();
+        dlg_c2.close();
+    });
+
+    dialog.set_child(Some(&vbox));
+    dialog.present();
 }
 
 // // Punto de Entrada y Construcción de la Interfaz Gráfica (GUI)
@@ -4726,7 +5076,7 @@ fn main() {
         ConstantineIpcServer::start_daemon_ipc_server();
 
         let user_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        // [v5.5 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
+        // [v5.5.3 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
         AntiRansomwareShield::deploy_all_users_canaries();
         OnAccessSupervisor::start_realtime_event_consumer();
         TetragonPrimarySensor::start_primary_edr_consumer();
@@ -4829,7 +5179,7 @@ fn main() {
 // ==============================================================================
 
 // ==============================================================================
-// 29. [v5.5] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
+// 29. [v5.5.3] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
 // ==============================================================================
 pub struct DownloadQuarantineGuard;
 
@@ -4884,7 +5234,7 @@ impl DownloadQuarantineGuard {
                                             let _ = fs::set_permissions(&p, perms);
                                             ImmutableAuditLog::append_event(
                                                 "MOTW_EXECUTABLE_LOCKED",
-                                                &format!("Mark-of-the-Web v5.5 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
+                                                &format!("Mark-of-the-Web v5.5.3 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
                                             );
                                         }
                                     }
@@ -4893,7 +5243,7 @@ impl DownloadQuarantineGuard {
                                 // 3. Evaluar archivo descargado con el pipeline multi-motor
                                 match ThreatAnalysisEngine::evaluate_file(&p) {
                                     FileVerdict::Threat(reason) => {
-                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5 (Multiusuario)");
+                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.3 (Multiusuario)");
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_QUARANTINED",
                                             &format!("Descarga maliciosa interceptada en home de usuario: {} ({})", p.display(), reason),
@@ -4907,7 +5257,7 @@ impl DownloadQuarantineGuard {
                                     }
                                     FileVerdict::Clean(_) => {
                                         let _ = Command::new("setfattr")
-                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5", &p.to_string_lossy()])
+                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.3", &p.to_string_lossy()])
                                             .output();
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_VERIFIED",
@@ -5126,7 +5476,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&title1);
 
     let desc1 = Label::new(Some(
-        "Desinstalar Constantine Antivirus & EDR v5.5 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
+        "Desinstalar Constantine Antivirus & EDR v5.5.3 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
     ));
     desc1.add_css_class("subtitle-text");
     desc1.set_xalign(0.0);
@@ -5154,7 +5504,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&card_warn);
 
     let note1 = Label::new(Some(
-        "Constantine v5.5 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
+        "Constantine v5.5.3 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
     ));
     note1.add_css_class("subtitle-text");
     note1.set_xalign(0.0);
@@ -5831,7 +6181,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
     
-    let badge_lbl = Label::new(Some("v5.5"));
+    let badge_lbl = Label::new(Some("v5.5.3"));
     badge_lbl.add_css_class("badge-version");
     
     title_box.append(&title_lbl);
@@ -6026,7 +6376,7 @@ fn build_ui(app: &Application) {
     
     // Título Principal
     let head_dash_box = Box::new(Orientation::Vertical, 4);
-    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5)"));
+    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.3)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     head_dash_box.append(&t_ov);
@@ -6859,7 +7209,7 @@ fn build_ui(app: &Application) {
     d_repo.set_wrap_mode(gtk4::pango::WrapMode::Word);
     card_repo_update.append(&d_repo);
     
-    let repo_status_lbl = Label::new(Some("Versión actual: v5.5 (Debian Edition). Listo para comprobar."));
+    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.3 (Debian Edition). Listo para comprobar."));
     repo_status_lbl.set_xalign(0.0);
     repo_status_lbl.add_css_class("mini-row-status-ok");
     card_repo_update.append(&repo_status_lbl);
@@ -6903,15 +7253,27 @@ fn build_ui(app: &Application) {
 
     let r_lbl_c = repo_status_lbl.clone();
     let b_repo_c = btn_repo_up.clone();
+    let win_repo_c = window.clone();
     btn_repo_up.connect_clicked(move |_| {
         let r_lbl = r_lbl_c.clone();
         let b_btn = b_repo_c.clone();
+        let win_p = win_repo_c.clone();
         gtk4::glib::spawn_future_local(async move {
             b_btn.set_sensitive(false);
-            b_btn.set_label("⏳ Comprobando repositorio...");
-            r_lbl.set_text("Consultando servidor de actualizaciones...");
-            let (_ok, msg) = run_blocking(|| SelfUpdater::check_and_update_from_repo()).await;
-            r_lbl.set_text(&msg);
+            b_btn.set_label("⏳ Comprobando GitHub...");
+            r_lbl.set_text("Consultando repositorio oficial en GitHub...");
+            match run_blocking(|| SelfUpdater::check_remote_version()).await {
+                UpdateCheckStatus::UpdateAvailable { remote_version, url } => {
+                    r_lbl.set_text(&format!("🚀 Nueva versión disponible: v{} (instalada: v{})", remote_version, APP_VERSION));
+                    prompt_update_dialog(&win_p, &remote_version, &url, Some(r_lbl.clone()));
+                }
+                UpdateCheckStatus::UpToDate(v) => {
+                    r_lbl.set_text(&format!("✓ Constantine EDR v{} está en la última versión (GitHub: v{}).", APP_VERSION, v));
+                }
+                UpdateCheckStatus::Error(err) => {
+                    r_lbl.set_text(&format!("⚠️ {}", err));
+                }
+            }
             b_btn.set_sensitive(true);
             b_btn.set_label("🚀 Buscar y Aplicar Actualización de Constantine");
         });
@@ -8184,6 +8546,10 @@ fn build_ui(app: &Application) {
     btn_ref_all.set_hexpand(true);
     btns_audit_actions.append(&btn_ref_all);
 
+    let btn_purge_24h = Button::with_label("🧹 Borrar Registros > 24 Horas");
+    btn_purge_24h.add_css_class("destructive-action");
+    btns_audit_actions.append(&btn_purge_24h);
+
     let btn_export_report = Button::with_label("📑 Exportar Informe Forense Completo (HTML / PDF)");
     btn_export_report.add_css_class("suggested-action");
     btn_export_report.set_hexpand(true);
@@ -8206,6 +8572,33 @@ fn build_ui(app: &Application) {
         } else {
             rpt_lbl_c.set_text(&format!("⚠️ Error al generar informe: {}", path));
         }
+    });
+
+    let purge_lbl_c = lbl_report_status.clone();
+    let btn_purge_c = btn_purge_24h.clone();
+    let btn_ref_after_purge = btn_ref_all.clone();
+    btn_purge_24h.connect_clicked(move |_| {
+        let lbl = purge_lbl_c.clone();
+        let btn = btn_purge_c.clone();
+        let ref_btn = btn_ref_after_purge.clone();
+        btn.set_sensitive(false);
+        btn.set_label("⏳ Purgando registros > 24h...");
+        gtk4::glib::spawn_future_local(async move {
+            match run_blocking(|| ImmutableAuditLog::purge_older_than_24h()).await {
+                Ok(removed) => {
+                    lbl.set_text(&format!(
+                        "✓ Purga forense completada: {} registro(s) mayores a 24 horas eliminados (cadena SHA-256 re-sellada).",
+                        removed
+                    ));
+                    ref_btn.emit_clicked();
+                }
+                Err(e) => {
+                    lbl.set_text(&format!("⚠️ Error al purgar registros: {}", e));
+                }
+            }
+            btn.set_sensitive(true);
+            btn.set_label("🧹 Borrar Registros > 24 Horas");
+        });
     });
 
     log_box.append(&lcard);
@@ -8385,6 +8778,8 @@ fn build_ui(app: &Application) {
                                 "[RANSOMWARE / CANARY]"
                             } else if ev.contains("VAULT") || ev.contains("QUARANTINE") {
                                 "[BAÚL / VAULT]"
+                            } else if ev.starts_with("RAM_THREAT") || ev.starts_with("RAM_AUTO") {
+                                "[ALERTA RAM]"
                             } else if ev.contains("THREAT") || ev.contains("ALERT") || ev.contains("KILLED") {
                                 "[AMENAZA / DETECCIÓN]"
                             } else if ev.contains("AIDE") {
@@ -8727,6 +9122,21 @@ fn build_ui(app: &Application) {
             }
         });
         gtk4::glib::ControlFlow::Continue
+    });
+
+    let win_startup_up = window.clone();
+    let repo_lbl_startup = repo_status_lbl.clone();
+    gtk4::glib::spawn_future_local(async move {
+        if let UpdateCheckStatus::UpdateAvailable { remote_version, url } = run_blocking(|| SelfUpdater::check_remote_version()).await {
+            repo_lbl_startup.set_text(&format!("🚀 Nueva versión disponible en GitHub: v{} (instalada: v{})", remote_version, APP_VERSION));
+            SystemNotifier::notify(
+                "normal",
+                "software-update-available",
+                "Actualización de Constantine EDR",
+                &format!("Nueva versión v{} disponible en GitHub. Haz clic para actualizar.", remote_version),
+            );
+            prompt_update_dialog(&win_startup_up, &remote_version, &url, Some(repo_lbl_startup));
+        }
     });
 
     window.present();
