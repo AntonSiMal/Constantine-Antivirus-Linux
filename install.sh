@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Constantine Antivirus & EDR v5.5 - Instalador Automatizado (Debian / Ubuntu / Mint)
+# Constantine Antivirus & EDR v5.5.1 - Instalador Automatizado (Debian / Ubuntu / Mint)
 #
-# Novedades Anti-Ransomware en v5.5:
+# Novedades Anti-Ransomware en v5.5.1:
 # 1. Siembra de Señuelos Estratégicos (Canary Tripwires) en Desktop, Documents, Downloads y Pictures.
 # 2. Vigilancia Pasiva de Modificaciones y Borrados sobre Archivos Trampa.
 # 3. Detección de Ráfagas Anómalas de Cifrado y Entropía Elevada (H > 7.55).
@@ -125,7 +125,7 @@ progressbar progress { background-color: #0a84ff; border-radius: 6px; min-height
 EULA_LEGAL_TEXT = """ACUERDO DE LICENCIA DE USUARIO, EXENCIÓN TOTAL DE RESPONSABILIDAD Y ACEPTACIÓN EXPRESA DE RIESGOS
 
 1. TÉRMINOS Y LICENCIAS DE COMPONENTES DE CÓDIGO ABIERTO
-Constantine Antivirus & EDR v5.5 es un proyecto de software libre que orquesta e integra múltiples bibliotecas, demonios y motores de seguridad licenciados bajo términos GPLv2, GPLv3, Apache License 2.0 y MIT (incluyendo ClamAV, Tetragon, Falco, osquery, Wazuh, AIDE y YARA). Al instalar este software, usted acepta cumplir con cada una de las licencias correspondientes.
+Constantine Antivirus & EDR v5.5.1 es un proyecto de software libre que orquesta e integra múltiples bibliotecas, demonios y motores de seguridad licenciados bajo términos GPLv2, GPLv3, Apache License 2.0 y MIT (incluyendo ClamAV, Tetragon, Falco, osquery, Wazuh, AIDE y YARA). Al instalar este software, usted acepta cumplir con cada una de las licencias correspondientes.
 
 2. ACEPTACIÓN EXPRESA DE RIESGOS TÉCNICOS OPERATIVOS
 El usuario reconoce y acepta de manera explícita que Constantine opera a bajo nivel en el núcleo (kernel) del sistema operativo Linux, interactuando directamente mediante ganchos síncronos de fanotify, programas eBPF (Extended Berkeley Packet Filter), reglas de cortafuegos de bajo nivel (iptables / UFW), manipulación de atributos inmutables del sistema de archivos (chattr +i/+a) y reconfiguración de resolución DNS del sistema.
@@ -159,13 +159,13 @@ class InstallerWizard:
     def build_ui(self, app):
         if GTK_VER == 4:
             self.win = Gtk.ApplicationWindow(application=app)
-            self.win.set_title("Asistente de Instalación — Constantine Antivirus & EDR v5.5")
+            self.win.set_title("Asistente de Instalación — Constantine Antivirus & EDR v5.5.1")
             self.win.set_default_size(780, 540)
             provider = Gtk.CssProvider()
             provider.load_from_data(CSS)
             Gtk.StyleContext.add_provider_for_display(self.win.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         else:
-            self.win = Gtk.Window(title="Asistente de Instalación — Constantine Antivirus & EDR v5.5")
+            self.win = Gtk.Window(title="Asistente de Instalación — Constantine Antivirus & EDR v5.5.1")
             self.win.set_default_size(780, 540)
             self.win.set_position(Gtk.WindowPosition.CENTER)
             self.win.connect("destroy", Gtk.main_quit)
@@ -181,7 +181,7 @@ class InstallerWizard:
             main_box.set_border_width(20)
             self.win.add(main_box)
 
-        lbl_title = Gtk.Label(label="🛡️ Asistente de Instalación — Constantine EDR v5.5")
+        lbl_title = Gtk.Label(label="🛡️ Asistente de Instalación — Constantine EDR v5.5.1")
         lbl_title.set_xalign(0); lbl_title.get_style_context().add_class("title-banner")
         lbl_sub = Gtk.Label(label="Instalación desatendida con Escudo Anti-Ransomware (4 Capas), Multi-Motor Fail-Secure y Consola en Vivo")
         lbl_sub.set_xalign(0); lbl_sub.get_style_context().add_class("subtitle-banner")
@@ -243,7 +243,7 @@ class InstallerWizard:
             btn_box.pack_end(self.btn_start, False, False, 0); btn_box.pack_end(self.btn_cancel, False, False, 0)
             main_box.pack_start(btn_box, False, False, 4); self.win.show_all()
 
-        self.append_log("====================================================================\n 🛡️ ASISTENTE GRÁFICO CONSTANTINE ANTIVIRUS & EDR v5.5\n • Haz clic en 'Iniciar Instalación Automática' para comenzar.\n • Esta terminal integrada muestra en vivo cada comando y progreso.\n====================================================================\n\n")
+        self.append_log("====================================================================\n 🛡️ ASISTENTE GRÁFICO CONSTANTINE ANTIVIRUS & EDR v5.5.1\n • Haz clic en 'Iniciar Instalación Automática' para comenzar.\n • Esta terminal integrada muestra en vivo cada comando y progreso.\n====================================================================\n\n")
 
     def append_log(self, text):
         end_iter = self.buffer.get_end_iter()
@@ -328,7 +328,7 @@ if [ "$IS_BACKEND_WORKER" != true ]; then
     echo "===================================================================="
     echo " ⚖️ TÉRMINOS DE LICENCIA, ACEPTACIÓN DE RIESGOS Y EXENCIÓN DE RESPONSABILIDAD"
     echo "===================================================================="
-    echo "• Constantine Antivirus & EDR v5.5 se proporciona 'TAL CUAL' ('AS IS'), sin garantías."
+    echo "• Constantine Antivirus & EDR v5.5.1 se proporciona 'TAL CUAL' ('AS IS'), sin garantías."
     echo "• El software interactúa a bajo nivel con el kernel Linux (fanotify, eBPF, UFW, chattr)."
     echo "• Al continuar, usted acepta expresamente todos los riesgos operativos e incluso de"
     echo "  posible pérdida de datos o indisponibilidad del sistema."
@@ -411,13 +411,13 @@ get_all_human_users() {
 }
 
 echo "===================================================================="
-echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5 - ESCUDO ANTI-RANSOMWARE "
+echo " 🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.1 - ESCUDO ANTI-RANSOMWARE "
 echo " Canary Tripwires + Detección de Ráfagas + Neutralización Fulminante "
 echo "===================================================================="
 echo "[+] Usuario detectado: $REAL_USER"
 echo "[+] Ruta protegida en tiempo real: $USER_HOME"
 echo ""
-log_immutable_event "INSTALLATION_START" "Instalación de Constantine Antivirus & EDR v5.5 iniciada en el sistema."
+log_immutable_event "INSTALLATION_START" "Instalación de Constantine Antivirus & EDR v5.5.1 iniciada en el sistema."
 
 # 1. Comprobación Indispensable de Capacidades del Kernel
 echo "[1/19] Evaluando capacidades de kernel (CONFIG_FANOTIFY y CONFIG_FANOTIFY_ACCESS_PERMISSIONS)..."
@@ -592,7 +592,7 @@ if dpkg -l postfix clamav-daemon bsd-mailx 2>/dev/null | grep -qE '^(iF|iU|iW|iH
     DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true
 fi
 
-# [v5.5] Instalar soporte de atributos extendidos xattr (Mark-of-the-Web)
+# [v5.5.1] Instalar soporte de atributos extendidos xattr (Mark-of-the-Web)
 apt-get -o DPkg::Lock::Timeout=60 install -y -qq attr 2>/dev/null || true
 
 CLAMONACC_BIN=$(command -v clamonacc || which clamonacc || true)
@@ -882,6 +882,13 @@ cat <<'FALCOEOF' > /etc/falco/rules.d/constantine-exceptions.yaml
   output: Ignored trusted constantine action (user=%user.name command=%proc.cmdline file=%fd.name)
   priority: INFO
   tags: [constantine, exception, host]
+
+- rule: Trusted Cinnamon Screensaver PAM Action
+  desc: Ignore PAM file reads by cinnamon-screensaver-pam-helper during legitimate desktop lock/unlock authentication.
+  condition: (evt.type=openat or evt.type=openat2) and fd.name startswith /etc/pam.d and proc.name=cinnamon-screensaver-pam-helper
+  output: Ignored trusted cinnamon-screensaver PAM read (user=%user.name command=%proc.cmdline file=%fd.name)
+  priority: INFO
+  tags: [constantine, exception, host, desktop]
 FALCOEOF
 chmod 644 /etc/falco/rules.d/constantine-exceptions.yaml 2>/dev/null || true
 
@@ -900,7 +907,7 @@ cat <<'FALCOEOF' > /etc/falco/falco_rules.local.yaml
 # 2. Excepción para lectura de archivos confidenciales (/etc/shadow, /etc/pam.d/)
 #    Elimina falsos positivos de Wazuh Agent, GUFW y Constantine
 - macro: user_known_read_sensitive_files_activities
-  condition: (constantine_or_trusted_proc or (proc.name in (python3, python3.12, pkexec) and (proc.pname in (gufw, gufw-pkexec, constantine) or proc.cmdline contains "gufw" or proc.cmdline contains "constantine")))
+  condition: (constantine_or_trusted_proc or (proc.name=cinnamon-screensaver-pam-helper and fd.name startswith /etc/pam.d) or (proc.name in (python3, python3.12, pkexec) and (proc.pname in (gufw, gufw-pkexec, constantine) or proc.cmdline contains "gufw" or proc.cmdline contains "constantine")))
 
 # 3. Excepción para alteración de logs (Log files were tampered)
 #    Permite que GUFW y Constantine gestionen /var/log/gufw.log y sus registros
@@ -1702,7 +1709,7 @@ try:
     indicator.set_icon_full("constantine", "Constantine EDR Activo")
 
     menu = Gtk.Menu()
-    item_title = Gtk.MenuItem(label="🛡️ Constantine EDR v5.5 (Activo)")
+    item_title = Gtk.MenuItem(label="🛡️ Constantine EDR v5.5.1 (Activo)")
     item_title.set_sensitive(False)
     menu.append(item_title)
     menu.append(Gtk.SeparatorMenuItem())
@@ -1827,7 +1834,7 @@ chmod -R a+rX /var/lib/constantine/intelligence /var/lib/constantine/rules /var/
 touch /var/lib/constantine/.last_update && chmod 644 /var/lib/constantine/.last_update 2>/dev/null || true
 
 # 20. Compilación, Lanzador y Smoke Test de Validación Inicial
-echo "[19/19] Compilando Constantine v5.5 y ejecutando validación inicial de integridad..."
+echo "[19/19] Compilando Constantine v5.5.1 y ejecutando validación inicial de integridad..."
 cd "$SCRIPT_DIR"
 
 # Verificación de existencia de constantine.rs con búsqueda y autocopia inteligente
@@ -1915,7 +1922,7 @@ gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 cat <<EOF > /usr/share/applications/constantine.desktop
 [Desktop Entry]
 Name=Constantine Antivirus & EDR
-GenericName=Antivirus & EDR Debian v5.5
+GenericName=Antivirus & EDR Debian v5.5.1
 Comment=Protección EDR con Escudo Anti-Ransomware en 4 capas (Canary Tripwires, Ráfagas, SIGKILL y Forense)
 Exec=/usr/local/bin/constantine
 StartupNotify=true
@@ -2043,9 +2050,9 @@ if [ ! -f "$USER_HOME/.config/Thunar/uca.xml" ]; then
 <actions>
 <action>
     <icon>constantine</icon>
-    <name>Analizar con Constantine v5.5...</name>
+    <name>Analizar con Constantine v5.5.1...</name>
     <command>/usr/local/bin/constantine --scan-file %f</command>
-    <description>Escanear archivo o carpeta con Constantine Antivirus &amp; EDR v5.5</description>
+    <description>Escanear archivo o carpeta con Constantine Antivirus &amp; EDR v5.5.1</description>
     <patterns>*</patterns>
     <directories/>
     <audio-files/>
@@ -2107,7 +2114,7 @@ done
 
 # 4. Hook global de sesión para inicialización transparente de usuarios (/etc/profile.d/constantine-session.sh)
 cat <<'PROFEOF' > /etc/profile.d/constantine-session.sh
-# Constantine Antivirus & EDR v5.5 - Provisión Automática de Usuario
+# Constantine Antivirus & EDR v5.5.1 - Provisión Automática de Usuario
 if [ -n "$USER" ] && [ "$USER" != "root" ] && [ "$USER" != "nobody" ]; then
     # Auto-reparación de señuelos Canary si faltasen
     if [ -d "$HOME/Desktop" ] && [ ! -f "$HOME/Desktop/!000_canary_personal_vault.docx" ]; then
@@ -2157,6 +2164,7 @@ if [ "$SMOKE_PASS" = true ]; then
 # AUTODEFENSA DEL ANTIVIRUS (TAMPER PROTECTION) E INMUTABILIDAD DE ARCHIVOS
 # ==============================================================================
 echo "[18/19] Activando Autodefensa del Antivirus (Tamper Protection) e Inmutabilidad de Archivos..."
+chattr -i -a "$IMMUTABLE_LOG" "$WHITELIST_FILE" "$VAULT_KEY_FILE" 2>/dev/null || true
 touch "$IMMUTABLE_LOG" "$WHITELIST_FILE"
 chown root:constantine "$IMMUTABLE_LOG" "$WHITELIST_FILE" 2>/dev/null || true
 chmod 640 "$IMMUTABLE_LOG" "$WHITELIST_FILE" 2>/dev/null || true
@@ -2328,7 +2336,7 @@ fi
 echo ""
 echo "===================================================================="
 log_immutable_event "INSTALLATION_SUCCESS" "Instalación completada y verificada: 16 módulos de seguridad y auditoría inmutable activos."
-echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v5.5 COMPLETADA Y VERIFICADA "
+echo " 🎉 INSTALACIÓN DE CONSTANTINE EDR v5.5.1 COMPLETADA Y VERIFICADA "
 echo "===================================================================="
 echo " • TODOS LOS MÓDULOS EN EJECUCIÓN: Tetragon, Falco, ClamOnAcc, Daemon y Timers"
 echo " • ESCUDO ANTI-RANSOMWARE: 4 Señuelos Canary Tripwires Activos"
@@ -2341,7 +2349,7 @@ echo ""
 # EJECUCIÓN FINAL AUTOMÁTICA DE CONSTANTINE PARA EL USUARIO
 # ==============================================================================
 echo "===================================================================="
-echo " 🚀 INICIANDO CONSTANTINE ANTIVIRUS & EDR v5.5 EN PANTALLA"
+echo " 🚀 INICIANDO CONSTANTINE ANTIVIRUS & EDR v5.5.1 EN PANTALLA"
 echo "===================================================================="
 echo "[+] Preparando entorno gráfico para el usuario '$REAL_USER'..."
 

@@ -1,216 +1,244 @@
+# &lt;p align=&quot;center&quot;&gt;🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5&lt;/p&gt;
 
-<p align="center">
-  <h1 align="center">Constantine EDR</h1>
-  <p align="center" style="font-size: 1.2em; color: #666;">
-    La suite de seguridad más avanzada para Linux.<br>
-    Diseñada en Rust. Integrada en el Kernel. Invisible para ti, impenetrable para ellos.
-  </p>
-</p>
+&lt;p align=&quot;center&quot;&gt;
+  &lt;strong&gt;La primera suite EDR nativa en Rust con intercepción en Kernel (eBPF + fanotify) diseñada para el escritorio Linux.&lt;/strong&gt;
+&lt;/p&gt;
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.70+-black?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/GPL_3.0-Open_Source-black?style=flat-square" alt="License">
-  <img src="https://img.shields.io/badge/Linux-Debian_%7C_Ubuntu_%7C_Mint-black?style=flat-square&logo=linux" alt="Linux">
-  <img src="https://img.shields.io/badge/GTK4-Cupertino-black?style=flat-square&logo=gnome" alt="GTK4">
-  <img src="https://img.shields.io/badge/Kernel-eBPF_%7C_fanotify-black?style=flat-square" alt="Kernel">
-</p>
-
-<p align="center">
-  <em>0% Telemetría. 100% Soberanía. 16 Motores. 1 Suite.</em>
-</p>
+&lt;p align=&quot;center&quot;&gt;
+  &lt;a href=&quot;https://www.rust-lang.org/&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/Language-Rust_1.70+-orange.svg?style=for-the-badge&amp;logo=rust&quot; alt=&quot;Rust&quot;&gt;&lt;/a&gt;
+  &lt;a href=&quot;https://gtk.org/&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/GUI-GTK4_Cupertino-blue.svg?style=for-the-badge&amp;logo=gnome&quot; alt=&quot;GTK4&quot;&gt;&lt;/a&gt;
+  &lt;a href=&quot;https://ebpf.io/&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/Kernel-eBPF_LSM_+_fanotify-red.svg?style=for-the-badge&amp;logo=linux&quot; alt=&quot;eBPF&quot;&gt;&lt;/a&gt;
+  &lt;a href=&quot;https://www.gnu.org/licenses/gpl-3.0&quot;&gt;&lt;img src=&quot;https://img.shields.io/badge/License-GPL_v3.0-green.svg?style=for-the-badge&quot; alt=&quot;GPL-3.0&quot;&gt;&lt;/a&gt;
+  &lt;img src=&quot;https://img.shields.io/badge/Telemetry-0%25_Soberano-purple.svg?style=for-the-badge&quot; alt=&quot;Zero Telemetry&quot;&gt;
+  &lt;img src=&quot;https://img.shields.io/badge/Platform-Debian_%7C_Ubuntu_%7C_Mint-lightgrey.svg?style=for-the-badge&amp;logo=debian&quot; alt=&quot;Distros&quot;&gt;
+&lt;/p&gt;
 
 ---
 
-## Seguridad. Redefinida.
+## ⚡ En 30 Segundos: ¿Por qué existe Constantine?
 
-Durante años, la seguridad en el escritorio Linux ha exigido compromisos. O sacrificas rendimiento con escaneos lentos, o sacrificas protección con herramientas reactivas. Constantine elimina esa elección.
+Durante décadas, la seguridad en el escritorio Linux ha estado fragmentada entre **scripts en terminal** que nadie ejecuta periódicamente o **interfaces anticuadas** sobre ClamAV que escanean el disco después de que el malware ya se ha ejecutado. Mientras tanto, en Windows y macOS, suites comerciales ofrecen protección preventiva en tiempo real, control de periféricos y defensas anti-ransomware de fábrica.
 
-Ofrecemos protección preventiva en tiempo real con **16 motores integrados**, control de periféricos, defensa anti-ransomware de 4 capas y un dashboard ejecutivo que se siente como en casa.
-
----
-
-## Potente. Elegante. Invisible.
-
-### 🛡️ Intercepción preventiva en el Kernel
-Constantine no espera a que el malware se ejecute. Mediante `eBPF LSM` (Cilium Tetragon) y `fanotify` (ClamOnAcc), interceptamos y neutralizamos las amenazas en milisegundos, antes de que toquen el disco o la memoria.
-
-### 🧬 Escudo Anti-Ransomware en 4 Capas
-Una defensa matemática y conductual contra el cifrado hostil:
-1. **Canary Tripwires:** Archivos trampa invisibles sembrados en `~/Desktop`, `~/Documents`, `~/Downloads` y `~/Pictures` para todos los usuarios del sistema.
-2. **Detección de Ráfagas:** Análisis de patrones masivos de renombrado en ventanas de 3 segundos.
-3. **Entropía de Shannon ($H > 7.55$):** Diferenciación matemática entre compresión legítima y cifrado hostil.
-4. **Aislamiento Atómico:** Congelación instantánea (`SIGSTOP`), terminación (`SIGKILL`) y cuarentena en baúl AES-256-GCM.
-
-### 🔒 Privacidad por diseño
-Tu privacidad es un derecho fundamental. Constantine no recoge datos, no envía telemetría y no depende de la nube. Tu código, tus reglas, tu máquina. Los registros forenses se almacenan localmente con una **cadena criptográfica SHA-256 inmutable** que hace imposible la alteración sin ser detectada.
-
-### 🎯 Pipeline Multi-Motor Fail-Secure
-Cada archivo pasa por una evaluación rigurosa donde el fallo de un motor se cataloga como `INDETERMINADO` —jamás se asume limpio sin análisis completo—:
-- **ClamAV** (socket multihilo)
-- **YARA** (reglas verificadas)
-- **YARA-X** (VirusTotal en Rust)
-- **Heurística** (entropía + extensiones)
-- **Inteligencia de Amenazas** (MISP, MalwareBazaar, ThreatFox, URLhaus, OpenPhish, StevenBlack)
-
-### ✨ Una interfaz que se siente como en casa
-Un dashboard unificado en **GTK4 con estética Cupertino**. Desde portátiles compactos (800x600) hasta monitores 4K, la operación es fluida, intuitiva y no requiere contraseñas de `sudo` para el uso diario gracias a políticas Polkit y Sudoers finamente ajustadas.
+**Constantine Antivirus & EDR** cambia las reglas del juego:
+1. **Intercepción Preventiva Real en Kernel**: Bloquea el malware mediante `fanotify` y políticas `eBPF LSM` en milisegundos *antes* de que el archivo toque el disco o se ejecute.
+2. **Autodefensa en Kernel (*Tamper Protection*)**: Ni siquiera un atacante con permisos `root` puede detener a Constantine con `kill -9` o `systemctl stop`.
+3. **Escudo Anti-Ransomware Fulminante**: Detección de ráfagas, señuelos trampa (*Canary Tripwires*) y análisis matemático de entropía de Shannon ($H > 7.55$) que neutralizan el proceso agresor en caliente.
+4. **Experiencia de Usuario macOS Cupertino en GTK4**: Dashboard interactivo con KPIs de salud, modo oscuro adaptable desde pantallas de **800x600** hasta monitores 4K y operación diaria sin contraseñas de `sudo`.
+5. **Privacidad Radical y Cero Telemetría**: 100% código abierto, soberano y auditable; tus datos y registros forenses jamás salen de tu máquina.
 
 ---
 
-## Tu seguridad, de un vistazo.
+## 📊 Dashboard Ejecutivo en Vivo (KPIs y Telemetría)
 
-El dashboard de Constantine está diseñado para que un solo vistazo te diga todo lo que necesitas saber. Sin ruido, solo información accionable.
+Constantine v5.5 estrena una interfaz unificada donde cada aspecto de la seguridad de tu estación de trabajo es visible y accionable de un vistazo:
 
-<img width="1173" height="606" alt="Captura de pantalla de 2026-11-11 09-57-00" src="https://github.com/user-attachments/assets/de7392cc-b11e-433a-a4f4-55b907738c8e" />
-
-
-## Arquitectura Multicapa Fail-Secure.
-
-Constantine no es un simple script. Es una arquitectura cliente-servidor empresarial donde el demonio con privilegios root (`constantine-daemon`) expone un socket IPC seguro (`/run/constantine.sock`) a la interfaz gráfica.
-<img width="2752" height="1536" alt="Gemini_Generated_Image_3zon5z3zon5z3zon" src="https://github.com/user-attachments/assets/fb800142-224d-4914-bbd3-cbe2fd04237c" />
-
-
-**Política Fail-Secure estricta:** Si durante la instalación o ejecución un módulo crítico falla, el sistema revierte limpiamente todos los cambios para no dejar residuos ni un estado de falsa seguridad.
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ 🛡️ CONSTANTINE EDR v5.5   [🛑 Apagar]  [⏸️ Pausar Escudos]  [🗑️ Desinstalar]  [● Salud: 100%] │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐ ┌────────────────────┐   │
+│ │ 📦 CUARENTENA    │ │ 📋 LISTA BLANCA  │ │ 🔍 ESCUDOS       │ │ 🧬 ANTI-RANSOMWARE │   │
+│ │   0 Muestras     │ │   14 Hashes      │ │   fanotify+eBPF  │ │   4/4 Intactos     │   │
+│ │ Baúl AES-256-GCM │ │ Reglas SHA-256   │ │ Vigilando /home  │ │ Tripwires Activos  │   │
+│ └──────────────────┘ └──────────────────┘ └──────────────────┘ └────────────────────┘   │
+│                                                                                        │
+│ ┌────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ 🔄 Estado de Actualizaciones del Sistema y del Kernel Linux                        │ │
+│ │ Kernel activo: 6.8.0-generic | 🟢 Kernel y Sistema completamente al día             │ │
+│ │ 0 parches críticos pendientes                               [🚀 Abrir Actualizador]│ │
+│ └────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                        │
+│ ┌────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ 🛡️ Salud Operativa Global del EDR: 100% (10/10 Controles Activos)                  │ │
+│ │ [██████████████████████████████████████████████████] [🔍 Ver Desglose para el 100%] │ │
+│ └────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                        │
+│ ⚙️ Matriz de Sensores en Kernel:                                                       │
+│   • 1. fanotify (ClamOnAcc): 🟢 Activo en /home      • 6. Registro Forense: 🟢 SHA-256 Chain   │
+│   • 2. Canary Anti-Ransomware: 🟢 4 Señuelos         • 7. Escudo USB: 🟢 Plug & Play Activo   │
+│   • 3. Sensor eBPF Tetragon: 🟢 LSM Hook Activo      • 8. DNS Sinkhole: 🟢 78,240 Dominios     │
+│   • 4. Periféricos (Cámara/Mic): 🟢 V4L2 Blindado    • 9. Tamper Protection: 🟢 Anti-Kill +i   │
+│   • 5. Filtros de Red (UFW): 🟢 Perímetro Activo    • 10. Modo Juego / DND: 🟢 Listo / DND    │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Los 16 Motores. Sincronizados.
+## 🏛️ Arquitectura Multicapa Fail-Secure
 
-| # | Módulo | Función |
-| :--- | :--- | :--- |
-| 1 | **ClamOnAcc (fanotify)** | Intercepción síncrona en kernel al abrir archivos |
-| 2 | **Tetragon (Cilium eBPF)** | Sensor EDR principal con LSM Hooks y Anti-Kill |
-| 3 | **Falco** | Detección de comportamiento anómalo (CNCF) |
-| 4 | **Wazuh Agent** | SIEM, FIM (syscheck) y telemetría |
-| 5 | **ClamAV (clamd)** | Motor de firmas multihilo vía socket UNIX |
-| 6 | **YARA** | Análisis estático con reglas verificadas |
-| 7 | **YARA-X** | Motor de VirusTotal reescrito en Rust |
-| 8 | **osquery** | Consultas SQL del sistema en tiempo real |
-| 9 | **AIDE** | Verificación criptográfica de integridad (FIM) |
-| 10 | **StevenBlack Hosts** | Base comunitaria anti-phishing y malware |
-| 11-14 | **Feeds TI (MISP, Bazaar, Fox, URLhaus)** | IoCs en tiempo real de Abuse.ch y CERTs |
-| 15 | **Sigma Rules** | Detección genérica de amenazas para Linux |
-| 16 | **YARA-Rules Comunitarias** | Repositorio oficial de reglas abiertas |
+```
+                     ┌────────────────────────────────────────────────────────┐
+                     │       Constantine GUI (GTK4 Cupertino Responsive)      │
+                     │        [800x600 - 4K | Cero Contraseñas de Usuario]     │
+                     └───────────────────────────┬────────────────────────────┘
+                                                 │ IPC Unix Socket / D-Bus
+                     ┌───────────────────────────▼────────────────────────────┐
+                     │           constantine-daemon (Root Supervisor)         │
+                     └──────────┬─────────────────┬─────────────────┬─────────┘
+                                │                 │                 │
+    ┌───────────────────────────▼──┐  ┌───────────▼────────────┐  ┌─▼──────────────────────┐
+    │    Capa Kernel & eBPF        │  │  Motores & Feeds TI    │  │  Hardware y Red        │
+    ├──────────────────────────────┤  ├────────────────────────┤  ├────────────────────────┤
+    │ • fanotify (ClamOnAcc)       │  │ • ClamAV Socket Multihilo│ • UDisks2 (Plug & Play) │
+    │ • Tetragon LSM Hooks (eBPF)  │  │ • YARA & YARA-X Rust   │  │ • V4L2 Webcam Guard    │
+    │ • Falco Behavioral Engine    │  │ • AIDE & Sigma Rules   │  │ • pactl Hardware Mute  │
+    │ • Tamper Protection Anti-Kill│  │ • Feeds MISP/Abuse.ch  │  │ • Sumidero DNS 0.0.0.0 │
+    │ • Hash Chain SHA-256 Log     │  │ • Baúl AES-256-GCM     │  │ • Conexiones ss / UFW  │
+    └──────────────────────────────┘  └────────────────────────┘  └────────────────────────┘
+```
 
 ---
 
-## Constantine vs. El resto.
+## 🌟 Capacidades de Seguridad de Nueva Generación
 
-| Característica | Soluciones Linux Tradicionales | Suites Propietarias | **Constantine EDR** |
+### 1. 🧬 Escudo Anti-Ransomware en 4 Fases Fulminantes
+* **Canary Tripwires Invisibles:** Se siembran archivos trampa señuelo en ubicaciones estratégicas del usuario (`Escritorio`, `Documentos`, `Descargas`, `Imágenes`). Cualquier interacción no autorizada dispara una respuesta en milisegundos.
+* **Supervisión de Ráfagas:** Algoritmo que detecta patrones masivos de renombrado o modificación rápida de ficheros.
+* **Entropía de Shannon en Tiempo Real:** Evalúa el nivel de aleatoriedad criptográfica ($H > 7.55$) para diferenciar compresión normal de cifrado hostil.
+* **Terminación Atómica Fulminante:** Envía `kill -STOP` (congelamiento instantáneo de memoria para preservar el binario agresor) seguido de `kill -KILL` y aislamiento de red perimetral mediante UFW.
+
+### 2. 🛡️ Autodefensa del EDR en Kernel (*Tamper Protection*)
+* **Anti-Kill eBPF (Cilium Tetragon):** Intercepta llamadas `sys_kill` en el kernel. Un malware con privilegios `root` no puede matar los procesos de Constantine ni sus sensores.
+* **Inmutabilidad Criptográfica de Archivos:** Las claves maestras (`.vault.key`), la lista blanca y el historial forense están protegidos con atributos inmutables (`chattr +i` y `chattr +a`).
+
+### 3. 📥 Cuarentena Preventiva de Descargas (*Mark-of-the-Web*)
+* **Inspección Automática en Entrada:** Vigilancia asíncrona sobre las carpetas de descargas (`~/Downloads` y `~/Descargas`).
+* **Marcado de Metadatos Extendidos (`xattr`):** Aplica la marca de procedencia `user.constantine.quarantine`.
+* **Retiro Preventivo de Ejecución:** Si se descarga un binario ELF, script Shell o instalador, retira preventivamente el permiso de ejecución (`chmod a-x`) para impedir la infección por doble clic accidental antes de que los motores lo verifiquen.
+
+### 4. 👥 Arquitectura Multiusuario Nativa (*Zero-Touch*)
+* **Protección Universal Simultánea:** Detecta dinámicamente a todos los usuarios humanos del sistema (`UID >= 1000`) y los integra en el grupo `constantine`.
+* **Nacimiento Protegido para Nuevos Usuarios:** Mediante la plantilla maestra `/etc/skel` y `/etc/adduser.conf`, **todo nuevo usuario que se cree en la máquina nace protegido de forma transparente**: con sus señuelos sembrados, autostart y acceso directo listos.
+
+### 5. 🌐 Sumidero DNS Anti-Phishing & Protección Web
+* **Bloqueo Local a 0.0.0.0:** Bloquea más de 78,000 dominios de phishing, malware y servidores C2 directamente en `/etc/hosts`, transparente para cualquier navegador web (Firefox, Chrome, Brave) sin consumir CPU.
+* **Purga Automática de Caché:** Limpieza automática de cachés en `systemd-resolved`, `resolvectl`, `nscd` y `dnsmasq`.
+
+### 6. 🔒 Privacidad y Control de Hardware
+* **Kill-Switch V4L2 de Cámara:** Bloqueo de dispositivos de vídeo (`chmod 000 /dev/video*` y `fuser -k`) contra spyware y troyanos de acceso remoto (RAT).
+* **Silenciamiento de Micrófono:** Control por hardware del subsistema de audio para evitar grabaciones clandestinas.
+* **Escudo USB Reactivo (UDisks2):** Detección e inspección inmediata de unidades extraíbles al insertarse.
+
+### 7. 📜 Auditoría Forense Inmutable (*Blockchain Ledger*)
+* **Encadenamiento Criptográfico SHA-256:** Cada evento registrado contiene el hash del evento anterior:
+  $$\text{Hash}_n = \text{SHA-256}(\text{Hash}_{n-1} \parallel \text{Timestamp} \parallel \text{Evento} \parallel \text{Detalles})$$
+  Cualquier intento de alteración rompe la cadena matemática y genera una alarma pericial crítica.
+* **Exportación de Informes:** Generación de informes forenses completos en HTML listos para imprimir o convertir a PDF.
+
+---
+
+## 💎 Comparativa: Constantine vs Otras Soluciones
+
+| Característica | Antivirus Tradicionales en Linux (ClamTk, Chkrootkit) | Suites Propietarias en Windows/Mac (Defender, Bitdefender) | Constantine Antivirus & EDR v5.5 |
 | :--- | :--- | :--- | :--- |
-| **Protección** | Reactiva (bajo demanda) | Preventiva, pero cerrada | **Preventiva, nativa y abierta** |
-| **Autoprotección** | Inexistente (`root` la anula) | Controladores propietarios | **Políticas eBPF LSM + `chattr +i`** |
-| **Anti-Ransomware** | Ninguna | Heurística en nube | **4 Capas: Canary + Ráfagas + Entropía + SIGKILL** |
-| **Filtrado Web** | Requiere extensiones | Proxy local propietario | **Sumidero DNS local (0.0.0.0) transparente** |
-| **Rendimiento** | Escaneos que congelan CPU | Alto uso de RAM y telemetría | **Rust nativo, ligero, responsivo** |
-| **Periféricos** | No disponible | Notificaciones simples | **Kill-Switch V4L2 + Silenciamiento de Mic** |
-| **Registro** | Texto plano manipulable | Envío a servidores externos | **Hash-chaining SHA-256 inmutable** |
-| **Privacidad** | Variable | Propietario con cobro | **100% local. Cero telemetría.** |
+| **Enfoque de Operación** | Escaneos estáticos bajo demanda | Protección interactiva de escritorio | **Protección EDR interactiva en Kernel nativa para Linux** |
+| **Autodefensa en Kernel** | ❌ Inexistente (`root` lo detiene) | ✔️ Controladores propietarios ELAM | **✔️ Políticas eBPF LSM (Tetragon Anti-Kill)** |
+| **Defensa Anti-Ransomware** | ❌ Ninguna (detecta firmas tarde) | ✔️ Detección heurística en nube | **✔️ 4 Capas: Señuelos, Entropía $H > 7.55$, SIGKILL** |
+| **Filtrado Web y Phishing** | ❌ Requiere extensiones de navegador | ✔️ Proxy local propietario | **✔️ Sumidero DNS local (0.0.0.0) transparente y sin plugins** |
+| **Rendimiento e Impacto** | ⚠️ Escaneos lentos que congelan CPU | ⚠️ Alto uso de RAM y telemetría | **✔️ Rust nativo, ligero, responsivo (800x600 - 4K)** |
+| **Custodia de Periféricos** | ❌ No disponible | ✔️ Notificaciones simples | **✔️ Kill-Switch V4L2 de cámara web y silenciamiento de micrófono** |
+| **Registro de Eventos** | ❌ Texto plano manipulable por root | ⚠️ Envío forzado a servidores externos | **✔️ Cadena criptográfica SHA-256 inmutable (`chattr +i/+a`)** |
+| **Soberanía y Privacidad** | Abierto pero desintegrado | Propietario con cobro recurrente | **100% Código Abierto (GPL-3.0), Soberano y Sin Telemetría** |
 
 ---
 
-## Capacidades de Nueva Generación.
+## 📋 Requisitos del Sistema
 
-### 📥 Cuarentena Preventiva de Descargas (Mark-of-the-Web)
-Vigilancia asíncrona sobre `~/Downloads` y `~/Descargas`. Aplica metadatos extendidos (`xattr`) y retira preventivamente el permiso de ejecución (`chmod a-x`) a binarios recién descargados, impidiendo infecciones por doble clic accidental.
-
-### 👥 Arquitectura Multiusuario Nativa
-Detecta dinámicamente a todos los usuarios humanos (`UID >= 1000`) y los integra en el grupo `constantine`. Mediante `/etc/skel`, **todo nuevo usuario nace protegido**: con señuelos sembrados, autostart y accesos directos listos.
-
-### 🌐 Sumidero DNS y Perfiles Seguros
-Bloquea más de 78,000 dominios de phishing y C2 directamente en `/etc/hosts`. Incluye perfiles DNS preconfigurados de **Quad9, Mullvad (7 variantes) y Cloudflare** aplicables con un clic a la interfaz activa vía `resolvectl` y `nmcli`.
-
-### 🔒 Custodia de Periféricos
-- **Kill-Switch V4L2:** Bloqueo por hardware de cámaras (`chmod 000 /dev/video*`).
-- **Silenciamiento de Micrófono:** Control vía `pactl` y `amixer` sin afectar la salida de audio.
-- **Escudo USB Reactivo:** Análisis automático Plug & Play al insertar unidades (vía D-Bus UDisks2).
-
-### 🚨 Aislamiento de Red (Kill-Switch EDR)
-Contención de emergencia que corta todo el tráfico exterior mediante `iptables`, manteniendo solo el bucle local (`lo`). Ideal para neutralizar exfiltraciones o ransomware en curso.
-
-### 📜 Auditoría Forense Inmutable
-Cada evento se encadena criptográficamente:
-$$\text{Hash}_n = \text{SHA-256}(\text{Hash}_{n-1} \parallel \text{Timestamp} \parallel \text{Evento} \parallel \text{Detalles})$$
-Cualquier alteración rompe la cadena y genera una alarma pericial crítica. Exportable a informes HTML ejecutivos.
+* **Distribuciones Oficiales:** Debian 12 (Bookworm) o superior, Ubuntu 22.04 / 24.04 LTS, Linux Mint 21 o superior.
+* **Kernel de Linux:** v5.8+ con `CONFIG_FANOTIFY=y`, `CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y` y `CONFIG_BPF=y`.
+* **Entorno de Compilación:** Rust 1.70+ con Cargo (`rustup`).
+* **Resolución Soportada:** Totalmente fluido desde pantallas compactas de **800 x 600** hasta monitores de alta resolución 4K.
 
 ---
 
-## Requisitos del Sistema.
+## 🚀 Instalación en 1 Comando
 
-- **Sistema Operativo:** Debian 12+, Ubuntu 22.04/24.04 LTS, o Linux Mint 21+.
-- **Kernel:** Linux 5.8+ (con `CONFIG_FANOTIFY=y`, `CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y` y `CONFIG_BPF=y`).
-- **Entorno:** Rust 1.70+ (Cargo) y librerías GTK4.
-- **Hardware:** Fluido desde 800x600 hasta 4K.
-
----
-
-## Instalación en un solo paso.<p align="center">
-
-```text
-1. Clona el repositorio:
+1. Clona el repositorio oficial:
    ```bash
    git clone https://github.com/tonsimaltine-Antivirus-Linux
    cd tonsimaltine-Antivirus-Linux
    ```
 
-2. Ejecuta el instalador:
+2. Lanza el instalador inteligente automatizado:
    ```bash
    sudo ./install.sh
    ```
 
-El asistente gráfico (o CLI en servidores) se encargará de todo:
-- ✅ Verificación y actualización automática de la toolchain de Rust.
-- ✅ Aceptación transparente de licencia y exención de riesgos.
-- ✅ Instalación de los 16 motores, dependencias y feeds de inteligencia.
-- ✅ Siembra de señuelos Canary para todos los usuarios (presentes y futuros).
-- ✅ Configuración de Polkit, Sudoers, D-Bus y temporizadores systemd.
-- ✅ Compilación optimizada y apertura automática del EDR.
-- ✅ **Política Fail-Secure:** Si un módulo falla, revierte todo limpiamente.
+El asistente gráfico (o CLI en terminales puras) se encargará de todo:
+- ✅ Aceptación transparente de la licencia y exención de riesgos operativos.
+- ✅ Verificación y configuración del compilador Rust.
+- ✅ Descarga de dependencias del sistema y librerías GTK4.
+- ✅ Carga de sondas eBPF (Tetragon, Falco) y configuración de ClamOnAcc (`fanotify`).
+- ✅ Siembra de señuelos *Canary Tripwires* para todos los usuarios actuales y futuros.
+- ✅ Verificación estricta de 10 módulos en vivo con política *Fail-Secure* (si un componente falla, revierte todo limpiamente).
+- ✅ Compilación optimizada del ejecutable y apertura automática del EDR en tu pantalla.
 
 ---
 
-## Uso Diario. Simplemente funciona.
+## 💻 Uso y Operación
 
-### Interfaz Gráfica
-Abre Constantine desde el menú de aplicaciones o ejecuta `constantine` en tu terminal.
-
-### Operación por Línea de Comandos (Headless)
+### Apertura de la Interfaz
+Abre Constantine desde el menú de aplicaciones de tu escritorio (GNOME, Cinnamon, XFCE), mediante el icono en el Escritorio, o simplemente ejecutando:
 ```bash
-constantine --daemon          # Modo demonio en segundo plano
-constantine --scan-quick      # Análisis rápido de zonas críticas
-constantine --scan-full       # Análisis exhaustivo del sistema
-constantine --scan-file /ruta # Análisis bajo demanda
+constantine
 ```
 
-### Integración Nativa
-- **Menú Contextual:** Clic derecho en Nautilus, Nemo, Thunar o Dolphin para "Analizar con Constantine".
-- **Bandeja del Sistema:** Icono de estado junto al reloj con accesos rápidos.
-- **Temporizadores:** Análisis diario (02:00 AM) y semanal (Domingos 03:00 AM) con prioridad I/O baja y guardia de batería (`ConditionACPower=true`).
+### Controles de Servicio y Escudos en la Interfaz
+* **⏸️ Pausar Escudos / ▶️ Activar Escudos**: Pausa en caliente todos los sensores en kernel (`ClamOnAcc`, `Tetragon`, `Falco`, `Wazuh`, filtrado DNS) solicitando contraseña de administrador, permitiéndote reanudarlos con un solo clic.
+* **🛑 Apagar**: Cierre y detención definitiva autorizada con contraseña de root.
+* **🗑️ Desinstalar (Flujo en 3 Clics con Disuasión)**: Sistema deliberado de advertencia contra desinstalaciones impulsivas que requiere 3 pasos conscientes para purgar la suite.
+
+### Operación por Línea de Comandos (CLI / Headless)
+```bash
+# Ejecutar en modo demonio de fondo sin interfaz gráfica
+constantine --daemon
+
+# Analizar un archivo o directorio específico bajo demanda
+constantine --scan-file "/ruta/al/archivo_o_carpeta"
+
+# Ejecutar análisis rápido programado
+constantine --scan-quick
+
+# Ejecutar análisis exhaustivo de todo el sistema
+constantine --scan-full
+
+# Diálogo interactivo de amenaza en el escritorio
+constantine --threat-dialog "Malware.Name" "/ruta/al/archivo" 1234 "MotorClamAV"
+```
 
 ---
 
-## Desinstalación Limpia. Sin dejar rastro.
+## 🛑 Desinstalación Limpia con Cero Huella Residual
 
-Si decides que Constantine ya no es para ti, respetamos tu elección. Nuestro desinstalador garantiza una reversión total y absoluta del sistema operativo a su estado original.
-
+Si alguna vez decides desinstalar Constantine, el desinstalador oficial garantiza la reversión total y absoluta de cada cambio en el sistema operativo:
 ```bash
 sudo ./uninstall.sh
 ```
-
-O desde la interfaz gráfica mediante el **flujo deliberado de 3 clics** con disuasión y autenticación obligatoria. Esto elimina sondas del kernel, restaura archivos de configuración, limpia reglas de red, retira señuelos en todos los idiomas y borra cada rastro de la aplicación.
-
----
-
-## Reconocimientos.
-
-Constantine se construye sobre los hombros de gigantes. Agradecemos profundamente a las comunidades de código abierto que hacen esto posible:
-
-[Cilium Tetragon](https://tetragon.io/) · [Falco](https://falco.org/) · [ClamAV](https://www.clamav.net/) · [VirusTotal YARA-X](https://github.com/VirusTotal/yara-x) · [Wazuh](https://wazuh.com/) · [osquery](https://osquery.io/) · [AIDE](https://aide.github.io/) · [SigmaHQ](https://github.com/SigmaHQ/sigma) · [StevenBlack Hosts](https://github.com/StevenBlack/hosts) · [Abuse.ch](https://abuse.ch/) · [GTK](https://gtk.org/)
+* **Libera ganchos en el kernel**: Detiene y desvincula `fanotify`, `eBPF LSM` y sensores de comportamiento.
+* **Restaura archivos base**: Recupera la configuración original de `clamd.conf`, retira el bloque de `/etc/hosts` y limpia reglas de UFW.
+* **Elimina señuelos en todos los idiomas**: Pasa una búsqueda profunda en `/home` y `/etc/skel` eliminando señuelos Canary en cualquier idioma (`Desktop`, `Escritorio`, `Downloads`, `Descargas`, etc.).
+* **Elimina el grupo y las carpetas**: Borra el grupo del sistema `constantine`, binarios en `/usr/local/bin/`, políticas Polkit, reglas Sudoers y cualquier carpeta vacía residual.
 
 ---
 
-## Licencia y Exención de Responsabilidad.
+## 🤝 Reconocimiento a la Comunidad de Código Abierto
 
-Distribuido bajo la licencia **GNU General Public License v3.0 (GPL-3.0)**.
+Constantine Antivirus & EDR se construye sobre los hombros de gigantes. Reconocemos y agradecemos el trabajo de los proyectos fundamentales que hacen posible este ecosistema:
 
-> **Aviso:** Constantine interactúa a bajo nivel con el kernel Linux mediante `fanotify`, `eBPF`, `chattr` y `iptables`. El software se proporciona "TAL CUAL" (*AS IS*), sin garantías de ningún tipo. Al instalarlo, el usuario asume los riesgos técnicos inherentes a la administración avanzada del sistema operativo.
+* [**Cilium Tetragon**](https://tetragon.io/) – Sensor principal de observabilidad y seguridad en kernel con eBPF LSM.
+* [**Falco Security**](https://falco.org/) – Motor de detección de anomalías y comportamiento en tiempo de ejecución (CNCF).
+* [**ClamAV & ClamOnAcc**](https://www.clamav.net/) – Motor de firmas antivirus y prevención en acceso mediante `fanotify`.
+* [**VirusTotal YARA & YARA-X**](https://github.com/VirusTotal/yara-x) – El estándar para la identificación de patrones de malware en Rust.
+* [**Wazuh**](https://wazuh.com/) – Monitorización de integridad de ficheros (FIM) y telemetría SIEM.
+* [**AIDE**](https://aide.github.io/) – Verificador de línea base criptográfica del sistema.
+* [**StevenBlack Hosts**](https://github.com/StevenBlack/hosts) – Base comunitaria consolidada contra malware y phishing.
+* [**Abuse.ch (MalwareBazaar, ThreatFox, URLhaus)**](https://abuse.ch/) – Inteligencia comunitaria de amenazas e IoCs en tiempo real.
+* [**GTK4 & GNOME Foundation**](https://gtk.org/) – Toolkit gráfico moderno, fluido y responsivo.
+
+---
+
+## 📄 Licencia y Exención de Responsabilidad
+
+Distribuido bajo la licencia **GNU General Public License v3.0 (GPL-3.0)**. Consulta el archivo `LICENSE` para el texto completo.
+
+> **Aviso de responsabilidad**: Constantine interactúa a bajo nivel con el kernel Linux mediante controladores de seguridad (`fanotify`, `eBPF`, `chattr`). El software se proporciona "TAL CUAL" (*AS IS*), sin garantías de ningún tipo. Al instalarlo, el usuario asume los riesgos técnicos inherentes a la administración de bajo nivel del sistema operativo.

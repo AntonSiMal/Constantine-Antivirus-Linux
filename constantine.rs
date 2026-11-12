@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v5.5.3 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.3)
+// Constantine Antivirus & EDR v5.5.4 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.4)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -1188,6 +1188,74 @@ impl ImmutableAuditLog {
         Some(days * 86400 + hh * 3600 + mm * 60 + ss)
     }
 
+    pub fn local_tz_offset_secs() -> i64 {
+        if let Ok(out) = Command::new("date").arg("+%z").output() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.len() >= 5 {
+                let sign: i64 = if s.starts_with('-') { -1 } else { 1 };
+                if let (Ok(hh), Ok(mm)) = (s[1..3].parse::<i64>(), s[3..5].parse::<i64>()) {
+                    return sign * (hh * 3600 + mm * 60);
+                }
+            }
+        }
+        0
+    }
+
+    pub fn epoch_to_datetime_str(epoch: i64) -> String {
+        let days = epoch.div_euclid(86400);
+        let rem = epoch.rem_euclid(86400);
+        let hh = rem / 3600;
+        let mm = (rem % 3600) / 60;
+        let ss = rem % 60;
+        // Howard Hinnant civil-from-days
+        let z = days + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, m, d, hh, mm, ss)
+    }
+
+    pub fn format_ts_local(ts: &str, tz_offset: i64) -> String {
+        if let Some(ep) = Self::parse_utc_epoch(ts) {
+            Self::epoch_to_datetime_str(ep + tz_offset)
+        } else {
+            let now_ep = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            Self::epoch_to_datetime_str(now_ep + tz_offset)
+        }
+    }
+
+    pub fn file_mtime_local(path: &str, tz_offset: i64) -> String {
+        let ep = fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0)
+            });
+        Self::epoch_to_datetime_str(ep + tz_offset)
+    }
+
+    pub fn has_datetime_prefix(line: &str) -> bool {
+        let t = line.trim_start();
+        let b = t.as_bytes();
+        // Matches YYYY-MM-DD or [YYYY-MM-DD
+        (b.len() >= 19 && b[0].is_ascii_digit() && b[4] == b'-' && b[7] == b'-' && (b[10] == b'T' || b[10] == b' ') && b[13] == b':' && b[16] == b':')
+            || (b.len() >= 20 && b[0] == b'[' && b[1].is_ascii_digit() && b[5] == b'-' && b[8] == b'-' && (b[11] == b'T' || b[11] == b' ') && b[14] == b':' && b[17] == b':')
+    }
+
     pub fn purge_older_than_24h() -> Result<usize, String> {
         let cmd = serde_json::json!({"action": "purge_audit_log_24h"});
         if let Some(resp) = ConstantineIpcClient::send_command(&cmd) {
@@ -1773,7 +1841,7 @@ impl ConstantineIpcServer {
         let action = val.get("action").and_then(|x| x.as_str()).unwrap_or("");
         match action {
             "ping" => {
-                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.3"}).to_string()
+                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.4"}).to_string()
             }
             "append_audit_log" => {
                 let ev = val.get("event_type").and_then(|x| x.as_str()).unwrap_or("SYSTEM_EVENT");
@@ -2426,7 +2494,7 @@ impl SystemUpdateAudit {
         // Fallback a terminal
         if Command::new("which").arg("x-terminal-emulator").output().map(|o| o.status.success()).unwrap_or(false) {
             if Command::new("x-terminal-emulator")
-                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.3'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
+                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.4'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
                 .spawn().is_ok() {
                 return true;
             }
@@ -2611,7 +2679,7 @@ impl ModuleVersionAudit {
         let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
         
         vec![
-            ("Constantine Core EDR", "v5.5.3 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
+            ("Constantine Core EDR", "v5.5.4 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
             (
                 "Escudo Anti-Ransomware",
                 format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
@@ -3695,7 +3763,7 @@ impl ExecutiveReportGenerator {
 <body>
     <div class="header">
         <div>
-            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.3</h1>
+            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.4</h1>
             <div class="subtitle">Informe Ejecutivo de Auditoría y Seguridad del Endpoint</div>
         </div>
         <div style="text-align: right;">
@@ -4784,7 +4852,7 @@ impl PeripheralAudit {
 // ==============================================================================
 // 14. Actualizador de Constantine desde Repositorio / GitHub
 // ==============================================================================
-pub const APP_VERSION: &str = "5.5.3";
+pub const APP_VERSION: &str = "5.5.4";
 pub const GITHUB_REPO_URL: &str = "https://github.com/AntonSiMal/Constantine-Antivirus-Linux";
 
 #[derive(Clone, Debug)]
@@ -4808,7 +4876,7 @@ impl SelfUpdater {
     }
 
     pub fn check_remote_version() -> UpdateCheckStatus {
-        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 3));
+        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 4));
         let mut remote_tag: Option<String> = None;
         let mut target_url = GITHUB_REPO_URL.to_string();
 
@@ -4839,7 +4907,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.3",
+                    "-H", "User-Agent: Constantine-EDR/5.5.4",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/releases/latest",
                 ])
                 .output()
@@ -4866,7 +4934,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.3",
+                    "-H", "User-Agent: Constantine-EDR/5.5.4",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/tags",
                 ])
                 .output()
@@ -5076,7 +5144,7 @@ fn main() {
         ConstantineIpcServer::start_daemon_ipc_server();
 
         let user_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        // [v5.5.3 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
+        // [v5.5.4 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
         AntiRansomwareShield::deploy_all_users_canaries();
         OnAccessSupervisor::start_realtime_event_consumer();
         TetragonPrimarySensor::start_primary_edr_consumer();
@@ -5179,7 +5247,7 @@ fn main() {
 // ==============================================================================
 
 // ==============================================================================
-// 29. [v5.5.3] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
+// 29. [v5.5.4] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
 // ==============================================================================
 pub struct DownloadQuarantineGuard;
 
@@ -5234,7 +5302,7 @@ impl DownloadQuarantineGuard {
                                             let _ = fs::set_permissions(&p, perms);
                                             ImmutableAuditLog::append_event(
                                                 "MOTW_EXECUTABLE_LOCKED",
-                                                &format!("Mark-of-the-Web v5.5.3 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
+                                                &format!("Mark-of-the-Web v5.5.4 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
                                             );
                                         }
                                     }
@@ -5243,7 +5311,7 @@ impl DownloadQuarantineGuard {
                                 // 3. Evaluar archivo descargado con el pipeline multi-motor
                                 match ThreatAnalysisEngine::evaluate_file(&p) {
                                     FileVerdict::Threat(reason) => {
-                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.3 (Multiusuario)");
+                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.4 (Multiusuario)");
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_QUARANTINED",
                                             &format!("Descarga maliciosa interceptada en home de usuario: {} ({})", p.display(), reason),
@@ -5257,7 +5325,7 @@ impl DownloadQuarantineGuard {
                                     }
                                     FileVerdict::Clean(_) => {
                                         let _ = Command::new("setfattr")
-                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.3", &p.to_string_lossy()])
+                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.4", &p.to_string_lossy()])
                                             .output();
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_VERIFIED",
@@ -5476,7 +5544,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&title1);
 
     let desc1 = Label::new(Some(
-        "Desinstalar Constantine Antivirus & EDR v5.5.3 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
+        "Desinstalar Constantine Antivirus & EDR v5.5.4 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
     ));
     desc1.add_css_class("subtitle-text");
     desc1.set_xalign(0.0);
@@ -5504,7 +5572,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&card_warn);
 
     let note1 = Label::new(Some(
-        "Constantine v5.5.3 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
+        "Constantine v5.5.4 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
     ));
     note1.add_css_class("subtitle-text");
     note1.set_xalign(0.0);
@@ -6181,7 +6249,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
     
-    let badge_lbl = Label::new(Some("v5.5.3"));
+    let badge_lbl = Label::new(Some("v5.5.4"));
     badge_lbl.add_css_class("badge-version");
     
     title_box.append(&title_lbl);
@@ -6376,7 +6444,7 @@ fn build_ui(app: &Application) {
     
     // Título Principal
     let head_dash_box = Box::new(Orientation::Vertical, 4);
-    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.3)"));
+    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.4)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     head_dash_box.append(&t_ov);
@@ -7209,7 +7277,7 @@ fn build_ui(app: &Application) {
     d_repo.set_wrap_mode(gtk4::pango::WrapMode::Word);
     card_repo_update.append(&d_repo);
     
-    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.3 (Debian Edition). Listo para comprobar."));
+    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.4 (Debian Edition). Listo para comprobar."));
     repo_status_lbl.set_xalign(0.0);
     repo_status_lbl.add_css_class("mini-row-status-ok");
     card_repo_update.append(&repo_status_lbl);
@@ -8749,9 +8817,18 @@ fn build_ui(app: &Application) {
         gtk4::glib::spawn_future_local(async move {
             let (raw_events, chain_ok, count) = run_blocking(|| {
                 let (chain_ok, count) = ImmutableAuditLog::verify_integrity();
+                let tz_offset = ImmutableAuditLog::local_tz_offset_secs();
+                let ensure_ts = |raw: &str, fallback_ts: &str| -> String {
+                    if ImmutableAuditLog::has_datetime_prefix(raw) {
+                        raw.to_string()
+                    } else {
+                        format!("[{}] {}", fallback_ts, raw)
+                    }
+                };
                 let mut lines = Vec::new();
                 
                 if let Ok(file) = File::open(IMMUTABLE_AUDIT_LOG) {
+                    let audit_mtime = ImmutableAuditLog::file_mtime_local(IMMUTABLE_AUDIT_LOG, tz_offset);
                     for l in BufReader::new(file).lines().flatten() {
                         let parts: Vec<&str> = l.splitn(5, '|').collect();
                         if parts.len() >= 5 {
@@ -8789,66 +8866,74 @@ fn build_ui(app: &Application) {
                             };
 
                             let short_h = if cur_hash.len() >= 8 { &cur_hash[..8] } else { cur_hash };
-                            lines.push(format!("[{}] {} {} | {} (Hash: {})", ts, tag, ev, det, short_h));
+                            let local_ts = ImmutableAuditLog::format_ts_local(ts, tz_offset);
+                            lines.push(format!("[{}] {} {} | {} (Hash: {})", local_ts, tag, ev, det, short_h));
                         } else {
-                            lines.push(format!("[Forense SHA-256] {}", l));
+                            lines.push(format!("[{}] [Forense SHA-256] {}", audit_mtime, l));
                         }
                     }
                 }
                 if let Ok(file) = File::open(LOG_FILE) {
+                    let mtime = ImmutableAuditLog::file_mtime_local(LOG_FILE, tz_offset);
                     let mut clam_lines = Vec::new();
                     for l in BufReader::new(file).lines().flatten() {
+                        let tagged = ensure_ts(&l, &mtime);
                         if l.contains("FOUND") {
-                            clam_lines.push(format!("[ClamOnAcc / Detección] {}", l));
+                            clam_lines.push(format!("{} [ClamOnAcc / Detección]", tagged));
                         } else if l.contains("Access denied") {
                             if clam_lines.iter().filter(|x| x.contains("Access denied")).count() < 5 {
-                                clam_lines.push(format!("[ClamOnAcc / fanotify] {}", l));
+                                clam_lines.push(format!("{} [ClamOnAcc / fanotify]", tagged));
                             }
                         } else if l.contains("ERROR") || l.contains("WARNING") {
-                            clam_lines.push(format!("[ClamAV / Falla] {}", l));
+                            clam_lines.push(format!("{} [ClamAV / Falla]", tagged));
                         }
                     }
                     let take_start = clam_lines.len().saturating_sub(100);
                     lines.extend(clam_lines[take_start..].to_vec());
                 }
                 if let Ok(file) = File::open(SIGMA_LOG_FILE) {
+                    let mtime = ImmutableAuditLog::file_mtime_local(SIGMA_LOG_FILE, tz_offset);
                     let mut s_lines = Vec::new();
                     for l in BufReader::new(file).lines().flatten() {
-                        s_lines.push(format!("[Detección / Sigma Match] {}", l));
+                        s_lines.push(format!("{} [Detección / Sigma Match]", ensure_ts(&l, &mtime)));
                     }
                     let take_start = s_lines.len().saturating_sub(50);
                     lines.extend(s_lines[take_start..].to_vec());
                 }
                 if let Ok(file) = File::open(AIDE_LOG_FILE) {
+                    let mtime = ImmutableAuditLog::file_mtime_local(AIDE_LOG_FILE, tz_offset);
                     let mut a_lines = Vec::new();
                     for l in BufReader::new(file).lines().flatten() {
                         if l.contains("changed:") || l.contains("added:") || l.contains("removed:") {
-                            a_lines.push(format!("[Integridad / AIDE Audit] {}", l));
+                            a_lines.push(format!("{} [Integridad / AIDE Audit]", ensure_ts(&l, &mtime)));
                         }
                     }
                     let take_start = a_lines.len().saturating_sub(50);
                     lines.extend(a_lines[take_start..].to_vec());
                 }
                 if let Ok(file) = File::open(YARA_LOG_FILE) {
+                    let mtime = ImmutableAuditLog::file_mtime_local(YARA_LOG_FILE, tz_offset);
                     let mut y_lines = Vec::new();
                     for l in BufReader::new(file).lines().flatten() {
-                        y_lines.push(format!("[Detección / YARA Live] {}", l));
+                        y_lines.push(format!("{} [Detección / YARA Live]", ensure_ts(&l, &mtime)));
                     }
                     let take_start = y_lines.len().saturating_sub(50);
                     lines.extend(y_lines[take_start..].to_vec());
                 }
                 if let Ok(file) = File::open(FALCO_LOG_FILE) {
+                    let mtime = ImmutableAuditLog::file_mtime_local(FALCO_LOG_FILE, tz_offset);
                     let mut f_lines = Vec::new();
                     for l in BufReader::new(file).lines().flatten() {
-                        f_lines.push(format!("[Comportamiento / Falco] {}", l));
+                        f_lines.push(format!("{} [Comportamiento / Falco]", ensure_ts(&l, &mtime)));
                     }
                     let take_start = f_lines.len().saturating_sub(50);
                     lines.extend(f_lines[take_start..].to_vec());
                 }
                 if let Ok(file) = File::open(WAZUH_LOG_FILE) {
+                    let mtime = ImmutableAuditLog::file_mtime_local(WAZUH_LOG_FILE, tz_offset);
                     let mut w_lines = Vec::new();
                     for l in BufReader::new(file).lines().flatten() {
-                        w_lines.push(format!("[SIEM / Wazuh Alert] {}", l));
+                        w_lines.push(format!("{} [SIEM / Wazuh Alert]", ensure_ts(&l, &mtime)));
                     }
                     let take_start = w_lines.len().saturating_sub(50);
                     lines.extend(w_lines[take_start..].to_vec());
