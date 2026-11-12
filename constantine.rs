@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v5.5.4 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.4)
+// Constantine Antivirus & EDR v5.5.7 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.7)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -1841,7 +1841,7 @@ impl ConstantineIpcServer {
         let action = val.get("action").and_then(|x| x.as_str()).unwrap_or("");
         match action {
             "ping" => {
-                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.4"}).to_string()
+                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.7"}).to_string()
             }
             "append_audit_log" => {
                 let ev = val.get("event_type").and_then(|x| x.as_str()).unwrap_or("SYSTEM_EVENT");
@@ -2494,7 +2494,7 @@ impl SystemUpdateAudit {
         // Fallback a terminal
         if Command::new("which").arg("x-terminal-emulator").output().map(|o| o.status.success()).unwrap_or(false) {
             if Command::new("x-terminal-emulator")
-                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.4'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
+                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.7'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
                 .spawn().is_ok() {
                 return true;
             }
@@ -2679,7 +2679,7 @@ impl ModuleVersionAudit {
         let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
         
         vec![
-            ("Constantine Core EDR", "v5.5.4 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
+            ("Constantine Core EDR", "v5.5.7 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
             (
                 "Escudo Anti-Ransomware",
                 format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
@@ -3763,7 +3763,7 @@ impl ExecutiveReportGenerator {
 <body>
     <div class="header">
         <div>
-            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.4</h1>
+            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.7</h1>
             <div class="subtitle">Informe Ejecutivo de Auditoría y Seguridad del Endpoint</div>
         </div>
         <div style="text-align: right;">
@@ -3835,6 +3835,138 @@ impl ExecutiveReportGenerator {
             (true, target_path)
         } else {
             (false, "No se pudo escribir el archivo de informe en el disco.".into())
+        }
+    }
+
+    fn pdf_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for ch in s.chars() {
+            match ch {
+                '(' => out.push_str("\\("),
+                ')' => out.push_str("\\)"),
+                '\\' => out.push_str("\\\\"),
+                'á' | 'Á' => out.push('a'),
+                'é' | 'É' => out.push('e'),
+                'í' | 'Í' => out.push('i'),
+                'ó' | 'Ó' => out.push('o'),
+                'ú' | 'Ú' | 'ü' | 'Ü' => out.push('u'),
+                'ñ' | 'Ñ' => out.push('n'),
+                c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
+                _ => out.push(' '),
+            }
+        }
+        out
+    }
+
+    pub fn write_pure_rust_pdf(pdf_path: &str, title: &str, subtitle: &str, lines: &[String]) -> Result<(), String> {
+        let lines_per_page = 46usize;
+        let mut pages_content: Vec<String> = Vec::new();
+        let chunks: Vec<&[String]> = if lines.is_empty() {
+            vec![&[]]
+        } else {
+            lines.chunks(lines_per_page).collect()
+        };
+
+        for (page_idx, chunk) in chunks.iter().enumerate() {
+            let mut stream = String::new();
+            stream.push_str("BT\n");
+            stream.push_str("/F2 13 Tf\n40 760 Td\n");
+            stream.push_str(&format!("({}) Tj\n", Self::pdf_escape(title)));
+            stream.push_str("/F1 9 Tf\n0 -16 Td\n");
+            stream.push_str(&format!("({} | Pagina {}/{}) Tj\n", Self::pdf_escape(subtitle), page_idx + 1, chunks.len()));
+            stream.push_str("0 -18 Td\n");
+            stream.push_str("/F1 8 Tf\n");
+            for line in *chunk {
+                let truncated: String = line.chars().take(112).collect();
+                stream.push_str(&format!("({}) Tj\n0 -14 Td\n", Self::pdf_escape(&truncated)));
+            }
+            stream.push_str("ET\n");
+            pages_content.push(stream);
+        }
+
+        let mut pdf = Vec::<u8>::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets: Vec<usize> = vec![0];
+
+        let num_pages = pages_content.len();
+        let mut kids_refs = String::new();
+        for i in 0..num_pages {
+            let page_obj_id = 5 + i * 2;
+            kids_refs.push_str(&format!("{} 0 R ", page_obj_id));
+        }
+
+        let mut push_obj = |id: usize, body: &[u8]| {
+            while offsets.len() <= id {
+                offsets.push(0);
+            }
+            offsets[id] = pdf.len();
+            pdf.extend_from_slice(format!("{} 0 obj\n", id).as_bytes());
+            pdf.extend_from_slice(body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        };
+
+        push_obj(1, b"<< /Type /Catalog /Pages 2 0 R >>");
+        push_obj(2, format!("<< /Type /Pages /Kids [ {}] /Count {} >>", kids_refs, num_pages).as_bytes());
+        push_obj(3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        push_obj(4, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+
+        for (i, stream_str) in pages_content.iter().enumerate() {
+            let page_obj_id = 5 + i * 2;
+            let content_obj_id = page_obj_id + 1;
+            let page_dict = format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {} 0 R >>",
+                content_obj_id
+            );
+            push_obj(page_obj_id, page_dict.as_bytes());
+            let stream_bytes = stream_str.as_bytes();
+            let content_obj = format!("<< /Length {} >>\nstream\n{}endstream", stream_bytes.len(), stream_str);
+            push_obj(content_obj_id, content_obj.as_bytes());
+        }
+
+        let xref_pos = pdf.len();
+        let total_objs = offsets.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", total_objs).as_bytes());
+        for off in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", total_objs, xref_pos).as_bytes(),
+        );
+
+        fs::write(pdf_path, pdf).map_err(|e| format!("Error guardando PDF: {}", e))
+    }
+
+    pub fn generate_pdf_report(user_home: &str, rows: &[String]) -> (bool, String) {
+        let tz = ImmutableAuditLog::local_tz_offset_secs();
+        let now_ep = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let local_ts = ImmutableAuditLog::epoch_to_datetime_str(now_ep + tz);
+        let safe_ts = local_ts.replace(':', "-").replace(' ', "_");
+        let pdf_filename = format!("Auditoria_Forense_Constantine_EDR_{}.pdf", safe_ts);
+        let desktop_dir = format!("{}/Desktop", user_home);
+        let target_pdf = if Path::new(&desktop_dir).exists() {
+            format!("{}/{}", desktop_dir, pdf_filename)
+        } else {
+            format!("/var/log/constantine/{}", pdf_filename)
+        };
+
+        let (chain_valid, verified_count) = ImmutableAuditLog::verify_integrity();
+        let title = format!("CONSTANTINE ANTIVIRUS & EDR v{} - AUDITORIA FORENSE", APP_VERSION);
+        let subtitle = format!(
+            "Emision: {} | Cadena SHA-256: {} ({} registros)",
+            local_ts,
+            if chain_valid { "VALIDA" } else { "REVISAR" },
+            verified_count
+        );
+
+        match Self::write_pure_rust_pdf(&target_pdf, &title, &subtitle, rows) {
+            Ok(_) => {
+                ImmutableAuditLog::append_event("FORENSIC_PDF_EXPORTED", &format!("Informe forense PDF exportado a: {}", target_pdf));
+                (true, target_pdf)
+            }
+            Err(e) => (false, e),
         }
     }
 }
@@ -4852,7 +4984,7 @@ impl PeripheralAudit {
 // ==============================================================================
 // 14. Actualizador de Constantine desde Repositorio / GitHub
 // ==============================================================================
-pub const APP_VERSION: &str = "5.5.4";
+pub const APP_VERSION: &str = "5.5.7";
 pub const GITHUB_REPO_URL: &str = "https://github.com/AntonSiMal/Constantine-Antivirus-Linux";
 
 #[derive(Clone, Debug)]
@@ -4876,7 +5008,7 @@ impl SelfUpdater {
     }
 
     pub fn check_remote_version() -> UpdateCheckStatus {
-        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 4));
+        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 7));
         let mut remote_tag: Option<String> = None;
         let mut target_url = GITHUB_REPO_URL.to_string();
 
@@ -4907,7 +5039,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.4",
+                    "-H", "User-Agent: Constantine-EDR/5.5.7",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/releases/latest",
                 ])
                 .output()
@@ -4934,7 +5066,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.4",
+                    "-H", "User-Agent: Constantine-EDR/5.5.7",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/tags",
                 ])
                 .output()
@@ -5144,7 +5276,7 @@ fn main() {
         ConstantineIpcServer::start_daemon_ipc_server();
 
         let user_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        // [v5.5.4 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
+        // [v5.5.7 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
         AntiRansomwareShield::deploy_all_users_canaries();
         OnAccessSupervisor::start_realtime_event_consumer();
         TetragonPrimarySensor::start_primary_edr_consumer();
@@ -5247,7 +5379,7 @@ fn main() {
 // ==============================================================================
 
 // ==============================================================================
-// 29. [v5.5.4] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
+// 29. [v5.5.7] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
 // ==============================================================================
 pub struct DownloadQuarantineGuard;
 
@@ -5302,7 +5434,7 @@ impl DownloadQuarantineGuard {
                                             let _ = fs::set_permissions(&p, perms);
                                             ImmutableAuditLog::append_event(
                                                 "MOTW_EXECUTABLE_LOCKED",
-                                                &format!("Mark-of-the-Web v5.5.4 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
+                                                &format!("Mark-of-the-Web v5.5.7 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
                                             );
                                         }
                                     }
@@ -5311,7 +5443,7 @@ impl DownloadQuarantineGuard {
                                 // 3. Evaluar archivo descargado con el pipeline multi-motor
                                 match ThreatAnalysisEngine::evaluate_file(&p) {
                                     FileVerdict::Threat(reason) => {
-                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.4 (Multiusuario)");
+                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.7 (Multiusuario)");
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_QUARANTINED",
                                             &format!("Descarga maliciosa interceptada en home de usuario: {} ({})", p.display(), reason),
@@ -5325,7 +5457,7 @@ impl DownloadQuarantineGuard {
                                     }
                                     FileVerdict::Clean(_) => {
                                         let _ = Command::new("setfattr")
-                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.4", &p.to_string_lossy()])
+                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.7", &p.to_string_lossy()])
                                             .output();
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_VERIFIED",
@@ -5544,7 +5676,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&title1);
 
     let desc1 = Label::new(Some(
-        "Desinstalar Constantine Antivirus & EDR v5.5.4 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
+        "Desinstalar Constantine Antivirus & EDR v5.5.7 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
     ));
     desc1.add_css_class("subtitle-text");
     desc1.set_xalign(0.0);
@@ -5572,7 +5704,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&card_warn);
 
     let note1 = Label::new(Some(
-        "Constantine v5.5.4 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
+        "Constantine v5.5.7 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
     ));
     note1.add_css_class("subtitle-text");
     note1.set_xalign(0.0);
@@ -6249,7 +6381,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
     
-    let badge_lbl = Label::new(Some("v5.5.4"));
+    let badge_lbl = Label::new(Some("v5.5.7"));
     badge_lbl.add_css_class("badge-version");
     
     title_box.append(&title_lbl);
@@ -6444,7 +6576,7 @@ fn build_ui(app: &Application) {
     
     // Título Principal
     let head_dash_box = Box::new(Orientation::Vertical, 4);
-    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.4)"));
+    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.7)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     head_dash_box.append(&t_ov);
@@ -7277,7 +7409,7 @@ fn build_ui(app: &Application) {
     d_repo.set_wrap_mode(gtk4::pango::WrapMode::Word);
     card_repo_update.append(&d_repo);
     
-    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.4 (Debian Edition). Listo para comprobar."));
+    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.7 (Debian Edition). Listo para comprobar."));
     repo_status_lbl.set_xalign(0.0);
     repo_status_lbl.add_css_class("mini-row-status-ok");
     card_repo_update.append(&repo_status_lbl);
@@ -8600,27 +8732,54 @@ fn build_ui(app: &Application) {
     search_audit.set_placeholder_text(Some("🔍 Buscar por módulo, palabra clave, PID, IP, dominio o hash SHA-256..."));
     lcard.append(&search_audit);
     
+    // Cabecera de columnas ordenables (Mayor a Menor / Menor a Mayor)
+    let audit_hdr_row = Box::new(Orientation::Horizontal, 6);
+    let btn_sort_ts = Button::with_label("📅 Fecha y Hora ▾");
+    btn_sort_ts.set_size_request(165, -1);
+    btn_sort_ts.add_css_class("filter-btn");
+    let btn_sort_cat = Button::with_label("🏷️ Categoría");
+    btn_sort_cat.set_size_request(160, -1);
+    btn_sort_cat.add_css_class("filter-btn");
+    let btn_sort_ev = Button::with_label("⚡ Evento / Módulo");
+    btn_sort_ev.set_size_request(185, -1);
+    btn_sort_ev.add_css_class("filter-btn");
+    let lbl_hdr_det = Label::new(Some("📋 Detalle Forense y Hash SHA-256"));
+    lbl_hdr_det.add_css_class("macos-table-header");
+    lbl_hdr_det.set_xalign(0.0);
+    lbl_hdr_det.set_hexpand(true);
+
+    audit_hdr_row.append(&btn_sort_ts);
+    audit_hdr_row.append(&btn_sort_cat);
+    audit_hdr_row.append(&btn_sort_ev);
+    audit_hdr_row.append(&lbl_hdr_det);
+    lcard.append(&audit_hdr_row);
+
     let lscrolled = ScrolledWindow::new();
     lscrolled.set_min_content_height(340);
-    
-    let ltxt = TextView::new();
-    ltxt.set_editable(false);
-    ltxt.set_wrap_mode(gtk4::WrapMode::WordChar);
-    lscrolled.set_child(Some(&ltxt));
+
+    let audit_list = gtk4::ListBox::new();
+    audit_list.set_selection_mode(gtk4::SelectionMode::None);
+    audit_list.add_css_class("boxed-list");
+    lscrolled.set_child(Some(&audit_list));
     lcard.append(&lscrolled);
 
     let btns_audit_actions = Box::new(Orientation::Horizontal, 8);
-    let btn_ref_all = Button::with_label("🔄 Actualizar y Verificar Registro Forense");
+    let btn_ref_all = Button::with_label("🔄 Actualizar y Verificar");
     btn_ref_all.set_hexpand(true);
     btns_audit_actions.append(&btn_ref_all);
 
-    let btn_purge_24h = Button::with_label("🧹 Borrar Registros > 24 Horas");
+    let btn_copy_logs = Button::with_label("📋 Copiar Registros");
+    btns_audit_actions.append(&btn_copy_logs);
+
+    let btn_purge_24h = Button::with_label("🧹 Borrar > 24h");
     btn_purge_24h.add_css_class("destructive-action");
     btns_audit_actions.append(&btn_purge_24h);
 
-    let btn_export_report = Button::with_label("📑 Exportar Informe Forense Completo (HTML / PDF)");
-    btn_export_report.add_css_class("suggested-action");
-    btn_export_report.set_hexpand(true);
+    let btn_export_pdf = Button::with_label("📄 Exportar PDF");
+    btn_export_pdf.add_css_class("suggested-action");
+    btns_audit_actions.append(&btn_export_pdf);
+
+    let btn_export_report = Button::with_label("📑 Informe HTML");
     btns_audit_actions.append(&btn_export_report);
     lcard.append(&btns_audit_actions);
 
@@ -8631,15 +8790,54 @@ fn build_ui(app: &Application) {
     lbl_report_status.set_xalign(0.0);
     lcard.append(&lbl_report_status);
 
+    // Almacenamiento local para filtrado dinámico
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    let all_logs_cache: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let visible_rows_cache: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let active_cat_filter: Rc<RefCell<String>> = Rc::new(RefCell::new("all".to_string()));
+    let sort_col_state: Rc<RefCell<(&'static str, bool)>> = Rc::new(RefCell::new(("ts", true))); // true = Mayor a Menor (descendente)
+
     let rpt_lbl_c = lbl_report_status.clone();
     let uh_rpt_c = user_home.clone();
     btn_export_report.connect_clicked(move |_| {
         let (ok, path) = ExecutiveReportGenerator::generate_report(&uh_rpt_c);
         if ok {
-            rpt_lbl_c.set_text(&format!("✓ Informe ejecutivo forense generado con éxito en: {}", path));
+            rpt_lbl_c.set_text(&format!("✓ Informe ejecutivo HTML generado con éxito en: {}", path));
         } else {
             rpt_lbl_c.set_text(&format!("⚠️ Error al generar informe: {}", path));
         }
+    });
+
+    let copy_lbl_c = lbl_report_status.clone();
+    let vis_copy_c = visible_rows_cache.clone();
+    btn_copy_logs.connect_clicked(move |b| {
+        let rows = vis_copy_c.borrow();
+        if rows.is_empty() {
+            copy_lbl_c.set_text("⚠️ No hay registros visibles para copiar.");
+        } else {
+            let text = rows.join("\n");
+            b.clipboard().set_text(&text);
+            copy_lbl_c.set_text(&format!("✓ {} registro(s) forenses copiados al portapapeles.", rows.len()));
+        }
+    });
+
+    let pdf_lbl_c = lbl_report_status.clone();
+    let uh_pdf_c = user_home.clone();
+    let vis_pdf_c = visible_rows_cache.clone();
+    btn_export_pdf.connect_clicked(move |_| {
+        let rows = vis_pdf_c.borrow().clone();
+        let lbl = pdf_lbl_c.clone();
+        let uh = uh_pdf_c.clone();
+        gtk4::glib::spawn_future_local(async move {
+            lbl.set_text("⏳ Generando informe PDF de Auditoría Forense...");
+            let (ok, path) = run_blocking(move || ExecutiveReportGenerator::generate_pdf_report(&uh, &rows)).await;
+            if ok {
+                lbl.set_text(&format!("✓ Auditoría Forense exportada a PDF en: {}", path));
+            } else {
+                lbl.set_text(&format!("⚠️ Error al exportar PDF: {}", path));
+            }
+        });
     });
 
     let purge_lbl_c = lbl_report_status.clone();
@@ -8665,23 +8863,80 @@ fn build_ui(app: &Application) {
                 }
             }
             btn.set_sensitive(true);
-            btn.set_label("🧹 Borrar Registros > 24 Horas");
+            btn.set_label("🧹 Borrar > 24h");
         });
     });
 
     log_box.append(&lcard);
     stack.add_named(&wrap_responsive(&log_box), Some("logs"));
 
-    // Almacenamiento local para filtrado dinámico
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    let all_logs_cache: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let active_cat_filter: Rc<RefCell<String>> = Rc::new(RefCell::new("all".to_string()));
+
+
+    #[derive(Clone)]
+    struct AuditRowItem {
+        ts: String,
+        cat: String,
+        ev: String,
+        det: String,
+    }
+
+    fn parse_audit_row_item(line: &str) -> AuditRowItem {
+        let mut rest = line.trim();
+        let mut ts = String::new();
+        if rest.starts_with('[') {
+            if let Some(end_b) = rest.find(']') {
+                let candidate = rest[1..end_b].trim();
+                if candidate.len() >= 19 && candidate.as_bytes()[0].is_ascii_digit() {
+                    ts = candidate.chars().take(19).collect::<String>().replace('T', " ");
+                    rest = rest[end_b + 1..].trim();
+                }
+            }
+        }
+        if ts.is_empty() {
+            let tz = ImmutableAuditLog::local_tz_offset_secs();
+            let now_ep = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            ts = ImmutableAuditLog::epoch_to_datetime_str(now_ep + tz);
+        }
+
+        let mut cat = "[AUDITORÍA]".to_string();
+        if rest.starts_with('[') {
+            if let Some(end_c) = rest.find(']') {
+                cat = rest[..=end_c].to_string();
+                rest = rest[end_c + 1..].trim();
+            }
+        } else if rest.ends_with(']') {
+            if let Some(start_c) = rest.rfind('[') {
+                cat = rest[start_c..].to_string();
+                rest = rest[..start_c].trim();
+            }
+        }
+
+        let (ev, det) = if let Some((left, right)) = rest.split_once('|') {
+            (left.trim().to_string(), right.trim().to_string())
+        } else {
+            let mut words = rest.splitn(2, ' ');
+            let first = words.next().unwrap_or("EVENTO").to_string();
+            let second = words.next().unwrap_or("").to_string();
+            if second.is_empty() {
+                ("REGISTRO".to_string(), first)
+            } else {
+                (first, second)
+            }
+        };
+
+        AuditRowItem { ts, cat, ev, det }
+    }
 
     let apply_filter_view = {
-        let ltv = ltxt.clone();
+        let list_w = audit_list.clone();
         let logs_c = all_logs_cache.clone();
+        let vis_c = visible_rows_cache.clone();
+        let rpt_status_row = lbl_report_status.clone();
         let cat_c = active_cat_filter.clone();
+        let sort_c = sort_col_state.clone();
         let search_ent = search_audit.clone();
         let lbl_tot = lbl_kpi_total.clone();
         let lbl_ale = lbl_kpi_alerts.clone();
@@ -8690,6 +8945,7 @@ fn build_ui(app: &Application) {
 
         move || {
             let cat = cat_c.borrow().clone();
+            let (sort_col, sort_desc) = *sort_c.borrow();
             let query = search_ent.text().to_lowercase();
             let cache = logs_c.borrow();
 
@@ -8698,7 +8954,7 @@ fn build_ui(app: &Application) {
             let mut count_errors = 0usize;
             let mut count_net = 0usize;
 
-            let mut filtered = Vec::new();
+            let mut filtered: Vec<AuditRowItem> = Vec::new();
 
             for line in cache.iter() {
                 count_total += 1;
@@ -8712,7 +8968,6 @@ fn build_ui(app: &Application) {
                 if is_error { count_errors += 1; }
                 if is_net { count_net += 1; }
 
-                // Filtro por categoría activa
                 let matches_cat = match cat.as_str() {
                     "alerts" => is_alert,
                     "errors" => is_error,
@@ -8724,26 +8979,155 @@ fn build_ui(app: &Application) {
 
                 if !matches_cat { continue; }
 
-                // Filtro por texto de búsqueda
                 if !query.is_empty() && !line.to_lowercase().contains(&query) {
                     continue;
                 }
 
-                filtered.push(line.clone());
+                filtered.push(parse_audit_row_item(line));
             }
+
+            // Ordenar por columna seleccionada (por defecto: Fecha y Hora de Mayor a Menor)
+            filtered.sort_by(|a, b| {
+                let ord = match sort_col {
+                    "cat" => a.cat.cmp(&b.cat).then_with(|| a.ts.cmp(&b.ts)),
+                    "ev" => a.ev.cmp(&b.ev).then_with(|| a.ts.cmp(&b.ts)),
+                    _ => a.ts.cmp(&b.ts),
+                };
+                if sort_desc { ord.reverse() } else { ord }
+            });
 
             lbl_tot.set_text(&format!("📦 Total: {}", count_total));
             lbl_ale.set_text(&format!("⚠️ Alertas/Notif: {}", count_alerts));
             lbl_err.set_text(&format!("❌ Fallas/Errores: {}", count_errors));
             lbl_nt.set_text(&format!("🔌 Red/DNS: {}", count_net));
 
+            {
+                let mut v_mut = vis_c.borrow_mut();
+                v_mut.clear();
+                for item in &filtered {
+                    v_mut.push(format!("[{}] {} {} | {}", item.ts, item.cat, item.ev, item.det));
+                }
+            }
+
+            while let Some(child) = list_w.first_child() {
+                list_w.remove(&child);
+            }
+
             if filtered.is_empty() {
-                ltv.buffer().set_text("Sin registros coincidentes con los filtros seleccionados.");
+                let empty_lbl = Label::new(Some("Sin registros coincidentes con los filtros seleccionados."));
+                empty_lbl.set_margin_top(16);
+                empty_lbl.set_margin_bottom(16);
+                empty_lbl.add_css_class("subtitle-text");
+                list_w.append(&empty_lbl);
             } else {
-                ltv.buffer().set_text(&filtered.join("\n"));
+                for item in filtered.iter().take(300) {
+                    let row_box = Box::new(Orientation::Horizontal, 6);
+                    row_box.set_margin_start(6);
+                    row_box.set_margin_end(6);
+                    row_box.set_margin_top(4);
+                    row_box.set_margin_bottom(4);
+
+                    let l_ts = Label::new(Some(&item.ts));
+                    l_ts.set_size_request(165, -1);
+                    l_ts.set_xalign(0.0);
+                    l_ts.set_selectable(true);
+                    l_ts.add_css_class("subtitle-text");
+
+                    let l_cat = Label::new(Some(&item.cat));
+                    l_cat.set_size_request(160, -1);
+                    l_cat.set_xalign(0.0);
+                    l_cat.set_selectable(true);
+                    if item.cat.contains("ALERTA") || item.cat.contains("AMENAZA") || item.cat.contains("RANSOMWARE") {
+                        l_cat.add_css_class("mini-row-status-alert");
+                    } else if item.cat.contains("ERROR") || item.cat.contains("FALLA") {
+                        l_cat.add_css_class("mini-row-status-warn");
+                    } else {
+                        l_cat.add_css_class("mini-row-status-ok");
+                    }
+
+                    let l_ev = Label::new(Some(&item.ev));
+                    l_ev.set_size_request(185, -1);
+                    l_ev.set_xalign(0.0);
+                    l_ev.set_selectable(true);
+                    l_ev.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+
+                    let l_det = Label::new(Some(&item.det));
+                    l_det.set_xalign(0.0);
+                    l_det.set_hexpand(true);
+                    l_det.set_wrap(true);
+                    l_det.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+                    l_det.set_selectable(true);
+
+                    let btn_row_copy = Button::with_label("📋");
+                    btn_row_copy.set_tooltip_text(Some("Copiar este registro forense"));
+                    let full_row_str = format!("[{}] {} {} | {}", item.ts, item.cat, item.ev, item.det);
+                    let st_row_c = rpt_status_row.clone();
+                    btn_row_copy.connect_clicked(move |b| {
+                        let cb = b.clipboard();
+                        cb.set_text(&full_row_str);
+                        st_row_c.set_text("✓ Registro forense copiado al portapapeles.");
+                    });
+
+                    row_box.append(&l_ts);
+                    row_box.append(&l_cat);
+                    row_box.append(&l_ev);
+                    row_box.append(&l_det);
+                    row_box.append(&btn_row_copy);
+                    list_w.append(&row_box);
+                }
             }
         }
     };
+
+    // Conectar botones de ordenamiento por columna (Mayor a Menor / Menor a Mayor)
+    {
+        let sc = sort_col_state.clone();
+        let afv = apply_filter_view.clone();
+        let b_ts = btn_sort_ts.clone();
+        let b_cat = btn_sort_cat.clone();
+        let b_ev = btn_sort_ev.clone();
+        btn_sort_ts.connect_clicked(move |_| {
+            let mut s = sc.borrow_mut();
+            if s.0 == "ts" { s.1 = !s.1; } else { *s = ("ts", true); }
+            b_ts.set_label(if s.1 { "📅 Fecha y Hora ▾" } else { "📅 Fecha y Hora ▴" });
+            b_cat.set_label("🏷️ Categoría");
+            b_ev.set_label("⚡ Evento / Módulo");
+            drop(s);
+            afv();
+        });
+    }
+    {
+        let sc = sort_col_state.clone();
+        let afv = apply_filter_view.clone();
+        let b_ts = btn_sort_ts.clone();
+        let b_cat = btn_sort_cat.clone();
+        let b_ev = btn_sort_ev.clone();
+        btn_sort_cat.connect_clicked(move |_| {
+            let mut s = sc.borrow_mut();
+            if s.0 == "cat" { s.1 = !s.1; } else { *s = ("cat", false); }
+            b_cat.set_label(if s.1 { "🏷️ Categoría ▾" } else { "🏷️ Categoría ▴" });
+            b_ts.set_label("📅 Fecha y Hora");
+            b_ev.set_label("⚡ Evento / Módulo");
+            drop(s);
+            afv();
+        });
+    }
+    {
+        let sc = sort_col_state.clone();
+        let afv = apply_filter_view.clone();
+        let b_ts = btn_sort_ts.clone();
+        let b_cat = btn_sort_cat.clone();
+        let b_ev = btn_sort_ev.clone();
+        btn_sort_ev.connect_clicked(move |_| {
+            let mut s = sc.borrow_mut();
+            if s.0 == "ev" { s.1 = !s.1; } else { *s = ("ev", false); }
+            b_ev.set_label(if s.1 { "⚡ Evento / Módulo ▾" } else { "⚡ Evento / Módulo ▴" });
+            b_ts.set_label("📅 Fecha y Hora");
+            b_cat.set_label("🏷️ Categoría");
+            drop(s);
+            afv();
+        });
+    }
 
     // Conectar botones de filtro
     {

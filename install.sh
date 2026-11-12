@@ -1125,6 +1125,7 @@ fi
 echo "   -> Usuario del servicio ClamAV detectado en el sistema: $CLAMAV_SERVICE_USER"
 
 sed -i '/# --- CONSTANTINE ANTIVIRUS ON-ACCESS CONFIGURATION ---/,$d' "$CLAMD_CONF" 2>/dev/null || true
+sed -i '/^AllowSupplementaryGroups/d' "$CLAMD_CONF" 2>/dev/null || true
 sed -i '/^OnAccessIncludePath/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExcludeUname/d' "$CLAMD_CONF"
 sed -i '/^OnAccessPrevention/d' "$CLAMD_CONF"
@@ -1134,19 +1135,25 @@ sed -i '/^OnAccessMaxFileSize/d' "$CLAMD_CONF"
 sed -i '/^OnAccessExcludePath/d' "$CLAMD_CONF" 2>/dev/null || true
 sed -i '/^ExcludePath/d' "$CLAMD_CONF" 2>/dev/null || true
 sed -i '/^TemporaryDirectory/d' "$CLAMD_CONF" 2>/dev/null || true
+sed -i '/^PhishingSignatures/d' "$CLAMD_CONF" 2>/dev/null || true
+sed -i '/^PhishingScanURLs/d' "$CLAMD_CONF" 2>/dev/null || true
+sed -i '/^PhishingAlwaysBlockCloak/d' "$CLAMD_CONF" 2>/dev/null || true
+sed -i '/^PhishingAlwaysBlockSSLMismatch/d' "$CLAMD_CONF" 2>/dev/null || true
 
 # Configurar User root y directorio temporal propio aislado de /tmp
 sed -i 's/^User .*/User root/' "$CLAMD_CONF" 2>/dev/null || true
 mkdir -p /var/lib/clamav/tmp
-chown -R clamav:constantine /var/lib/clamav/tmp 2>/dev/null || true
+chown -R root:constantine /var/lib/clamav/tmp 2>/dev/null || true
 chmod -R 770 /var/lib/clamav/tmp 2>/dev/null || true
+
+# Ampliar límite de inotify para evitar errores "ClamInotif: can't exclude" en entornos de desarrollo
+echo "fs.inotify.max_user_watches=524288" > /etc/sysctl.d/99-constantine-inotify.conf
+sysctl -p /etc/sysctl.d/99-constantine-inotify.conf >/dev/null 2>&1 || true
 
 {
     echo "# --- CONSTANTINE ANTIVIRUS ON-ACCESS CONFIGURATION ---"
     echo "TemporaryDirectory /var/lib/clamav/tmp"
-    echo "AllowSupplementaryGroups yes"
     [ -d "/home" ] && echo "OnAccessIncludePath /home"
-    [ -d "/var/tmp" ] && echo "OnAccessIncludePath /var/tmp"
     echo "OnAccessPrevention no"
     echo "OnAccessExcludeUname root"
     echo "OnAccessExcludeRootUID yes"
@@ -1157,48 +1164,28 @@ chmod -R 770 /var/lib/clamav/tmp 2>/dev/null || true
     echo "PhishingScanURLs yes"
     echo "PhishingAlwaysBlockCloak yes"
     echo "PhishingAlwaysBlockSSLMismatch no"
-    
-    # Exclusiones regex de alto rendimiento para clamd (ignora directorios de desarrollo pesados y temporales)
-    echo "ExcludePath ^/home/[^/]+/\.cargo/"
-    echo "ExcludePath ^/home/[^/]+/\.cache/pip/"
-    echo "ExcludePath ^/home/[^/]+/\.cache/"
+
+    # Exclusiones regex para clamd / clamscan
     echo "ExcludePath ^/tmp/"
     echo "ExcludePath ^/var/lib/clamav/tmp/"
     echo "ExcludePath ^/var/tmp/"
 
-    # Exclusiones específicas por cada usuario del sistema en /home (OnAccessExcludePath y ExcludePath directos)
+    # Exclusiones específicas por cada usuario dentro de /home (OnAccessExcludePath sin subdirectorios profundos)
     for u_dir in /home/*; do
         if [ -d "$u_dir" ]; then
             u_name=$(basename "$u_dir")
             echo "ExcludePath ^/home/$u_name/\.cargo/"
-            echo "ExcludePath ^/home/$u_name/\.cache/pip/"
             echo "ExcludePath ^/home/$u_name/\.cache/"
             echo "OnAccessExcludePath /home/$u_name/.cargo"
             echo "OnAccessExcludePath /home/$u_name/.cache"
+            echo "OnAccessExcludePath /home/$u_name/.rustup"
             echo "OnAccessExcludePath /home/$u_name/.config"
             echo "OnAccessExcludePath /home/$u_name/.local"
-            echo "OnAccessExcludePath /home/$u_name/.Xauthority"
-            echo "OnAccessExcludePath /home/$u_name/.dbus"
         fi
     done
-
-    # Exclusiones de sistema para OnAccess
-    echo "OnAccessExcludePath /tmp"
-    echo "OnAccessExcludePath /var/lib/clamav/tmp"
-    echo "OnAccessExcludePath /proc"
-    echo "OnAccessExcludePath /sys"
-    echo "OnAccessExcludePath /dev"
-    echo "OnAccessExcludePath /run"
-    echo "OnAccessExcludePath /var/run"
-    echo "OnAccessExcludePath /var/log"
-    echo "OnAccessExcludePath /var/lib"
-    echo "# Excluir directorios de desarrollo y caché para evitar bucles de escaneo y alto uso de CPU"
-    [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ] && {
-        echo "ExcludePath ^/home/$REAL_USER/\.cargo/"
-        echo "ExcludePath ^/home/$REAL_USER/\.cache/pip/"
-    }
 } >> "$CLAMD_CONF"
-# Replicar configuración exacta en /etc/clamav/clamonacc.conf para compatibilidad total
+
+# Replicar configuración limpia en /etc/clamav/clamonacc.conf
 cp -f "$CLAMD_CONF" /etc/clamav/clamonacc.conf 2>/dev/null || true
 chmod 644 /etc/clamav/clamonacc.conf 2>/dev/null || true
 
