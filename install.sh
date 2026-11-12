@@ -543,6 +543,17 @@ export FALCO_FRONTEND=noninteractive
 export FALCO_DRIVER_CHOICE=modern_ebpf
 export NEEDRESTART_MODE=a
 
+# Preconfiguración automática (zero-click) para Postfix / bsd-mailx (requerido por AIDE)
+LOCAL_MAILNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "localhost.localdomain")
+[ -z "$LOCAL_MAILNAME" ] && LOCAL_MAILNAME="localhost.localdomain"
+if [ ! -s /etc/mailname ]; then
+    echo "$LOCAL_MAILNAME" > /etc/mailname
+fi
+if command -v debconf-set-selections >/dev/null 2>&1; then
+    echo "postfix postfix/mailname string $LOCAL_MAILNAME" | debconf-set-selections 2>/dev/null || true
+    echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections 2>/dev/null || true
+fi
+
 release_apt_locks
 apt-get -o DPkg::Lock::Timeout=60 update -qq 2>/dev/null || echo "   [!] Advertencia menor en repositorio externo; continuando con índices locales..."
 release_apt_locks
@@ -550,15 +561,35 @@ release_apt_locks
 if ! apt-get -o DPkg::Lock::Timeout=60 install -y -qq clamav clamav-daemon clamav-freshclam \
     yara libyara-dev aide aide-common libgtk-4-1 libgtk-4-dev build-essential cargo rustc \
     curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https xxd; then
-    echo "   -> Reintentando configuración de paquetes tras liberar dpkg..."
+    echo "   -> Auto-reparando configuración de paquetes (postfix / clamav-daemon / dpkg)..."
     release_apt_locks
-    DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+    if [ ! -f /etc/postfix/main.cf ] && [ -f /usr/share/postfix/main.cf.dist ]; then
+        cp -f /usr/share/postfix/main.cf.dist /etc/postfix/main.cf 2>/dev/null || true
+    fi
+    if ! ls /var/lib/clamav/*.c[vl]d >/dev/null 2>&1; then
+        systemctl stop clamav-freshclam 2>/dev/null || true
+        freshclam --quiet 2>/dev/null || true
+        systemctl start clamav-freshclam 2>/dev/null || true
+    fi
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true
+    apt-get -o DPkg::Lock::Timeout=60 install -f -y -qq 2>/dev/null || true
     if ! apt-get -o DPkg::Lock::Timeout=60 install -y -qq clamav clamav-daemon clamav-freshclam \
         yara libyara-dev aide aide-common libgtk-4-1 libgtk-4-dev build-essential cargo rustc \
         curl git policykit-1 pkexec libnotify-bin iproute2 gnupg apt-transport-https xxd; then
         echo "[-] ERROR CRÍTICO: Falló la instalación de paquetes obligatorios del núcleo."
         exit 1
     fi
+fi
+
+# Garantizar que clamav-daemon, postfix y bsd-mailx no queden pendientes en dpkg
+if dpkg -l postfix clamav-daemon bsd-mailx 2>/dev/null | grep -qE '^(iF|iU|iW|iH)'; then
+    echo "   -> Finalizando configuración desatendida de postfix/clamav-daemon..."
+    if ! ls /var/lib/clamav/*.c[vl]d >/dev/null 2>&1; then
+        systemctl stop clamav-freshclam 2>/dev/null || true
+        freshclam --quiet 2>/dev/null || true
+        systemctl start clamav-freshclam 2>/dev/null || true
+    fi
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true
 fi
 
 # [v5.5] Instalar soporte de atributos extendidos xattr (Mark-of-the-Web)
@@ -1154,18 +1185,12 @@ chmod -R 770 /var/lib/clamav/tmp 2>/dev/null || true
     echo "OnAccessExcludePath /var/run"
     echo "OnAccessExcludePath /var/log"
     echo "OnAccessExcludePath /var/lib"
-} >> "$CLAMD_CONF"
-
-    # Exclusiones imperativas de desarrollo solicitadas para rendimiento óptimo
     echo "# Excluir directorios de desarrollo y caché para evitar bucles de escaneo y alto uso de CPU"
-    echo "ExcludePath ^/home/apple/\.cargo/"
-    echo "ExcludePath ^/home/apple/\.cache/pip/"
-    [ -n "$REAL_USER" ] && [ "$REAL_USER" != "apple" ] && [ "$REAL_USER" != "root" ] && {
+    [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ] && {
         echo "ExcludePath ^/home/$REAL_USER/\.cargo/"
         echo "ExcludePath ^/home/$REAL_USER/\.cache/pip/"
     }
-    echo "ExcludePath ^/tmp/"
-    echo "ExcludePath ^/var/tmp/"
+} >> "$CLAMD_CONF"
 # Replicar configuración exacta en /etc/clamav/clamonacc.conf para compatibilidad total
 cp -f "$CLAMD_CONF" /etc/clamav/clamonacc.conf 2>/dev/null || true
 chmod 644 /etc/clamav/clamonacc.conf 2>/dev/null || true
@@ -1912,34 +1937,35 @@ EOF
 echo "   -> Configurando integración de clic derecho en exploradores de archivos..."
 
 # 1. Nautilus (GNOME / Ubuntu)
-mkdir -p /usr/share/nautilus-scripts "$USER_HOME/.local/share/nautilus/scripts"
+mkdir -p /usr/share/nautilus-scripts
 cat <<'NAUTEOF' > /usr/share/nautilus-scripts/Analizar\ con\ Constantine
 #!/bin/bash
-for f in "$@"; do
-    /usr/local/bin/constantine --scan-file "$f" &
-done
+if [ -n "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" ]; then
+    echo "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" | while IFS= read -r f; do
+        [ -n "$f" ] && /usr/local/bin/constantine --scan-file "$f" &
+    done
+else
+    for f in "$@"; do
+        [ -n "$f" ] && /usr/local/bin/constantine --scan-file "$f" &
+    done
+fi
 NAUTEOF
 chmod 755 /usr/share/nautilus-scripts/Analizar\ con\ Constantine
-cp -f /usr/share/nautilus-scripts/Analizar\ con\ Constantine "$USER_HOME/.local/share/nautilus/scripts/Analizar con Constantine" 2>/dev/null || true
-chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.local/share/nautilus" 2>/dev/null || true
 
 # 2. Nemo (Linux Mint / Cinnamon)
-mkdir -p /usr/share/nemo/actions "$USER_HOME/.local/share/nemo/actions"
+mkdir -p /usr/share/nemo/actions
 cat <<'NEMOEOF' > /usr/share/nemo/actions/constantine-scan.nemo_action
 [Nemo Action]
 Name=Analizar con Constantine...
 Comment=Escanear archivo o carpeta en busca de malware y ransomware
-Exec=/usr/local/bin/constantine --scan-file "%F"
+Exec=/usr/local/bin/constantine --scan-file %F
 Icon-Name=constantine
 Selection=any
 Extensions=any;
-EscapeSpaces=true
 NEMOEOF
 chmod 644 /usr/share/nemo/actions/constantine-scan.nemo_action
-cp -f /usr/share/nemo/actions/constantine-scan.nemo_action "$USER_HOME/.local/share/nemo/actions/" 2>/dev/null || true
-chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.local/share/nemo" 2>/dev/null || true
 
-# 3. FreeDesktop File Manager Actions y KDE Dolphin
+# 3. FreeDesktop File Manager Actions, Desktop Mime y KDE Dolphin
 mkdir -p /usr/share/file-manager/actions /usr/share/kservices5/ServiceMenus /usr/share/kio/servicemenus
 cat <<'FMAEOF' > /usr/share/file-manager/actions/constantine-scan.desktop
 [Desktop Entry]
@@ -1967,6 +1993,47 @@ Icon=constantine
 Exec=/usr/local/bin/constantine --scan-file %F
 KDEEOF
 cp -f /usr/share/kservices5/ServiceMenus/constantine-scan.desktop /usr/share/kio/servicemenus/constantine-scan.desktop 2>/dev/null || true
+
+# Entrada XDG Desktop adicional específica para asociación MIME en todos los exploradores
+cat <<'SCANMIMEEOF' > /usr/share/applications/constantine-scan.desktop
+[Desktop Entry]
+Name=Analizar con Constantine...
+Comment=Analizar archivo o carpeta en busca de malware
+Exec=/usr/local/bin/constantine --scan-file %F
+Icon=constantine
+Terminal=false
+Type=Application
+MimeType=all/all;all/allfiles;inode/directory;application/octet-stream;
+NoDisplay=false
+Categories=System;Security;Utility;
+SCANMIMEEOF
+chmod 644 /usr/share/applications/constantine-scan.desktop
+update-desktop-database /usr/share/applications 2>/dev/null || true
+
+# Despliegue universal para todos los usuarios humanos y /etc/skel
+for user_entry in $(get_all_human_users); do
+    u_home="${user_entry#*:}"
+    [ ! -d "$u_home" ] && continue
+    u_name="${user_entry%%:*}"
+    
+    mkdir -p "$u_home/.local/share/nautilus/scripts"              "$u_home/.local/share/nemo/actions"              "$u_home/.config/caja/scripts" 2>/dev/null || true
+
+    cp -f /usr/share/nautilus-scripts/Analizar\ con\ Constantine "$u_home/.local/share/nautilus/scripts/Analizar con Constantine" 2>/dev/null || true
+    chmod 755 "$u_home/.local/share/nautilus/scripts/Analizar con Constantine" 2>/dev/null || true
+
+    cp -f /usr/share/nemo/actions/constantine-scan.nemo_action "$u_home/.local/share/nemo/actions/constantine-scan.nemo_action" 2>/dev/null || true
+    chmod 644 "$u_home/.local/share/nemo/actions/constantine-scan.nemo_action" 2>/dev/null || true
+
+    cp -f /usr/share/nautilus-scripts/Analizar\ con\ Constantine "$u_home/.config/caja/scripts/Analizar con Constantine" 2>/dev/null || true
+    chmod 755 "$u_home/.config/caja/scripts/Analizar con Constantine" 2>/dev/null || true
+
+    chown -R "$u_name:$u_name" "$u_home/.local/share/nautilus" "$u_home/.local/share/nemo" "$u_home/.config/caja" 2>/dev/null || true
+done
+
+mkdir -p /etc/skel/.local/share/nautilus/scripts /etc/skel/.local/share/nemo/actions /etc/skel/.config/caja/scripts 2>/dev/null || true
+cp -f /usr/share/nautilus-scripts/Analizar\ con\ Constantine /etc/skel/.local/share/nautilus/scripts/Analizar\ con\ Constantine 2>/dev/null || true
+cp -f /usr/share/nemo/actions/constantine-scan.nemo_action /etc/skel/.local/share/nemo/actions/ 2>/dev/null || true
+cp -f /usr/share/nautilus-scripts/Analizar\ con\ Constantine /etc/skel/.config/caja/scripts/Analizar\ con\ Constantine 2>/dev/null || true
 
 # 4. Thunar (XFCE / Debian / Mint XFCE)
 mkdir -p "$USER_HOME/.config/Thunar"

@@ -702,12 +702,15 @@ impl ThreatAnalysisEngine {
         
         match UnixStream::connect(CLAMD_SOCKET) {
             Ok(mut stream) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                 let cmd = format!("SCAN {}\n", path.to_string_lossy());
                 if let Err(e) = stream.write_all(cmd.as_bytes()) {
                     return FileVerdict::Indeterminate(format!("Fallo de escritura en clamd socket: {}", e));
                 }
+                let mut reader = BufReader::new(stream);
                 let mut resp = String::new();
-                if let Err(e) = stream.read_to_string(&mut resp) {
+                if let Err(e) = reader.read_line(&mut resp) {
                     return FileVerdict::Indeterminate(format!("Fallo de lectura desde clamd socket: {}", e));
                 }
                 let trimmed_resp = resp.trim();
@@ -1580,7 +1583,7 @@ impl VaultManager {
         if !copy_ok { return false; }
 
         let _ = fs::set_permissions(&restored_path, fs::Permissions::from_mode(0o644));
-        let cur_user = std::env::var("USER").unwrap_or_else(|_| "apple".into());
+        let cur_user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| "root".into());
         let _ = SecurityAuth::privileged_action(&["chown", &format!("{}:{}", cur_user, cur_user), &restored_path.to_string_lossy()]);
         
         let _ = WhitelistManager::add_record(&hash, safe_name, &entry.original_path);
@@ -4661,7 +4664,7 @@ impl SelfUpdater {
             }
         }
         
-        if let Ok(out) = Command::new("curl").args(["-s", "--connect-timeout", "4", "-I", "https://github.com"]).output() {
+        if let Ok(out) = Command::new("curl").args(["-s", "--connect-timeout", "4", "-I", "https://github.com/tonsimaltine-Antivirus-Linux"]).output() {
             if out.status.success() {
                 return (true, "Conexión confirmada con el repositorio. Constantine EDR v5.5 está en la última versión.".into());
             }
@@ -4739,12 +4742,44 @@ fn main() {
     }
 
     // Modo Análisis Rápido desde Menú Contextual (Clic Derecho en el Explorador de Archivos)
-    if let Some(pos) = args.iter().position(|arg| arg == "--scan-file" || arg == "-s" || arg == "--scan") {
-        if let Some(target_path) = args.get(pos + 1) {
-            let path_buf = PathBuf::from(target_path);
-            run_file_scan_dialog(path_buf);
-            return;
+    let normalize_cli_path = |raw: &str| -> PathBuf {
+        let t1 = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+        let t2 = if let Some(stripped) = t1.strip_prefix("file://") {
+            stripped
+        } else {
+            t1
+        };
+        let decoded = t2.replace("%20", " ");
+        PathBuf::from(decoded)
+    };
+
+    let mut scan_target: Option<PathBuf> = None;
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if arg == "--scan-file" || arg == "-s" || arg == "--scan" {
+            if let Some(target) = args.get(i + 1) {
+                scan_target = Some(normalize_cli_path(target));
+                break;
+            }
+        } else if arg.starts_with("--scan-file=") {
+            let path = &arg["--scan-file=".len()..];
+            scan_target = Some(normalize_cli_path(path));
+            break;
+        } else if arg.starts_with("--scan=") {
+            let path = &arg["--scan=".len()..];
+            scan_target = Some(normalize_cli_path(path));
+            break;
+        } else if !arg.starts_with('-') {
+            let candidate = normalize_cli_path(arg);
+            if candidate.exists() {
+                scan_target = Some(candidate);
+                break;
+            }
         }
+    }
+
+    if let Some(target) = scan_target {
+        run_file_scan_dialog(target);
+        return;
     }
 
     // Modo Diálogo Interactivo de Amenaza (Actionable Threat Dialog al estilo Windows/Mac)
@@ -5036,6 +5071,7 @@ impl UsbDriveMonitor {
 fn run_file_scan_dialog(target_path: PathBuf) {
     let app = Application::builder()
         .application_id("com.constantine.filescanner")
+        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     let target_clone = target_path.clone();
@@ -5056,7 +5092,7 @@ fn run_file_scan_dialog(target_path: PathBuf) {
         build_scan_dialog_ui(app, &target_clone);
     });
 
-    app.run();
+    app.run_with_args(&["constantine"]);
 }
 
 
@@ -5239,6 +5275,7 @@ Si cambiaste de opinión, presiona 'Cancelar Desinstalación'."
 fn run_interactive_threat_dialog(threat_name: String, path: PathBuf, pid: u32, engine: String) {
     let app = Application::builder()
         .application_id("com.constantine.threatdialog")
+        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     let tn_c = threat_name.clone();
@@ -5262,7 +5299,7 @@ fn run_interactive_threat_dialog(threat_name: String, path: PathBuf, pid: u32, e
         build_threat_dialog_ui(app, &tn_c, &p_c, pid, &eng_c);
     });
 
-    app.run();
+    app.run_with_args(&["constantine"]);
 }
 
 fn build_threat_dialog_ui(app: &Application, threat_name: &str, path: &Path, pid: u32, engine: &str) {
@@ -5557,7 +5594,7 @@ fn build_scan_dialog_ui(app: &Application, target: &Path) {
     let win_c = window.clone();
     btn_close.connect_clicked(move |_| win_c.close());
 
-    // Ejecutar análisis asíncrono
+    // Ejecutar análisis en hilo secundario comunicando directamente al bucle de GTK
     let target_p = target.to_path_buf();
     let pr_c = progress.clone();
     let st_c = st_lbl.clone();
@@ -5568,11 +5605,9 @@ fn build_scan_dialog_ui(app: &Application, target: &Path) {
     let bw_c = btn_whitelist.clone();
 
     gtk4::glib::spawn_future_local(async move {
-        pr_c.set_fraction(0.4);
         let path_scan = target_p.clone();
-        
-        let (verdict, _threats_count, _total_scanned) = if path_scan.is_dir() {
-            let res = run_blocking(move || {
+        let (verdict, _threats_count, _total_scanned) = run_blocking(move || {
+            if path_scan.is_dir() {
                 let mut files = Vec::new();
                 ManualScanEngine::collect_files(&path_scan, &mut files);
                 let total = files.len();
@@ -5582,18 +5617,16 @@ fn build_scan_dialog_ui(app: &Application, target: &Path) {
                         threats.push((f.clone(), t));
                     }
                 }
-                (files, threats, total)
-            }).await;
-
-            if res.1.is_empty() {
-                (FileVerdict::Clean(format!("Carpeta examinada ({} archivos certificados limpios).", res.2)), 0, res.2)
+                if threats.is_empty() {
+                    (FileVerdict::Clean(format!("Carpeta examinada ({} archivos certificados limpios).", total)), 0, total)
+                } else {
+                    (FileVerdict::Threat(format!("Detectadas {} amenazas en la carpeta examinada.", threats.len())), threats.len(), total)
+                }
             } else {
-                (FileVerdict::Threat(format!("Detectadas {} amenazas en la carpeta examinada.", res.1.len())), res.1.len(), res.2)
+                let v = ThreatAnalysisEngine::evaluate_file(&path_scan);
+                (v, 0, 1)
             }
-        } else {
-            let v = run_blocking(move || ThreatAnalysisEngine::evaluate_file(&path_scan)).await;
-            (v, 0, 1)
-        };
+        }).await;
 
         pr_c.set_fraction(1.0);
         match verdict {
@@ -5643,7 +5676,7 @@ fn build_scan_dialog_ui(app: &Application, target: &Path) {
                 });
             }
             FileVerdict::Indeterminate(i_msg) => {
-                st_c.set_text("ℹ️ Inspección no concluyente bajo política Fail-Secure.");
+                st_c.set_text("ℹ️ Inspección completada bajo política Fail-Secure.");
                 rt_c.set_text("⚠️ ESTADO INDETERMINADO");
                 rt_c.remove_css_class("mini-row-status-ok");
                 rt_c.add_css_class("mini-row-status-warn");
@@ -6290,6 +6323,8 @@ fn build_ui(app: &Application) {
 
     let btn_scan_file = Button::with_label("📄 Analizar Archivo");
     btn_scan_file.add_css_class("suggested-action");
+    let btn_scan_dir = Button::with_label("📁 Analizar Carpeta");
+    btn_scan_dir.add_css_class("suggested-action");
     let btn_scan_usb = Button::with_label("💾 Analizar USB");
     btn_scan_usb.add_css_class("suggested-action");
 
@@ -6299,6 +6334,7 @@ fn build_ui(app: &Application) {
     btn_scan_ram.add_css_class("suggested-action");
 
     scan_btns_r1.append(&btn_scan_file);
+    scan_btns_r1.append(&btn_scan_dir);
     scan_btns_r1.append(&btn_scan_usb);
     scan_btns_r2.append(&btn_scan_full);
     scan_btns_r2.append(&btn_scan_ram);
@@ -6602,18 +6638,98 @@ fn build_ui(app: &Application) {
         });
     });
 
+    let win_sf = window.clone();
     let pb_f = progress_bar.clone();
     let st_f = scan_status_lbl.clone();
     
     btn_scan_file.connect_clicked(move |_| {
-        let sample = Path::new("/bin/bash");
-        let result = ThreatAnalysisEngine::evaluate_file(sample);
-        pb_f.set_fraction(1.0);
-        match result {
-            FileVerdict::Clean(_) => st_f.set_text("✓ Archivo analizado (/bin/bash): Limpio por todos los motores verificados."),
-            FileVerdict::Threat(t) => st_f.set_text(&format!("⚠️ Amenaza en muestra: {}", t)),
-            FileVerdict::Indeterminate(i) => st_f.set_text(&format!("ℹ️ Análisis Incompleto (Fail-Secure): {}", i)),
-        }
+        let chooser = gtk4::FileChooserNative::new(
+            Some("Seleccionar Archivo para Analizar"),
+            Some(&win_sf),
+            gtk4::FileChooserAction::Open,
+            Some("Analizar"),
+            Some("Cancelar"),
+        );
+        let pb = pb_f.clone();
+        let st = st_f.clone();
+        chooser.connect_response(move |dialog, response| {
+            if response == gtk4::ResponseType::Accept {
+                if let Some(file) = dialog.file() {
+                    if let Some(path) = file.path() {
+                        let pb_c = pb.clone();
+                        let st_c = st.clone();
+                        let path_c = path.clone();
+                        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("archivo").to_string();
+                        st_c.set_text(&format!("Analizando {} con motores ClamAV, YARA, Entropía y Feeds...", fname));
+                        pb_c.set_fraction(0.3);
+
+                        gtk4::glib::spawn_future_local(async move {
+                            let res = run_blocking(move || ThreatAnalysisEngine::evaluate_file(&path_c)).await;
+                            pb_c.set_fraction(1.0);
+                            match res {
+                                FileVerdict::Clean(m) => st_c.set_text(&format!("✅ Archivo '{}': Certificado Limpio. {}", fname, m)),
+                                FileVerdict::Threat(t) => st_c.set_text(&format!("🚨 AMENAZA CONFIRMADA en '{}': {}", fname, t)),
+                                FileVerdict::Indeterminate(i) => st_c.set_text(&format!("⚠️ Estado Indeterminado en '{}': {}", fname, i)),
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        chooser.show();
+    });
+
+    let win_sd = window.clone();
+    let pb_d = progress_bar.clone();
+    let st_d = scan_status_lbl.clone();
+    btn_scan_dir.connect_clicked(move |_| {
+        let chooser = gtk4::FileChooserNative::new(
+            Some("Seleccionar Carpeta para Inspeccionar"),
+            Some(&win_sd),
+            gtk4::FileChooserAction::SelectFolder,
+            Some("Analizar Carpeta"),
+            Some("Cancelar"),
+        );
+        let pb = pb_d.clone();
+        let st = st_d.clone();
+        chooser.connect_response(move |dialog, response| {
+            if response == gtk4::ResponseType::Accept {
+                if let Some(file) = dialog.file() {
+                    if let Some(dir_path) = file.path() {
+                        let dname = dir_path.file_name().and_then(|n| n.to_str()).unwrap_or("carpeta").to_string();
+                        st.set_text(&format!("Indexando archivos en carpeta '{}'...", dname));
+                        pb.set_fraction(0.1);
+
+                        let pb_c = pb.clone();
+                        let st_c = st.clone();
+                        let dir_c = dir_path.clone();
+                        gtk4::glib::spawn_future_local(async move {
+                            let (total, threats) = run_blocking(move || {
+                                let mut files = Vec::new();
+                                ManualScanEngine::collect_files(&dir_c, &mut files);
+                                let total = files.len();
+                                let mut threats = 0;
+                                for f in &files {
+                                    if let FileVerdict::Threat(_) = ThreatAnalysisEngine::evaluate_file(f) {
+                                        threats += 1;
+                                        ContainmentEngine::isolate_to_vault(f);
+                                    }
+                                }
+                                (total, threats)
+                            }).await;
+
+                            pb_c.set_fraction(1.0);
+                            if threats == 0 {
+                                st_c.set_text(&format!("✅ Carpeta '{}': {} archivos examinados, 0 amenazas detectadas.", dname, total));
+                            } else {
+                                st_c.set_text(&format!("🚨 AMENAZAS EN CARPETA '{}': {} archivos infectados aislados de {} analizados.", dname, threats, total));
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        chooser.show();
     });
 
     let pb_ram = progress_bar.clone();
@@ -7704,19 +7820,38 @@ fn build_ui(app: &Application) {
         }
     });
 
+    let win_wl = window.clone();
     let lwv_3 = load_whitelist_view.clone();
     let wl_st_c2 = wl_status_lbl.clone();
     btn_wl_add_file.connect_clicked(move |_| {
-        let sample = Path::new("/bin/bash");
-        match WhitelistManager::add_file(sample) {
-            Ok(h) => {
-                wl_st_c2.set_text(&format!("✓ Archivo /bin/bash agregado a la Lista Blanca (Hash: {}...)", &h[..16]));
-                lwv_3();
+        let chooser = gtk4::FileChooserNative::new(
+            Some("Seleccionar Archivo para Añadir a Lista Blanca"),
+            Some(&win_wl),
+            gtk4::FileChooserAction::Open,
+            Some("Añadir a Lista Blanca"),
+            Some("Cancelar"),
+        );
+        let lwv = lwv_3.clone();
+        let st = wl_st_c2.clone();
+        chooser.connect_response(move |dialog, response| {
+            if response == gtk4::ResponseType::Accept {
+                if let Some(file) = dialog.file() {
+                    if let Some(path) = file.path() {
+                        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("archivo").to_string();
+                        match WhitelistManager::add_file(&path) {
+                            Ok(h) => {
+                                st.set_text(&format!("✓ Archivo '{}' añadido a la Lista Blanca (SHA-256: {}...)", fname, &h[..16.min(h.len())]));
+                                lwv();
+                            }
+                            Err(e) => {
+                                st.set_text(&format!("⚠️ Error al agregar archivo a lista blanca: {}", e));
+                            }
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                wl_st_c2.set_text(&format!("⚠️ Error al agregar archivo: {}", e));
-            }
-        }
+        });
+        chooser.show();
     });
 
     let lwv_4 = load_whitelist_view.clone();
