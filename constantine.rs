@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v5.5.7 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.7)
+// Constantine Antivirus & EDR v5.5.8 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.8)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -1841,7 +1841,7 @@ impl ConstantineIpcServer {
         let action = val.get("action").and_then(|x| x.as_str()).unwrap_or("");
         match action {
             "ping" => {
-                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.7"}).to_string()
+                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.8"}).to_string()
             }
             "append_audit_log" => {
                 let ev = val.get("event_type").and_then(|x| x.as_str()).unwrap_or("SYSTEM_EVENT");
@@ -2494,7 +2494,7 @@ impl SystemUpdateAudit {
         // Fallback a terminal
         if Command::new("which").arg("x-terminal-emulator").output().map(|o| o.status.success()).unwrap_or(false) {
             if Command::new("x-terminal-emulator")
-                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.7'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
+                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.8'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
                 .spawn().is_ok() {
                 return true;
             }
@@ -2679,7 +2679,7 @@ impl ModuleVersionAudit {
         let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
         
         vec![
-            ("Constantine Core EDR", "v5.5.7 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
+            ("Constantine Core EDR", "v5.5.8 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
             (
                 "Escudo Anti-Ransomware",
                 format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
@@ -3763,7 +3763,7 @@ impl ExecutiveReportGenerator {
 <body>
     <div class="header">
         <div>
-            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.7</h1>
+            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.8</h1>
             <div class="subtitle">Informe Ejecutivo de Auditoría y Seguridad del Endpoint</div>
         </div>
         <div style="text-align: right;">
@@ -4984,7 +4984,7 @@ impl PeripheralAudit {
 // ==============================================================================
 // 14. Actualizador de Constantine desde Repositorio / GitHub
 // ==============================================================================
-pub const APP_VERSION: &str = "5.5.7";
+pub const APP_VERSION: &str = "5.5.8";
 pub const GITHUB_REPO_URL: &str = "https://github.com/AntonSiMal/Constantine-Antivirus-Linux";
 
 #[derive(Clone, Debug)]
@@ -5008,7 +5008,7 @@ impl SelfUpdater {
     }
 
     pub fn check_remote_version() -> UpdateCheckStatus {
-        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 7));
+        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 8));
         let mut remote_tag: Option<String> = None;
         let mut target_url = GITHUB_REPO_URL.to_string();
 
@@ -5039,7 +5039,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.7",
+                    "-H", "User-Agent: Constantine-EDR/5.5.8",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/releases/latest",
                 ])
                 .output()
@@ -5066,7 +5066,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.7",
+                    "-H", "User-Agent: Constantine-EDR/5.5.8",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/tags",
                 ])
                 .output()
@@ -5276,7 +5276,7 @@ fn main() {
         ConstantineIpcServer::start_daemon_ipc_server();
 
         let user_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        // [v5.5.7 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
+        // [v5.5.8 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
         AntiRansomwareShield::deploy_all_users_canaries();
         OnAccessSupervisor::start_realtime_event_consumer();
         TetragonPrimarySensor::start_primary_edr_consumer();
@@ -5379,7 +5379,7 @@ fn main() {
 // ==============================================================================
 
 // ==============================================================================
-// 29. [v5.5.7] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
+// 29. [v5.5.8] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
 // ==============================================================================
 pub struct DownloadQuarantineGuard;
 
@@ -5434,7 +5434,7 @@ impl DownloadQuarantineGuard {
                                             let _ = fs::set_permissions(&p, perms);
                                             ImmutableAuditLog::append_event(
                                                 "MOTW_EXECUTABLE_LOCKED",
-                                                &format!("Mark-of-the-Web v5.5.7 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
+                                                &format!("Mark-of-the-Web v5.5.8 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
                                             );
                                         }
                                     }
@@ -5443,7 +5443,7 @@ impl DownloadQuarantineGuard {
                                 // 3. Evaluar archivo descargado con el pipeline multi-motor
                                 match ThreatAnalysisEngine::evaluate_file(&p) {
                                     FileVerdict::Threat(reason) => {
-                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.7 (Multiusuario)");
+                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.8 (Multiusuario)");
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_QUARANTINED",
                                             &format!("Descarga maliciosa interceptada en home de usuario: {} ({})", p.display(), reason),
@@ -5457,7 +5457,7 @@ impl DownloadQuarantineGuard {
                                     }
                                     FileVerdict::Clean(_) => {
                                         let _ = Command::new("setfattr")
-                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.7", &p.to_string_lossy()])
+                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.8", &p.to_string_lossy()])
                                             .output();
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_VERIFIED",
@@ -5676,7 +5676,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&title1);
 
     let desc1 = Label::new(Some(
-        "Desinstalar Constantine Antivirus & EDR v5.5.7 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
+        "Desinstalar Constantine Antivirus & EDR v5.5.8 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
     ));
     desc1.add_css_class("subtitle-text");
     desc1.set_xalign(0.0);
@@ -5704,7 +5704,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&card_warn);
 
     let note1 = Label::new(Some(
-        "Constantine v5.5.7 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
+        "Constantine v5.5.8 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
     ));
     note1.add_css_class("subtitle-text");
     note1.set_xalign(0.0);
@@ -6381,7 +6381,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
     
-    let badge_lbl = Label::new(Some("v5.5.7"));
+    let badge_lbl = Label::new(Some("v5.5.8"));
     badge_lbl.add_css_class("badge-version");
     
     title_box.append(&title_lbl);
@@ -6576,7 +6576,7 @@ fn build_ui(app: &Application) {
     
     // Título Principal
     let head_dash_box = Box::new(Orientation::Vertical, 4);
-    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.7)"));
+    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.8)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     head_dash_box.append(&t_ov);
@@ -7409,7 +7409,7 @@ fn build_ui(app: &Application) {
     d_repo.set_wrap_mode(gtk4::pango::WrapMode::Word);
     card_repo_update.append(&d_repo);
     
-    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.7 (Debian Edition). Listo para comprobar."));
+    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.8 (Debian Edition). Listo para comprobar."));
     repo_status_lbl.set_xalign(0.0);
     repo_status_lbl.add_css_class("mini-row-status-ok");
     card_repo_update.append(&repo_status_lbl);
@@ -8758,7 +8758,7 @@ fn build_ui(app: &Application) {
     lscrolled.set_min_content_height(340);
 
     let audit_list = gtk4::ListBox::new();
-    audit_list.set_selection_mode(gtk4::SelectionMode::None);
+    audit_list.set_selection_mode(gtk4::SelectionMode::Single);
     audit_list.add_css_class("boxed-list");
     lscrolled.set_child(Some(&audit_list));
     lcard.append(&lscrolled);
@@ -8770,6 +8770,9 @@ fn build_ui(app: &Application) {
 
     let btn_copy_logs = Button::with_label("📋 Copiar Registros");
     btns_audit_actions.append(&btn_copy_logs);
+
+    let btn_audit_google = Button::with_label("🔍 Buscar en Google");
+    btns_audit_actions.append(&btn_audit_google);
 
     let btn_purge_24h = Button::with_label("🧹 Borrar > 24h");
     btn_purge_24h.add_css_class("destructive-action");
@@ -8795,6 +8798,7 @@ fn build_ui(app: &Application) {
     use std::cell::RefCell;
     let all_logs_cache: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let visible_rows_cache: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let selected_audit_query: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let active_cat_filter: Rc<RefCell<String>> = Rc::new(RefCell::new("all".to_string()));
     let sort_col_state: Rc<RefCell<(&'static str, bool)>> = Rc::new(RefCell::new(("ts", true))); // true = Mayor a Menor (descendente)
 
@@ -8820,6 +8824,50 @@ fn build_ui(app: &Application) {
             b.clipboard().set_text(&text);
             copy_lbl_c.set_text(&format!("✓ {} registro(s) forenses copiados al portapapeles.", rows.len()));
         }
+    });
+
+    {
+        let vis_sel = visible_rows_cache.clone();
+        let sel_q = selected_audit_query.clone();
+        audit_list.connect_row_selected(move |_, row_opt| {
+            if let Some(row) = row_opt {
+                let idx = row.index();
+                if idx >= 0 {
+                    let rows = vis_sel.borrow();
+                    if let Some(txt) = rows.get(idx as usize) {
+                        *sel_q.borrow_mut() = Some(txt.clone());
+                    }
+                }
+            }
+        });
+    }
+
+    let goog_lbl_c = lbl_report_status.clone();
+    let sel_goog_c = selected_audit_query.clone();
+    let vis_goog_c = visible_rows_cache.clone();
+    let search_goog_c = search_audit.clone();
+    btn_audit_google.connect_clicked(move |_| {
+        let raw_target = if let Some(ref s) = *sel_goog_c.borrow() {
+            s.clone()
+        } else {
+            let q = search_goog_c.text().trim().to_string();
+            if !q.is_empty() {
+                q
+            } else {
+                vis_goog_c.borrow().first().cloned().unwrap_or_else(|| "linux edr security audit event".to_string())
+            }
+        };
+        let clean_q: String = raw_target
+            .chars()
+            .take(140)
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join("+");
+        let url = format!("https://www.google.com/search?q={}", clean_q);
+        let _ = Command::new("xdg-open").arg(&url).spawn();
+        goog_lbl_c.set_text(&format!("🔍 Búsqueda en Google abierta para: {}", raw_target.chars().take(80).collect::<String>()));
     });
 
     let pdf_lbl_c = lbl_report_status.clone();
@@ -9068,11 +9116,30 @@ fn build_ui(app: &Application) {
                         st_row_c.set_text("✓ Registro forense copiado al portapapeles.");
                     });
 
+                    let btn_row_google = Button::with_label("🔍");
+                    btn_row_google.set_tooltip_text(Some("Buscar este evento en Google"));
+                    let row_search_txt = format!("{} {}", item.ev, item.det);
+                    let st_row_g = rpt_status_row.clone();
+                    btn_row_google.connect_clicked(move |_| {
+                        let clean_q: String = row_search_txt
+                            .chars()
+                            .take(140)
+                            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' { c } else { ' ' })
+                            .collect::<String>()
+                            .split_whitespace()
+                            .collect::<Vec<&str>>()
+                            .join("+");
+                        let url = format!("https://www.google.com/search?q={}", clean_q);
+                        let _ = Command::new("xdg-open").arg(&url).spawn();
+                        st_row_g.set_text(&format!("🔍 Búsqueda en Google abierta para: {}", row_search_txt.chars().take(70).collect::<String>()));
+                    });
+
                     row_box.append(&l_ts);
                     row_box.append(&l_cat);
                     row_box.append(&l_ev);
                     row_box.append(&l_det);
                     row_box.append(&btn_row_copy);
+                    row_box.append(&btn_row_google);
                     list_w.append(&row_box);
                 }
             }
