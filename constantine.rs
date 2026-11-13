@@ -1,5 +1,5 @@
 // ==============================================================================
-// Constantine Antivirus & EDR v5.5.8 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.8)
+// Constantine Antivirus & EDR v5.5.9 - Aplicación Nativa en Rust (GTK4 Cupertino v5.5.9)
 // Orientado a Distribuciones Debian (Ubuntu, Linux Mint, Debian puro)
 //
 // Módulo de Protección Anti-Ransomware en Cuatro Capas:
@@ -73,19 +73,20 @@ const CANARY_FILES: [&str; 4] = [
 ];
 
 const CUPERTINO_CSS: &str = r#"
+/* MacTahoe Liquid Glass Aesthetic for Constantine EDR */
 window, .background {
-    background-color: #1c1c1e;
+    background-color: #161618;
     color: #f5f5f7;
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', 'Ubuntu', 'Cantarell', sans-serif;
 }
 
 headerbar.macos-headerbar, .titlebar {
-    background-image: none;
-    background-color: #1a1a1c;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    min-height: 48px;
-    padding: 0 12px;
-    box-shadow: none;
+    background-image: linear-gradient(to bottom, rgba(44, 44, 48, 0.88), rgba(28, 28, 32, 0.92));
+    background-color: rgba(30, 30, 34, 0.90);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+    min-height: 50px;
+    padding: 0 14px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 button.titlebutton.close, .titlebutton.close {
@@ -128,64 +129,66 @@ button.titlebutton.maximize, .titlebutton.maximize {
     font-size: 13.5pt;
     font-weight: 700;
     color: #ffffff;
+    letter-spacing: -0.2px;
 }
 
 .subtitle-text {
     font-size: 8.5pt;
-    color: #86868b;
+    color: #98989d;
 }
 
 .badge-version {
-    background-color: rgba(0, 113, 227, 0.2);
-    color: #0a84ff;
-    border: 1px solid rgba(0, 113, 227, 0.35);
-    border-radius: 6px;
-    padding: 2px 7px;
+    background-color: rgba(10, 132, 255, 0.18);
+    color: #409cff;
+    border: 1px solid rgba(10, 132, 255, 0.40);
+    border-radius: 9999px;
+    padding: 2px 9px;
     font-size: 7.5pt;
     font-weight: 700;
 }
 
-
-.kpi-card {
-    background-color: #242426;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    padding: 12px 14px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+.kpi-card, .macos-card {
+    background-color: rgba(36, 36, 40, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 16px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .kpi-title {
     font-size: 8pt;
     font-weight: 600;
-    color: #86868b;
+    color: #98989d;
     text-transform: uppercase;
+    letter-spacing: 0.4px;
 }
 
 .kpi-value {
-    font-size: 15pt;
+    font-size: 16pt;
     font-weight: 700;
     color: #ffffff;
 }
 
 .kpi-subtitle {
     font-size: 8pt;
-    color: #a1a1a6;
+    color: #aeaeb2;
 }
 
 .health-btn {
-    background-color: rgba(48, 209, 88, 0.12);
-    border: 1px solid rgba(48, 209, 88, 0.3);
+    background-color: rgba(48, 209, 88, 0.14);
+    border: 1px solid rgba(48, 209, 88, 0.35);
     border-radius: 9999px;
-    padding: 3px 10px;
+    padding: 4px 12px;
+    transition: all 150ms ease;
 }
 
 .health-btn:hover {
-    background-color: rgba(48, 209, 88, 0.22);
+    background-color: rgba(48, 209, 88, 0.25);
 }
 
 .health-box {
-    background-color: rgba(48, 209, 88, 0.12);
-    border: 1px solid rgba(48, 209, 88, 0.3);
+    background-color: rgba(48, 209, 88, 0.14);
+    border: 1px solid rgba(48, 209, 88, 0.35);
     border-radius: 9999px;
     padding: 4px 12px;
 }
@@ -196,12 +199,16 @@ button.titlebutton.maximize, .titlebutton.maximize {
     font-size: 10pt;
 }
 
+/* Sidebar flotante estilo MacTahoe */
 .sidebar-box {
-    background-color: #141416;
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    min-width: 165px;
-    max-width: 175px;
-    padding: 4px;
+    background-color: rgba(28, 28, 32, 0.80);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 16px;
+    min-width: 170px;
+    max-width: 182px;
+    padding: 8px 6px;
+    margin: 8px 0 8px 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 button.nav-btn {
@@ -209,73 +216,67 @@ button.nav-btn {
     background-color: transparent;
     color: #e5e5ea;
     border: none;
-    border-radius: 7px;
-    padding: 7px 10px;
-    margin: 1px 6px;
+    border-radius: 10px;
+    padding: 8px 11px;
+    margin: 2px 4px;
     font-weight: 500;
     box-shadow: none;
-    transition: all 120ms ease;
+    transition: all 150ms ease;
 }
 
 button.nav-btn:hover {
-    background-color: rgba(255, 255, 255, 0.08);
+    background-color: rgba(255, 255, 255, 0.09);
     color: #ffffff;
 }
 
 button.nav-btn.nav-btn-active {
-    background-image: none;
-    background-color: #0071e3;
+    background-image: linear-gradient(to bottom, #1a8cff, #0a84ff);
+    background-color: #0a84ff;
     color: #ffffff;
-    border: none;
-    border-radius: 7px;
-    box-shadow: 0 1px 4px rgba(0, 113, 227, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+    font-weight: 600;
+    box-shadow: 0 2px 10px rgba(10, 132, 255, 0.38);
 }
 
 .mini-status-card {
-    background-color: #1e1e20;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
+    background-color: rgba(24, 24, 28, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 14px;
     padding: 12px 14px;
-    margin: 10px 10px 14px 10px;
+    margin: 10px 6px 8px 6px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .mini-row-title {
     font-size: 8pt;
-    color: #86868b;
+    color: #98989d;
     font-weight: 500;
 }
 
 .mini-row-status-ok {
-    font-size: 8pt;
+    font-size: 8.5pt;
     color: #30d158;
     font-weight: 600;
 }
 
 .mini-row-status-warn {
-    font-size: 8pt;
+    font-size: 8.5pt;
     color: #ff9f0a;
     font-weight: 600;
 }
 
 .mini-row-status-alert {
-    font-size: 8pt;
+    font-size: 8.5pt;
     color: #ff453a;
     font-weight: 600;
-}
-
-.macos-card {
-    background-color: #242426;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    padding: 12px 14px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .macos-table-header {
     font-size: 9pt;
     font-weight: 700;
-    color: #86868b;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    color: #aeaeb2;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
     padding-bottom: 6px;
 }
 
@@ -285,51 +286,109 @@ button.nav-btn.nav-btn-active {
     padding: 4px 0;
 }
 
+.stat-pill {
+    background-color: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9999px;
+    padding: 4px 12px;
+    font-size: 8.5pt;
+    font-weight: 600;
+    color: #f5f5f7;
+}
+
 button {
     background-image: none;
     background-color: rgba(255, 255, 255, 0.08);
     color: #f5f5f7;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 10px;
     padding: 6px 14px;
     font-weight: 500;
     font-size: 9.5pt;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-    transition: all 120ms ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    transition: all 150ms ease;
 }
 
 button:hover {
-    background-color: rgba(255, 255, 255, 0.14);
-    border-color: rgba(255, 255, 255, 0.2);
+    background-color: rgba(255, 255, 255, 0.15);
+    border-color: rgba(255, 255, 255, 0.24);
     color: #ffffff;
 }
 
+button.filter-btn {
+    border-radius: 9999px;
+    padding: 5px 12px;
+    font-size: 8.5pt;
+}
+
 button.suggested-action {
-    background-image: none;
-    background-color: #0071e3;
-    border: 1px solid #0a84ff;
+    background-image: linear-gradient(to bottom, #1a8cff, #0a84ff);
+    background-color: #0a84ff;
+    border: 1px solid rgba(255, 255, 255, 0.22);
     color: #ffffff;
     font-weight: 600;
+    box-shadow: 0 2px 10px rgba(10, 132, 255, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.20);
+}
+
+button.suggested-action:hover {
+    background-image: linear-gradient(to bottom, #409cff, #1a8cff);
+    background-color: #409cff;
 }
 
 button.destructive-action, button.power-btn {
     background-image: none;
-    background-color: rgba(255, 69, 58, 0.15);
-    border: 1px solid rgba(255, 69, 58, 0.35);
-    color: #ff453a;
+    background-color: rgba(255, 69, 58, 0.16);
+    border: 1px solid rgba(255, 69, 58, 0.38);
+    color: #ff6961;
     font-weight: 600;
 }
 
 button.destructive-action:hover, button.power-btn:hover {
     background-color: #ff453a;
+    border-color: #ff6961;
     color: #ffffff;
+}
+
+entry {
+    background-color: rgba(0, 0, 0, 0.28);
+    color: #f5f5f7;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    padding: 7px 12px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: all 150ms ease;
+}
+
+entry:focus {
+    border-color: #0a84ff;
+    box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.38);
+}
+
+listbox.boxed-list {
+    background-color: transparent;
+}
+
+listbox.boxed-list > row {
+    border-radius: 10px;
+    margin: 2px 4px;
+    padding: 4px 6px;
+    transition: background-color 120ms ease;
+}
+
+listbox.boxed-list > row:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+listbox.boxed-list > row:selected {
+    background-color: rgba(10, 132, 255, 0.22);
+    border: 1px solid rgba(10, 132, 255, 0.45);
 }
 
 switch {
     background-image: none;
     background-color: #39393d;
     border-radius: 14px;
-    border: none;
+    border: 1px solid rgba(255, 255, 255, 0.08);
     min-width: 44px;
     min-height: 24px;
     transition: background-color 150ms ease;
@@ -337,19 +396,19 @@ switch {
 
 switch:checked {
     background-image: none;
-    background-color: #34c759;
+    background-color: #30d158;
 }
 
 progressbar trough {
-    background-color: #2c2c2e;
-    border-radius: 6px;
+    background-color: rgba(255, 255, 255, 0.09);
+    border-radius: 9999px;
     min-height: 8px;
 }
 
 progressbar progress {
     background-image: none;
-    background-color: #34c759;
-    border-radius: 5px;
+    background-color: #30d158;
+    border-radius: 9999px;
 }
 
 progressbar.scanning progress {
@@ -357,9 +416,28 @@ progressbar.scanning progress {
 }
 
 scrolledwindow {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 10px;
-    background-color: #1c1c1e;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+    background-color: rgba(22, 22, 26, 0.65);
+}
+
+scrollbar trough {
+    background-color: transparent;
+}
+
+scrollbar slider {
+    background-color: rgba(255, 255, 255, 0.22);
+    border-radius: 9999px;
+    min-width: 6px;
+    min-height: 6px;
+    margin: 2px;
+    transition: all 150ms ease;
+}
+
+scrollbar slider:hover {
+    background-color: rgba(255, 255, 255, 0.38);
+    min-width: 8px;
+    min-height: 8px;
 }
 "#;
 
@@ -1841,7 +1919,7 @@ impl ConstantineIpcServer {
         let action = val.get("action").and_then(|x| x.as_str()).unwrap_or("");
         match action {
             "ping" => {
-                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.8"}).to_string()
+                serde_json::json!({"status": "ok", "message": "pong", "version": "5.5.9"}).to_string()
             }
             "append_audit_log" => {
                 let ev = val.get("event_type").and_then(|x| x.as_str()).unwrap_or("SYSTEM_EVENT");
@@ -2494,7 +2572,7 @@ impl SystemUpdateAudit {
         // Fallback a terminal
         if Command::new("which").arg("x-terminal-emulator").output().map(|o| o.status.success()).unwrap_or(false) {
             if Command::new("x-terminal-emulator")
-                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.8'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
+                .args(["-e", "sh", "-c", "echo '🔄 Actualizador de Constantine EDR v5.5.9'; pkexec apt update && pkexec apt upgrade; echo 'Presione Enter para cerrar...'; read line"])
                 .spawn().is_ok() {
                 return true;
             }
@@ -2679,7 +2757,7 @@ impl ModuleVersionAudit {
         let aide_ready = fs::metadata(AIDE_DB_FILE).map(|m| m.len() > 0).unwrap_or(false);
         
         vec![
-            ("Constantine Core EDR", "v5.5.8 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
+            ("Constantine Core EDR", "v5.5.9 (Debian Edition)".into(), "Binario Nativo Rust Activo".into()),
             (
                 "Escudo Anti-Ransomware",
                 format!("{}/{} Señuelos Activos", active_canaries, CANARY_FILES.len()),
@@ -3763,7 +3841,7 @@ impl ExecutiveReportGenerator {
 <body>
     <div class="header">
         <div>
-            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.8</h1>
+            <h1 class="title">🛡️ CONSTANTINE ANTIVIRUS & EDR v5.5.9</h1>
             <div class="subtitle">Informe Ejecutivo de Auditoría y Seguridad del Endpoint</div>
         </div>
         <div style="text-align: right;">
@@ -4984,7 +5062,7 @@ impl PeripheralAudit {
 // ==============================================================================
 // 14. Actualizador de Constantine desde Repositorio / GitHub
 // ==============================================================================
-pub const APP_VERSION: &str = "5.5.8";
+pub const APP_VERSION: &str = "5.5.9";
 pub const GITHUB_REPO_URL: &str = "https://github.com/AntonSiMal/Constantine-Antivirus-Linux";
 
 #[derive(Clone, Debug)]
@@ -5008,7 +5086,7 @@ impl SelfUpdater {
     }
 
     pub fn check_remote_version() -> UpdateCheckStatus {
-        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 8));
+        let local_ver = Self::parse_semver(APP_VERSION).unwrap_or((5, 5, 9));
         let mut remote_tag: Option<String> = None;
         let mut target_url = GITHUB_REPO_URL.to_string();
 
@@ -5039,7 +5117,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.8",
+                    "-H", "User-Agent: Constantine-EDR/5.5.9",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/releases/latest",
                 ])
                 .output()
@@ -5066,7 +5144,7 @@ impl SelfUpdater {
                     "-sSL",
                     "--connect-timeout", "5",
                     "--max-time", "10",
-                    "-H", "User-Agent: Constantine-EDR/5.5.8",
+                    "-H", "User-Agent: Constantine-EDR/5.5.9",
                     "https://api.github.com/repos/AntonSiMal/Constantine-Antivirus-Linux/tags",
                 ])
                 .output()
@@ -5276,7 +5354,7 @@ fn main() {
         ConstantineIpcServer::start_daemon_ipc_server();
 
         let user_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        // [v5.5.8 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
+        // [v5.5.9 Multiusuario] Despliegue de señuelos Canary en todos los usuarios existentes y en /etc/skel
         AntiRansomwareShield::deploy_all_users_canaries();
         OnAccessSupervisor::start_realtime_event_consumer();
         TetragonPrimarySensor::start_primary_edr_consumer();
@@ -5379,7 +5457,7 @@ fn main() {
 // ==============================================================================
 
 // ==============================================================================
-// 29. [v5.5.8] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
+// 29. [v5.5.9] Cuarentena Preventiva de Descargas (Mark-of-the-Web / xattr)
 // ==============================================================================
 pub struct DownloadQuarantineGuard;
 
@@ -5434,7 +5512,7 @@ impl DownloadQuarantineGuard {
                                             let _ = fs::set_permissions(&p, perms);
                                             ImmutableAuditLog::append_event(
                                                 "MOTW_EXECUTABLE_LOCKED",
-                                                &format!("Mark-of-the-Web v5.5.8 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
+                                                &format!("Mark-of-the-Web v5.5.9 (Multiusuario): Permiso +x retirado preventivamente en: {}", p.display()),
                                             );
                                         }
                                     }
@@ -5443,7 +5521,7 @@ impl DownloadQuarantineGuard {
                                 // 3. Evaluar archivo descargado con el pipeline multi-motor
                                 match ThreatAnalysisEngine::evaluate_file(&p) {
                                     FileVerdict::Threat(reason) => {
-                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.8 (Multiusuario)");
+                                        let _ = ContainmentEngine::isolate_to_vault_with_metadata(&p, &reason, "Mark-of-the-Web Download Guard v5.5.9 (Multiusuario)");
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_QUARANTINED",
                                             &format!("Descarga maliciosa interceptada en home de usuario: {} ({})", p.display(), reason),
@@ -5457,7 +5535,7 @@ impl DownloadQuarantineGuard {
                                     }
                                     FileVerdict::Clean(_) => {
                                         let _ = Command::new("setfattr")
-                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.8", &p.to_string_lossy()])
+                                            .args(["-n", "user.constantine.verified", "-v", "clean_v5.5.9", &p.to_string_lossy()])
                                             .output();
                                         ImmutableAuditLog::append_event(
                                             "MOTW_DOWNLOAD_VERIFIED",
@@ -5676,7 +5754,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&title1);
 
     let desc1 = Label::new(Some(
-        "Desinstalar Constantine Antivirus & EDR v5.5.8 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
+        "Desinstalar Constantine Antivirus & EDR v5.5.9 desmantelará la protección y dejará tu computadora expuesta a los siguientes riesgos inmediatos:"
     ));
     desc1.add_css_class("subtitle-text");
     desc1.set_xalign(0.0);
@@ -5704,7 +5782,7 @@ fn run_uninstall_dialog(parent: &ApplicationWindow) {
     box1.append(&card_warn);
 
     let note1 = Label::new(Some(
-        "Constantine v5.5.8 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
+        "Constantine v5.5.9 opera de forma ligera, 100% privada y sin telemetría. Para mantener la integridad de tu sistema, recomendamos fuertemente cancelar y permanecer protegido."
     ));
     note1.add_css_class("subtitle-text");
     note1.set_xalign(0.0);
@@ -6381,7 +6459,7 @@ fn build_ui(app: &Application) {
     let title_lbl = Label::new(Some("Constantine EDR"));
     title_lbl.add_css_class("title-text");
     
-    let badge_lbl = Label::new(Some("v5.5.8"));
+    let badge_lbl = Label::new(Some("v5.5.9"));
     badge_lbl.add_css_class("badge-version");
     
     title_box.append(&title_lbl);
@@ -6576,7 +6654,7 @@ fn build_ui(app: &Application) {
     
     // Título Principal
     let head_dash_box = Box::new(Orientation::Vertical, 4);
-    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.8)"));
+    let t_ov = Label::new(Some("Panel de Control Ejecutivo & KPIs de Seguridad (EDR v5.5.9)"));
     t_ov.add_css_class("title-text");
     t_ov.set_xalign(0.0);
     head_dash_box.append(&t_ov);
@@ -7409,7 +7487,7 @@ fn build_ui(app: &Application) {
     d_repo.set_wrap_mode(gtk4::pango::WrapMode::Word);
     card_repo_update.append(&d_repo);
     
-    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.8 (Debian Edition). Listo para comprobar."));
+    let repo_status_lbl = Label::new(Some("Versión actual: v5.5.9 (Debian Edition). Listo para comprobar."));
     repo_status_lbl.set_xalign(0.0);
     repo_status_lbl.add_css_class("mini-row-status-ok");
     card_repo_update.append(&repo_status_lbl);
